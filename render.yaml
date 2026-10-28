@@ -17,6 +17,11 @@
 #                                promotes the deploy once the DB answers)
 #   * COOKIE_SAME_SITE=none     (frontend and API are on different sites)
 #
+# Keep the `envVars:` list in step with backend/src/config/env.ts — that file
+# exit(1)s at boot when a required variable is missing, and Render only sets
+# what is declared here. `cd backend && npm run check:render-env` (a CI step in
+# .github/workflows/ci.yml) fails the build on that drift.
+#
 # Values marked `sync: false` are secrets: Render prompts for them on the
 # first Blueprint sync and never reads them from git.
 # =====================================================================
@@ -64,8 +69,26 @@ services:
         sync: false
       - key: STAFF_PIN
         sync: false
+      # Owner/manager console PIN for POST /api/v1/auth/admin-login. Added after
+      # the Blueprint was first created — without it src/config/env.ts exits(1)
+      # at boot and the service crash-loops, so the health check never passes.
+      # Keep it different from STAFF_PIN (the admin console can archive tables).
+      - key: ADMIN_PIN
+        sync: false
       - key: KDS_TOKEN_SECRET
         sync: false
       # Optional: without it the app runs REST-only (no Realtime).
       - key: SUPABASE_JWT_SECRET
         sync: false
+      # ---- Dish photos -------------------------------------------------
+      # Default is the postgres byte store: durable on a host whose disk is
+      # wiped on every deploy, and it needs no extra account — so it is pinned
+      # as a value here rather than left to chance. Switching to
+      # IMAGE_STORAGE=supabase additionally needs SUPABASE_URL and
+      # SUPABASE_SERVICE_ROLE_KEY: add them under Environment in the dashboard
+      # (service_role must never be committed, even as sync: false) and make
+      # the bucket PUBLIC READ — diners fetch it anonymously.
+      - key: IMAGE_STORAGE
+        value: postgres
+      - key: SUPABASE_MENU_BUCKET
+        value: menu-images

@@ -32,7 +32,7 @@ Two things this guide is honest about up front:
    instances).
 2. **New +** → **Blueprint** → connect `kriti-on-git/AeyChhotu`.
 3. Render reads [`render.yaml`](../render.yaml) and shows one service, `aeychhotu-api`. It prompts for
-   the five `sync: false` values:
+   the six `sync: false` values:
 
    > **Naming note:** Render makes the `onrender.com` subdomain globally unique. If the plain name
    > `aeychhotu-api` is already taken it appends a random suffix, so the *service name* and the
@@ -44,6 +44,7 @@ Two things this guide is honest about up front:
    | `CLIENT_URL` | `http://localhost:3000` for now — replaced in §3 (comma-separate to keep both) |
    | `DATABASE_URL` | Supabase → **Connect** → **Session pooler** URI (`aws-0-<region>.pooler.supabase.com:5432`). **Not** the direct `db.<ref>.supabase.co` host — that one is IPv6-only and Render's egress is IPv4 |
    | `STAFF_PIN` | same as local |
+   | `ADMIN_PIN` | 4–6 digits, **different** from `STAFF_PIN` — gates the `/admin` console. `env.ts` refuses to boot without it |
    | `KDS_TOKEN_SECRET` | same as local |
    | `SUPABASE_JWT_SECRET` | same as local (omit/blank ⇒ REST-only, no Realtime) |
 
@@ -66,6 +67,10 @@ It pins the four settings that are easy to get wrong by hand:
   fails with `tsc: not found`.
 - `healthCheckPath: /api/v1/ready` — the readiness probe, not liveness.
 - `COOKIE_SAME_SITE=none` — frontend and API are on different sites; `env.ts` forces `Secure` for it.
+- the `envVars:` list matches what `src/config/env.ts` hard-requires. `env.ts` exits(1) at boot
+  when a required variable is absent and Render only sets what the Blueprint declares, so the two
+  silently drifting apart is exactly the crash-loop this guide's §1 warns about. CI guards it:
+  `cd backend && npm run check:render-env` fails when a required var is not declared here.
 
 ---
 

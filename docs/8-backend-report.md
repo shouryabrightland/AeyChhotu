@@ -32,7 +32,7 @@ Express 5.2.1 · pg 8.23.0 · zod 4.6.5 · TypeScript 6.0.3 (tsx dev runtime) �
 | RLS as anon | ✅ SELECT 12 rows / INSERT → `permission denied` |
 
 ## Security posture
-- `service_role` never leaves the server; `STAFF_PIN` / `KDS_TOKEN_SECRET` never appear in payloads or logs.
+- `service_role` never leaves the server; `STAFF_PIN` / `ADMIN_PIN` / `KDS_TOKEN_SECRET` never appear in payloads or logs.
 - Missing/invalid env → loud `exit(1)` at boot (`src/config/env.ts`).
 - `.env` and local `.pgdata/` are gitignored; only `.env.example` is tracked.
 

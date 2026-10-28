@@ -28,6 +28,11 @@ const hasDatabase = Boolean(process.env.DATABASE_URL?.trim());
 process.env.DATABASE_URL ??= "postgresql://unused:unused@127.0.0.1:5432/unused";
 process.env.CLIENT_URL ??= "http://localhost:3000";
 process.env.STAFF_PIN ??= "000000";
+/* clearTableAsAdmin() pulls in admin.service.ts → env.ts, which hard-requires
+   ADMIN_PIN. Without this default the suite dies at load on any machine that
+   has no backend/.env (fresh clone, CI) — it only ever passed locally because
+   a developer .env happened to supply it. */
+process.env.ADMIN_PIN ??= "998877";
 process.env.KDS_TOKEN_SECRET ??= "test-only-secret-not-used-anywhere-else";
 
 const { AppError } = await import("../src/errors/app-error.js");

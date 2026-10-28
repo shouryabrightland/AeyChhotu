@@ -553,6 +553,7 @@ commands. Both apps are push-to-deploy on `main`.
 | `CLIENT_URL` | **yes** | `http://localhost:3000` | CORS allow-list — one origin, or several **comma-separated** (prod domain + Vercel preview URLs). No trailing slash |
 | `DATABASE_URL` | **yes** | `postgresql://…` | Postgres/Supabase connection string — server refuses to boot without it |
 | `STAFF_PIN` | **yes** | `1234` | 4–6 digit kitchen PIN; validated at boot |
+| `ADMIN_PIN` | **yes** | `998877` | 4–6 digit **manager** PIN for `/admin` (`POST /api/v1/auth/admin-login`). Separate from `STAFF_PIN` on purpose — the admin console archives tables and rewrites the catalog. Validated at boot: missing or non-numeric ⇒ the server refuses to start |
 | `KDS_TOKEN_SECRET` | **yes** | long random string | HMAC secret for shift JWTs |
 | `SUPABASE_JWT_SECRET` | no | from Supabase → Settings → API | When set, E1/E2 also mint the RLS-scoped `realtime_token`. Empty ⇒ REST-only, by design |
 | `COOKIE_SAME_SITE` | no | `strict` | `strict` \| `lax` \| `none` for the httpOnly `kds_token` cookie. Use `none` when frontend and API live on **different sites** — it forces `Secure` automatically |
@@ -726,7 +727,7 @@ typecheck/lint/build on both apps — and, verified end-to-end against a live Su
 | **Coverage gate** | Unit tests cover the highest-risk pure logic; there is no coverage percentage gate in CI yet |
 | **Licence** | No LICENSE file (deliberate, for now) |
 | **CSP** | `Content-Security-Policy` not yet set on either app — needs nonce plumbing with Next inlines; the rest of the header set is in place |
-| **Secrets rotation** | `KDS_TOKEN_SECRET`/`STAFF_PIN` rotation is manual (restart with new values); no dual-secret overlap window |
+| **Secrets rotation** | `KDS_TOKEN_SECRET`/`STAFF_PIN`/`ADMIN_PIN` rotation is manual (restart with new values); no dual-secret overlap window |
 | **Bill endpoint** | “Get bill now” syncs inside one browser only (`localStorage` + `BroadcastChannel`). A `bill_requests` table + endpoint would let a diner’s phone and a floor tablet see it across devices — sketched in [`docs/7`](docs/7-api-contract.md) §7 |
 
 Full engineering detail lives in the [docs index](#-documentation-index) — especially

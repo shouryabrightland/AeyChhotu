@@ -94,6 +94,10 @@ jobs:
       # Any PIN works: the seed stores the *name* of the env var, not the
       # value, and this secret must never be the real one.
       STAFF_PIN: "000000"
+      # env.ts hard-requires a second PIN for the admin console; without it
+      # `npm start` exits(1) before binding a port and the smoke step below
+      # would be hitting a server that never came up.
+      ADMIN_PIN: "654321"
       KDS_TOKEN_SECRET: ci-only-secret-not-used-anywhere-else
       # Left unset on purpose: without SUPABASE_JWT_SECRET the app runs
       # REST-only and realtime_token is null — the documented degraded mode.
@@ -130,6 +134,12 @@ jobs:
       # npm must match the generator of the lockfile — see NPM_VERSION note above.
       - name: Pin npm to the lockfile-generating version
         run: npm install -g npm@${{ env.NPM_VERSION }}
+
+      # Fails when a variable env.ts hard-requires at boot is not declared in
+      # the root render.yaml — the drift that makes the Render service
+      # exit(1) on every restart. Needs no dependencies, so it runs first.
+      - name: Render Blueprint declares every boot-required env var
+        run: npm run check:render-env
 
       - name: Install
         run: npm ci
@@ -182,6 +192,7 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       CLIENT_URL: http://localhost:3000
       STAFF_PIN: "000000"
+      ADMIN_PIN: "654321"
       KDS_TOKEN_SECRET: ci-only-secret-not-used-anywhere-else
       NEXT_PUBLIC_API_URL: http://localhost:4000
       # Force the live path: the demo fallback is on by default in a dev
