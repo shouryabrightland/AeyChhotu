@@ -130,7 +130,14 @@ export interface CartUpdateInput {
      range guard, so two phones tapping at the same time serialize in the
      database and neither tap is lost. No read-modify-write, no lock needed.
    * quantity (contract's absolute "set to N") — single UPDATE, last write
-     wins by definition; note edits behave the same way. */
+     wins by definition; note edits behave the same way.
+
+   BOTH modes carry the note columns through COALESCE. That is the fix for a
+   real data-loss bug: a delta tap that also edited the note (or a client
+   that echoes the notes back with a stepper update) used to hit the branch
+   that only wrote `quantity`, so the note change was silently dropped and
+   the kitchen cooked the wrong thing. COALESCE means "write it if it was
+   sent, keep what is stored if it was not" — never "blank it out". */
 export async function updateCartItem(
   cartItemId: string,
   input: CartUpdateInput,
@@ -140,11 +147,19 @@ export async function updateCartItem(
 
     const deltaRes = await pool.query<CartRow>(
       `UPDATE cart_items
-          SET quantity = quantity + $3
+          SET quantity     = quantity + $3,
+              request_note = COALESCE($4, request_note),
+              allergy_note = COALESCE($5, allergy_note)
         WHERE id = $1 AND table_id = $2
           AND quantity + $3 BETWEEN 1 AND 99
         RETURNING id, table_id, menu_item_id, quantity, request_note, allergy_note, added_by`,
-      [cartItemId, table.id, input.quantity_delta],
+      [
+        cartItemId,
+        table.id,
+        input.quantity_delta,
+        input.request_note ?? null,
+        input.allergy_note ?? null,
+      ],
     );
 
     const deltaRow = deltaRes.rows[0];

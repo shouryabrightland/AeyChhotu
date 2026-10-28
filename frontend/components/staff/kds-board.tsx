@@ -23,7 +23,9 @@ import type { Order, OrderStatus } from "@/lib/api/types";
 import { armAudio, isAudioArmed, playChime } from "@/lib/sound";
 import { cn } from "@/lib/utils";
 
-type ColumnStatus = Exclude<OrderStatus, "served">;
+/** The board's three lanes. Served and denied tickets are closed and never
+    rendered here, so they are not part of this union. */
+type ColumnStatus = "pending" | "preparing" | "ready";
 
 /* Every class a lane needs is written out literally so Tailwind can see it
    at build time — a template-built `bg-${status}` would never be generated. */
@@ -68,7 +70,7 @@ export interface KdsBoardProps {
 }
 
 export function KdsBoard({ onLock }: KdsBoardProps) {
-  const { phase, error, tickets, busy, retry, refresh, advance } = useLiveKds();
+  const { phase, error, tickets, busy, retry, refresh, advance, deny } = useLiveKds();
   /* The 86 drawer needs the LIVE catalog. E3 requires a table token that the
      kitchen does not hold, so the hook resolves one from E17 — see
      useStaffMenuCatalog. Was previously read from the offline demo store,
@@ -146,6 +148,23 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
         ? "The board will ping every time a table fires an order."
         : "This browser blocked the audio context — the board still updates visually.",
       tone: armed ? "success" : "error",
+    });
+  }
+
+  /* Manual refusal. The card has already collected a required reason in its
+     confirmation modal; this only reports the outcome. */
+  async function handleDeny(order: Order, reason: string) {
+    const result = await deny(order, reason);
+
+    if (!result.ok) {
+      toast({ title: result.message ?? "Could not deny that ticket.", tone: "error" });
+      return;
+    }
+
+    toast({
+      title: `Table ${order.table_code} order denied`,
+      description: "The diner sees your reason and can retry, edit, or cancel it.",
+      tone: "success",
     });
   }
 
@@ -360,6 +379,7 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
                           checkedItemIds={checked[order.id]}
                           onToggleItem={toggleItem}
                           onAdvance={(ticket, next) => void handleAdvance(ticket, next)}
+                          onDeny={(ticket, denialReason) => void handleDeny(ticket, denialReason)}
                         />
                       ))}
                     </AnimatePresence>

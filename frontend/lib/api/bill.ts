@@ -126,14 +126,24 @@ export function requestBill(tableCode: string): void {
   });
 }
 
-/** A server took payment. Keeps the event so the diner can thank them. */
+/* A server took payment. Keeps the event so the diner can thank them.
+
+   Works even when the guest never tapped "request the bill": the floor
+   tablet can settle a table directly, and the diner's screen must still show
+   the thank-you instead of waiting for an event that will never exist. The
+   missing request is back-filled with the settlement time. */
 export function settleBill(tableCode: string): void {
   const existing = state[tableCode];
-  if (!existing || existing.settled_at) return;
+  if (existing?.settled_at) return;
 
+  const settledAt = new Date().toISOString();
   commit({
     ...state,
-    [tableCode]: { ...existing, settled_at: new Date().toISOString() },
+    [tableCode]: {
+      table_code: tableCode,
+      requested_at: existing?.requested_at ?? settledAt,
+      settled_at: settledAt,
+    },
   });
 }
 

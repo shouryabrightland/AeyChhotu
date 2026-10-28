@@ -4,6 +4,9 @@ import { pool } from "../db/pool.js";
 import { AppError } from "../errors/app-error.js";
 import { signToken, type ShiftClaims } from "../lib/jwt.js";
 import { iso } from "../lib/util.js";
+import { resolveCategoryForWrite } from "./catalog.service.js";
+import { imageDtoFromRow } from "./menu-image.service.js";
+import { denyPendingOrdersForItem } from "./orders.service.js";
 import { clearTableSession, type BillStatus } from "./sessions.service.js";
 
 /* Module 5 — Executive Admin Engine.
@@ -102,6 +105,8 @@ export interface AdminTable {
   clear_requested_at: string | null;
   active_order_count: number;
   cart_line_count: number;
+  /** Phones heartbeating on this table inside the stale window. */
+  active_devices: number;
   /** Whether this table currently has a PIN/pass issued. */
   has_session: boolean;
   session_started_at: string | null;
@@ -117,6 +122,7 @@ interface AdminTableRow {
   clear_requested_at: Date | null;
   active_order_count: number;
   cart_line_count: number;
+  active_devices: number;
   has_session: boolean;
   session_started_at: Date | null;
   created_at: Date;
@@ -143,7 +149,11 @@ export async function listAdminTables(): Promise<AdminTable[]> {
                 AND o.status IN ('pending', 'preparing', 'ready')) AS active_order_count,
             (SELECT count(*)::int
                FROM cart_items ci
-              WHERE ci.table_id = t.id) AS cart_line_count
+              WHERE ci.table_id = t.id) AS cart_line_count,
+            (SELECT count(*)::int
+               FROM table_device_presence p
+              WHERE p.table_id = t.id
+                AND p.last_seen > now() - interval '120 seconds') AS active_devices
        FROM restaurant_tables t
       WHERE t.deleted_at IS NULL
       ORDER BY t.created_at, t.code`,
@@ -158,6 +168,7 @@ export async function listAdminTables(): Promise<AdminTable[]> {
     clear_requested_at: row.clear_requested_at ? iso(row.clear_requested_at) : null,
     active_order_count: row.active_order_count,
     cart_line_count: row.cart_line_count,
+    active_devices: row.active_devices,
     has_session: row.has_session,
     session_started_at: row.session_started_at ? iso(row.session_started_at) : null,
     created_at: iso(row.created_at),
@@ -189,7 +200,8 @@ export async function createTable(input: { name: string }): Promise<AdminTable> 
                      session_started_at, clear_requested_at,
                      false AS has_session,
                      0::int AS active_order_count,
-                     0::int AS cart_line_count`,
+                     0::int AS cart_line_count,
+                     0::int AS active_devices`,
         [code, name],
       );
 
@@ -204,6 +216,7 @@ export async function createTable(input: { name: string }): Promise<AdminTable> 
         clear_requested_at: null,
         active_order_count: 0,
         cart_line_count: 0,
+        active_devices: 0,
         has_session: false,
         session_started_at: null,
         created_at: iso(row.created_at),
@@ -250,6 +263,130 @@ export async function updateTableName(
   return { table_id: row.id, name: row.name };
 }
 
+/* PATCH /api/v1/admin/tables/:table_id/code — repair the code printed on a
+   QR stand.
+
+   Regenerating mints a random code, so a stand can end up with a code nobody
+   wrote down. This lets a manager set the code back to a known value. It is
+   deliberately narrow: an EMPTY table only. Once a party is seated, their
+   phones hold `/table/<code>` and their pass is scoped to the row, so moving
+   the code under them would break the table they are looking at — a session,
+   a staged cart or an open ticket all refuse the change (409).
+
+   The row is locked FOR UPDATE so two admins editing the same table cannot
+   both pass the emptiness check, and a UNIQUE violation is reported as
+   TABLE_CODE_TAKEN rather than a 500. */
+export async function updateTableCode(
+  tableId: string,
+  input: { code: string },
+): Promise<{ table_id: string; code: string; name: string }> {
+  const code = input.code.trim().toLowerCase();
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const found = await client.query<{
+      id: string;
+      code: string;
+      name: string;
+      status: string;
+      bill_status: string;
+      has_session: boolean;
+    }>(
+      `SELECT id, code, name, status, bill_status,
+              (session_pin IS NOT NULL OR session_started_at IS NOT NULL) AS has_session
+         FROM restaurant_tables
+        WHERE id = $1 AND deleted_at IS NULL
+          FOR UPDATE`,
+      [tableId],
+    );
+
+    const table = found.rows[0];
+    if (!table) {
+      throw new AppError(404, "TABLE_NOT_FOUND", "Unknown table.");
+    }
+
+    // Re-saving the same code is a no-op, not a conflict.
+    if (table.code === code) {
+      await client.query("COMMIT");
+      return { table_id: table.id, code: table.code, name: table.name };
+    }
+
+    /* STRICT emptiness, server-side and inside the row lock. A code change
+       rewrites the capability printed on a QR stand, so it is only safe when
+       NOTHING about the current seating survives: the table must be 'empty',
+       hold no issued credentials, no staged cart, no open (or denied-but-
+       unread) ticket, no bill conversation and no connected device. Each of
+       those is a separate fact, so each gets its own count — a single
+       `status` flag would miss a deactivated-but-pinned row. */
+    const activity = await client.query<{
+      cart_lines: number;
+      open_orders: number;
+      roster: number;
+      devices: number;
+    }>(
+      `SELECT (SELECT count(*)::int FROM cart_items WHERE table_id = $1) AS cart_lines,
+              (SELECT count(*)::int
+                 FROM orders
+                WHERE table_id = $1
+                  AND status IN ('pending', 'preparing', 'ready')) AS open_orders,
+              (SELECT count(*)::int FROM table_members WHERE table_id = $1) AS roster,
+              (SELECT count(*)::int
+                 FROM table_device_presence
+                WHERE table_id = $1
+                  AND last_seen > now() - interval '120 seconds') AS devices`,
+      [table.id],
+    );
+    const row = activity.rows[0];
+
+    if (
+      table.status !== "empty" ||
+      table.has_session ||
+      table.bill_status !== "unrequested" ||
+      (row?.cart_lines ?? 0) > 0 ||
+      (row?.open_orders ?? 0) > 0 ||
+      (row?.roster ?? 0) > 0 ||
+      (row?.devices ?? 0) > 0
+    ) {
+      throw new AppError(
+        409,
+        "TABLE_NOT_EMPTY",
+        "This table is not empty. Clear it before changing its code.",
+        { table_id: table.id },
+      );
+    }
+
+    const updated = await client.query<{ id: string; code: string; name: string }>(
+      `UPDATE restaurant_tables
+          SET code = $2
+        WHERE id = $1
+        RETURNING id, code, name`,
+      [table.id, code],
+    );
+
+    await client.query("COMMIT");
+
+    const saved = updated.rows[0];
+    if (!saved) {
+      throw new AppError(500, "INTERNAL_ERROR", "The table code could not be updated.");
+    }
+
+    return { table_id: saved.id, code: saved.code, name: saved.name };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+
+    // Archived tables keep their code, so the UNIQUE index also covers history.
+    if (isUniqueViolation(err)) {
+      throw new AppError(409, "TABLE_CODE_TAKEN", "Another table already uses that code.");
+    }
+
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 /* POST /api/v1/admin/tables/:table_id/regenerate-token.
    The "reset the table" button. Rotating the code invalidates every phone
    that still holds the old URL (a photographed QR stops working), and the
@@ -282,12 +419,18 @@ export async function regenerateTableToken(tableId: string): Promise<{
 
     /* Clear the session's contents, then its credentials. Each step keeps its
        own WHERE: `status <> 'served'` is what the status-transition trigger
-       in 004 expects (closing from any live state is allowed). */
+       in 004 expects (closing from any live state is allowed). A DENIED
+       round is already closed, so it is left exactly as the diner last saw
+       it (the tracker may still be showing the reason on a phone) — but the
+       roster and the presence registry MUST go, or the next party inherits a
+       table that still claims its previous guests are sitting at it. */
     await client.query("DELETE FROM cart_items WHERE table_id = $1", [table.id]);
+    await client.query("DELETE FROM table_members WHERE table_id = $1", [table.id]);
+    await client.query("DELETE FROM table_device_presence WHERE table_id = $1", [table.id]);
     await client.query(
       `UPDATE orders
           SET status = 'served', updated_at = now()
-        WHERE table_id = $1 AND status <> 'served'`,
+        WHERE table_id = $1 AND status <> 'served' AND status <> 'denied'`,
       [table.id],
     );
 
@@ -303,7 +446,8 @@ export async function regenerateTableToken(tableId: string): Promise<{
               bill_status         = 'unrequested',
               bill_requested_at   = NULL,
               bill_paid_at        = NULL,
-              clear_requested_at  = NULL
+              clear_requested_at  = NULL,
+              last_cleared_at     = now()
         WHERE id = $1
         RETURNING id, code, name`,
       [table.id, newCode],
@@ -360,24 +504,148 @@ export async function clearTableAsAdmin(tableId: string): Promise<AdminClearTabl
   };
 }
 
-export async function archiveTable(tableId: string): Promise<{ table_id: string }> {
-  const res = await pool.query<{ id: string }>(
-    `UPDATE restaurant_tables
-        SET deleted_at = now(),
-            status = 'empty',
-            session_pin = NULL,
-            session_secret = NULL
-      WHERE id = $1 AND deleted_at IS NULL
-      RETURNING id`,
-    [tableId],
-  );
+/* POST /api/v1/admin/tables/:table_id/deactivate
 
-  const row = res.rows[0];
-  if (!row) {
-    throw new AppError(404, "TABLE_NOT_FOUND", "Unknown table.");
+   The manager's "stop this table now", available at any moment. Unlike a
+   staff clear it does not check for owed money or an open ticket: the manager
+   decides. Open tickets are closed as served (they stay in history at their
+   frozen price), the cart and presence rows are removed, the session ends and
+   the bill/alert reset — but the CODE IS KEPT, so the printed QR stand still
+   works when the table opens again. */
+export interface DeactivateTableResult {
+  table_id: string;
+  deactivated: true;
+  closed_orders: number;
+}
+
+export async function deactivateTableAsAdmin(tableId: string): Promise<DeactivateTableResult> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const found = await client.query<{ id: string }>(
+      `SELECT id FROM restaurant_tables
+        WHERE id = $1 AND deleted_at IS NULL
+          FOR UPDATE`,
+      [tableId],
+    );
+
+    if (!found.rows[0]) {
+      throw new AppError(404, "TABLE_NOT_FOUND", "Unknown table.");
+    }
+
+    const closed = await client.query<{ count: number }>(
+      `WITH updated AS (
+         UPDATE orders
+            SET status = 'served', updated_at = now()
+          WHERE table_id = $1 AND status <> 'served' AND status <> 'denied'
+          RETURNING 1
+       )
+       SELECT count(*)::int AS count FROM updated`,
+      [tableId],
+    );
+
+    await client.query("DELETE FROM cart_items WHERE table_id = $1", [tableId]);
+    await client.query("DELETE FROM table_members WHERE table_id = $1", [tableId]);
+    await client.query("DELETE FROM table_device_presence WHERE table_id = $1", [tableId]);
+
+    await client.query(
+      `UPDATE restaurant_tables
+          SET status              = 'empty',
+              session_pin         = NULL,
+              session_secret      = NULL,
+              failed_pin_attempts = 0,
+              session_started_at  = NULL,
+              bill_status         = 'unrequested',
+              bill_requested_at   = NULL,
+              bill_paid_at        = NULL,
+              clear_requested_at  = NULL,
+              last_cleared_at     = now()
+        WHERE id = $1`,
+      [tableId],
+    );
+
+    await client.query("COMMIT");
+
+    return {
+      table_id: tableId,
+      deactivated: true,
+      closed_orders: closed.rows[0]?.count ?? 0,
+    };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
+}
 
-  return { table_id: row.id };
+/* DELETE /api/v1/admin/tables/:table_id — archive, never drop the row.
+
+   The archive used to be a single UPDATE, which left the archived table
+   holding a live cart, a device registry and its members. Nobody can reach
+   those rows any more (every read filters `deleted_at IS NULL`), so they
+   were pure leakage: a table re-created with the same code would inherit a
+   cart from a party that left months ago. Archiving therefore closes the
+   seating completely — open tickets are served, cart/roster/presence are
+   deleted, credentials and bill state are wiped, and `last_cleared_at`
+   records when — in ONE transaction, so an archive can never half-happen. */
+export async function archiveTable(tableId: string): Promise<{ table_id: string }> {
+  const client = await pool.connect();
+  let committed = false;
+
+  try {
+    await client.query("BEGIN");
+
+    const found = await client.query<{ id: string }>(
+      `SELECT id FROM restaurant_tables
+        WHERE id = $1 AND deleted_at IS NULL
+          FOR UPDATE`,
+      [tableId],
+    );
+    if (!found.rows[0]) {
+      throw new AppError(404, "TABLE_NOT_FOUND", "Unknown table.");
+    }
+
+    await client.query("DELETE FROM cart_items WHERE table_id = $1", [tableId]);
+    await client.query("DELETE FROM table_members WHERE table_id = $1", [tableId]);
+    await client.query("DELETE FROM table_device_presence WHERE table_id = $1", [tableId]);
+    await client.query(
+      `UPDATE orders
+          SET status = 'served', updated_at = now()
+        WHERE table_id = $1 AND status <> 'served' AND status <> 'denied'`,
+      [tableId],
+    );
+
+    await client.query(
+      `UPDATE restaurant_tables
+          SET deleted_at          = now(),
+              status              = 'empty',
+              session_pin         = NULL,
+              session_secret      = NULL,
+              failed_pin_attempts = 0,
+              session_started_at  = NULL,
+              bill_status         = 'unrequested',
+              bill_requested_at   = NULL,
+              bill_paid_at        = NULL,
+              clear_requested_at  = NULL,
+              last_cleared_at     = now()
+        WHERE id = $1`,
+      [tableId],
+    );
+
+    await client.query("COMMIT");
+    committed = true;
+
+    return { table_id: tableId };
+  } catch (err) {
+    if (!committed) {
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -388,51 +656,110 @@ export interface AdminMenuItem {
   menu_item_id: string;
   name: string;
   price: number;
+  /** The legacy label, kept in step with the folder's name. */
   category: string;
+  category_id: string | null;
   description: string;
   vegetarian: boolean;
   is_available: boolean;
+  /** Uploaded photo URLs, or null when the dish still uses the curated
+      frontend photography. */
+  image_url: string | null;
+  image_small_url: string | null;
+  blur_data_url: string | null;
 }
 
-const MENU_COLUMNS =
-  "id, name, price::float8 AS price, category, description, vegetarian, is_available";
-
-function menuRowToDto(row: {
+interface AdminMenuRow {
   id: string;
   name: string;
   price: number;
   category: string;
+  category_id: string | null;
   description: string;
   vegetarian: boolean;
   is_available: boolean;
-}): AdminMenuItem {
+  storage_driver: string | null;
+  original_key: string | null;
+  small_key: string | null;
+  tiny_key: string | null;
+  blur_data_url: string | null;
+}
+
+const MENU_COLUMNS = `mi.id,
+       mi.name,
+       mi.price::float8 AS price,
+       mi.category,
+       mi.category_id,
+       mi.description,
+       mi.vegetarian,
+       mi.is_available,
+       img.storage_driver,
+       img.original_key,
+       img.small_key,
+       img.tiny_key,
+       img.blur_data_url`;
+
+const MENU_FROM = `FROM menu_items mi
+  LEFT JOIN menu_item_images img ON img.menu_item_id = mi.id`;
+
+function menuRowToDto(row: AdminMenuRow): AdminMenuItem {
+  const image =
+    row.storage_driver && row.original_key && row.small_key && row.tiny_key
+      ? imageDtoFromRow({
+          menu_item_id: row.id,
+          storage_driver: row.storage_driver,
+          original_key: row.original_key,
+          small_key: row.small_key,
+          tiny_key: row.tiny_key,
+          blur_data_url: row.blur_data_url ?? "",
+        })
+      : null;
+
   return {
     menu_item_id: row.id,
     name: row.name,
     price: Number(row.price),
     category: row.category,
+    category_id: row.category_id,
     description: row.description,
     vegetarian: row.vegetarian,
     is_available: row.is_available,
+    image_url: image?.image_url ?? null,
+    image_small_url: image?.image_small_url ?? null,
+    blur_data_url: image?.blur_data_url ?? null,
   };
+}
+
+async function getAdminMenuItem(menuItemId: string): Promise<AdminMenuItem> {
+  const res = await pool.query<AdminMenuRow>(
+    `SELECT ${MENU_COLUMNS} ${MENU_FROM}
+      WHERE mi.id = $1 AND mi.deleted_at IS NULL`,
+    [menuItemId],
+  );
+
+  const row = res.rows[0];
+  if (!row) {
+    throw new AppError(404, "MENU_ITEM_NOT_FOUND", "Unknown menu item.");
+  }
+  return menuRowToDto(row);
 }
 
 /* GET /api/v1/admin/menu — includes 86'd dishes (the console must be able to
    bring one back), excludes archived ones. */
 export async function listAdminMenu(): Promise<AdminMenuItem[]> {
-  const res = await pool.query(
-    `SELECT ${MENU_COLUMNS}
-       FROM menu_items
-      WHERE deleted_at IS NULL
-      ORDER BY category, name`,
+  const res = await pool.query<AdminMenuRow>(
+    `SELECT ${MENU_COLUMNS} ${MENU_FROM}
+      WHERE mi.deleted_at IS NULL
+      ORDER BY mi.category, mi.name`,
   );
-  return res.rows.map(menuRowToDto);
+  return res.rows.map((row) => menuRowToDto(row));
 }
 
 export interface CreateMenuItemInput {
   name: string;
   price: number;
-  category: string;
+  category_id?: string | null;
+  category?: string;
   description: string;
   vegetarian: boolean;
   is_available: boolean;
@@ -440,25 +767,31 @@ export interface CreateMenuItemInput {
 
 /* POST /api/v1/admin/menu */
 export async function createMenuItem(input: CreateMenuItemInput): Promise<AdminMenuItem> {
-  const res = await pool.query(
-    `INSERT INTO menu_items (name, price, category, description, vegetarian, is_available)
-          VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING ${MENU_COLUMNS}`,
+  const folder = await resolveCategoryForWrite({
+    category_id: input.category_id ?? undefined,
+    category: input.category,
+  });
+
+  const res = await pool.query<{ id: string }>(
+    `INSERT INTO menu_items (name, price, category, category_id, description, vegetarian, is_available)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
     [
       input.name.trim(),
       input.price,
-      input.category.trim(),
+      folder.category,
+      folder.category_id,
       input.description.trim(),
       input.vegetarian,
       input.is_available,
     ],
   );
 
-  const row = res.rows[0];
-  if (!row) {
+  const id = res.rows[0]?.id;
+  if (!id) {
     throw new AppError(500, "INTERNAL_ERROR", "The dish could not be created.");
   }
-  return menuRowToDto(row);
+  return getAdminMenuItem(id);
 }
 
 export type UpdateMenuItemInput = Partial<CreateMenuItemInput>;
@@ -471,42 +804,66 @@ export async function updateMenuItem(
   menuItemId: string,
   input: UpdateMenuItemInput,
 ): Promise<AdminMenuItem> {
-  const res = await pool.query(
+  /* A folder change carries both halves: the id and the label it implies. */
+  const folder =
+    input.category_id !== undefined || input.category !== undefined
+      ? await resolveCategoryForWrite({
+          category_id: input.category_id ?? undefined,
+          category: input.category,
+        })
+      : null;
+
+  const res = await pool.query<{ id: string }>(
     `UPDATE menu_items
         SET name         = COALESCE($2, name),
             price        = COALESCE($3, price),
             category     = COALESCE($4, category),
             description  = COALESCE($5, description),
             vegetarian   = COALESCE($6, vegetarian),
-            is_available = COALESCE($7, is_available)
+            is_available = COALESCE($7, is_available),
+            category_id  = CASE WHEN $8::boolean THEN $9 ELSE category_id END
       WHERE id = $1 AND deleted_at IS NULL
-      RETURNING ${MENU_COLUMNS}`,
+      RETURNING id`,
     [
       menuItemId,
       input.name !== undefined ? input.name.trim() : null,
       input.price ?? null,
-      input.category !== undefined ? input.category.trim() : null,
+      folder ? folder.category : null,
       input.description !== undefined ? input.description.trim() : null,
       input.vegetarian ?? null,
       input.is_available ?? null,
+      folder !== null,
+      folder ? folder.category_id : null,
     ],
   );
 
-  const row = res.rows[0];
-  if (!row) {
+  if (!res.rows[0]) {
     throw new AppError(404, "MENU_ITEM_NOT_FOUND", "Unknown menu item.");
   }
-  return menuRowToDto(row);
+
+  const updated = await getAdminMenuItem(menuItemId);
+
+  /* The console's 86 switch must behave exactly like E14: anything still
+     PENDING that contains this dish is refused automatically. Without this,
+     a manager could take a dish off the menu while a fired round sat waiting
+     for it, and the kitchen would have no way to say so. */
+  if (input.is_available === false) {
+    await denyPendingOrdersForItem(menuItemId, updated.name);
+  }
+
+  return updated;
 }
 
 /* DELETE /api/v1/admin/menu/:menu_item_id — soft delete (order history keeps
-   pointing at the row, and ON DELETE RESTRICT would refuse a hard delete). */
+   pointing at the row, and ON DELETE RESTRICT would refuse a hard delete).
+   Archiving also marks the dish unavailable, so any PENDING round holding it
+   is denied with the same reason as an E14 86. */
 export async function archiveMenuItem(menuItemId: string): Promise<{ menu_item_id: string }> {
-  const res = await pool.query<{ id: string }>(
+  const res = await pool.query<{ id: string; name: string }>(
     `UPDATE menu_items
         SET deleted_at = now(), is_available = false
       WHERE id = $1 AND deleted_at IS NULL
-      RETURNING id`,
+      RETURNING id, name`,
     [menuItemId],
   );
 
@@ -514,6 +871,8 @@ export async function archiveMenuItem(menuItemId: string): Promise<{ menu_item_i
   if (!row) {
     throw new AppError(404, "MENU_ITEM_NOT_FOUND", "Unknown menu item.");
   }
+
+  await denyPendingOrdersForItem(row.id, row.name);
 
   return { menu_item_id: row.id };
 }

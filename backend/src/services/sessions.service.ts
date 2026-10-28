@@ -59,10 +59,27 @@ export interface SessionRow {
   failed_pin_attempts: number;
   session_started_at: Date | null;
   bill_status: BillStatus;
+  /** Last time the table was handed to its next party (sql/011). */
+  last_cleared_at: Date | null;
 }
 
 const SESSION_COLUMNS =
-  "id, code, name, status, session_pin, session_secret, failed_pin_attempts, session_started_at, bill_status";
+  "id, code, name, status, session_pin, session_secret, failed_pin_attempts, session_started_at, bill_status, last_cleared_at";
+
+/* The identity a device registers at the table (sql/011 table_members).
+   Anonymous and optional: a client that does not send one still joins, it
+   just does not appear on the roster. */
+export interface TableMemberInput {
+  user_id?: string;
+  name?: string;
+}
+
+/** Extra context every session entry point accepts. */
+export interface SessionEntryOptions {
+  /** When the CLIENT opened the page. Older than last_cleared_at ⇒ stale. */
+  scan_time?: string;
+  member?: TableMemberInput;
+}
 
 /** A random '00'–'99'. Leading zeros matter, so this stays a string. */
 export function generateSessionPin(): string {
@@ -177,6 +194,58 @@ function lockedSession(row: SessionRow): LockedSession {
   };
 }
 
+const STALE_SESSION_MESSAGE =
+  "This table was cleared after your page was opened. Scan the table's QR code again.";
+
+/* Rejects a page that was opened BEFORE the table was cleared. A phone can
+   sit on a cached menu for hours (app reopen, bookmark, bfcache); without
+   this guard its `initialize` would either claim the next party's table or
+   hand a stranger the previous session's credentials. `scan_time` is the
+   moment the CLIENT opened the page, which is exactly the fact we need.
+
+   The comparison tolerates SCAN_TIME_SKEW_TOLERANCE_MS of clock skew. Phones
+   are not guaranteed to be NTP-synced: a guest whose clock runs two minutes
+   behind would otherwise be refused forever after a clear, because their
+   brand-new page always looks "older" than the server's timestamp. Two
+   minutes still catches the real case (a page cached across a seating), and
+   it cannot be used to resurrect a session: the secret is rotated on clear,
+   so an old page has nothing valid to present either way. */
+export const SCAN_TIME_SKEW_TOLERANCE_MS = 2 * 60_000;
+
+function assertFreshSession(table: SessionRow, scanTime: string | undefined): void {
+  if (!scanTime || !table.last_cleared_at) return;
+
+  const scannedAt = Date.parse(scanTime);
+  if (Number.isNaN(scannedAt)) return; // validated by Zod; never trust blindly
+
+  if (scannedAt < table.last_cleared_at.getTime() - SCAN_TIME_SKEW_TOLERANCE_MS) {
+    throw new AppError(409, "STALE_SESSION", STALE_SESSION_MESSAGE, {
+      table_id: table.id,
+      cleared_at: iso(table.last_cleared_at),
+    });
+  }
+}
+
+/* Registers (or refreshes) one person at the table. Called on every path
+   that GRANTS a session, so the roster always matches who actually joined.
+   ON CONFLICT makes a reconnect an update, never a duplicate member. */
+async function upsertTableMember(
+  client: PoolClient,
+  tableId: string,
+  member: TableMemberInput | undefined,
+): Promise<void> {
+  const userId = member?.user_id?.trim();
+  if (!userId) return;
+
+  await client.query(
+    `INSERT INTO table_members (table_id, user_id, name)
+          VALUES ($1, $2, $3)
+     ON CONFLICT (table_id, user_id)
+       DO UPDATE SET name = EXCLUDED.name`,
+    [tableId, userId, member?.name?.trim() || "Guest"],
+  );
+}
+
 /* E1 — POST /api/v1/sessions/initialize.
    The first scan of an EMPTY table starts the session and returns the
    credentials; the row is locked (SELECT … FOR UPDATE) for the whole
@@ -184,8 +253,15 @@ function lockedSession(row: SessionRow): LockedSession {
    moment cannot mint two PINs and leave one phone holding a dead secret.
 
    An ACTIVE table releases nothing: no cart lines, no orders, no tokens —
-   the caller must join with the PIN or the pass. */
-export async function initializeSession(tableToken: string): Promise<InitializeResult> {
+   the caller must join with the PIN or the pass.
+
+   A `scan_time` older than `last_cleared_at` is refused with STALE_SESSION
+   before anything is written, so a long-cached page can never take the
+   table away from the party sitting at it. */
+export async function initializeSession(
+  tableToken: string,
+  options: SessionEntryOptions = {},
+): Promise<InitializeResult> {
   const client = await pool.connect();
   let committed = false;
 
@@ -204,7 +280,11 @@ export async function initializeSession(tableToken: string): Promise<InitializeR
       throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table token parsed.");
     }
 
+    assertFreshSession(table, options.scan_time);
+
     if (table.status === "active") {
+      // A live table stays the property of the party already seated: no
+      // credentials, no roster entry, no read token.
       await client.query("COMMIT");
       committed = true;
       return lockedSession(table);
@@ -225,15 +305,19 @@ export async function initializeSession(tableToken: string): Promise<InitializeR
       [table.id, pin, secret],
     );
 
-    await client.query("COMMIT");
-    committed = true;
-
     const row = updated.rows[0];
     if (!row) {
       // Vanishingly unlikely (the row is locked), but never hand out a
       // credential that was not stored.
       throw new AppError(500, "INTERNAL_ERROR", "The table session could not be started.");
     }
+
+    // The guest who claimed the table is its first member.
+    await upsertTableMember(client, row.id, options.member);
+
+    await client.query("COMMIT");
+    committed = true;
+
     return grantedSession(row);
   } catch (err) {
     if (!committed) {
@@ -252,106 +336,179 @@ const PIN_LOCKED_MESSAGE =
   "Table PIN locked after 3 failed attempts. Scan a tablemate's QR pass to unlock and join.";
 
 /* E1b — POST /api/v1/sessions/join-pin.
-   Each branch is ONE statement against the locked row, so the counter can
-   never lose an increment: two phones guessing at once serialize on the
-   row lock, and Postgres re-checks `failed_pin_attempts < 3` against the
-   freshly updated row before the second UPDATE applies. */
-export async function joinWithPin(input: { table_token: string; pin: string }): Promise<GrantedSession> {
-  const granted = await pool.query<SessionRow>(
-    `UPDATE restaurant_tables
-        SET failed_pin_attempts = 0
-      WHERE code = $1
-        AND deleted_at IS NULL
-        AND status = 'active'
-        AND session_pin = $2
-        AND failed_pin_attempts < $3
-      RETURNING ${SESSION_COLUMNS}`,
-    [input.table_token, input.pin, MAX_PIN_ATTEMPTS],
-  );
+   Each join is ONE transaction that locks the table row, so the counter can
+   never lose an increment: two phones guessing at once serialize, and the
+   `failed_pin_attempts < 3` guard is re-checked against the locked row.
 
-  const grantedRow = granted.rows[0];
-  if (grantedRow) return grantedSession(grantedRow);
+   The transaction is also what makes the roster entry and the credential
+   reset atomic — a guest is either IN (counter cleared + member registered)
+   or still out, never half-joined. A scan that predates the table's last
+   clear is refused before the counter moves at all. */
+export async function joinWithPin(input: {
+  table_token: string;
+  pin: string;
+} & SessionEntryOptions): Promise<GrantedSession> {
+  const client = await pool.connect();
+  let committed = false;
 
-  const failed = await pool.query<{ failed_pin_attempts: number }>(
-    `UPDATE restaurant_tables
-        SET failed_pin_attempts = failed_pin_attempts + 1
-      WHERE code = $1
-        AND deleted_at IS NULL
-        AND status = 'active'
-        AND session_pin IS NOT NULL
-        AND session_pin IS DISTINCT FROM $2
-        AND failed_pin_attempts < $3
-      RETURNING failed_pin_attempts`,
-    [input.table_token, input.pin, MAX_PIN_ATTEMPTS],
-  );
+  try {
+    await client.query("BEGIN");
 
-  const attempts = failed.rows[0]?.failed_pin_attempts;
-  if (attempts !== undefined) {
-    // The 3rd wrong PIN is the one that locks the table: the diner is told
-    // immediately, and the keypad is replaced by the scan-a-pass gate.
-    if (attempts >= MAX_PIN_ATTEMPTS) {
+    const found = await client.query<SessionRow>(
+      `SELECT ${SESSION_COLUMNS}
+         FROM restaurant_tables
+        WHERE code = $1 AND deleted_at IS NULL
+          FOR UPDATE`,
+      [input.table_token],
+    );
+    const table = found.rows[0];
+    if (!table) {
+      throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table token parsed.");
+    }
+
+    assertFreshSession(table, input.scan_time);
+
+    if (table.status !== "active" || !table.session_pin) {
+      throw new AppError(403, "SESSION_ENDED", SESSION_ENDED_MESSAGE);
+    }
+
+    // Locked before this attempt even counted.
+    if (table.failed_pin_attempts >= MAX_PIN_ATTEMPTS) {
       throw new AppError(423, "TABLE_PIN_LOCKED", PIN_LOCKED_MESSAGE, {
         attempts_remaining: 0,
-        failed_attempts: attempts,
+        failed_attempts: table.failed_pin_attempts,
         locked: true,
       });
     }
 
-    const remaining = MAX_PIN_ATTEMPTS - attempts;
-    throw new AppError(
-      401,
-      "INVALID_SESSION_PIN",
-      `That PIN is not right. ${remaining} ${remaining === 1 ? "try" : "tries"} left before the table locks.`,
-      { attempts_remaining: remaining, failed_attempts: attempts, locked: false },
-    );
-  }
+    if (table.session_pin !== input.pin) {
+      const failed = await client.query<{ failed_pin_attempts: number }>(
+        `UPDATE restaurant_tables
+            SET failed_pin_attempts = failed_pin_attempts + 1
+          WHERE id = $1
+          RETURNING failed_pin_attempts`,
+        [table.id],
+      );
+      const attempts = failed.rows[0]?.failed_pin_attempts ?? table.failed_pin_attempts + 1;
 
-  /* Neither statement touched a row: the table is gone, settled, or already
-     flagged. Read it once to answer with the honest reason. */
-  const table = await requireSessionRow(input.table_token);
-  if (table.status !== "active" || !table.session_pin) {
-    throw new AppError(403, "SESSION_ENDED", SESSION_ENDED_MESSAGE);
+      // A wrong PIN is a real state change (the counter), so it commits
+      // before the error is raised.
+      await client.query("COMMIT");
+      committed = true;
+
+      // The 3rd wrong PIN is the one that locks the table: the diner is told
+      // immediately, and the keypad is replaced by the scan-a-pass gate.
+      if (attempts >= MAX_PIN_ATTEMPTS) {
+        throw new AppError(423, "TABLE_PIN_LOCKED", PIN_LOCKED_MESSAGE, {
+          attempts_remaining: 0,
+          failed_attempts: attempts,
+          locked: true,
+        });
+      }
+
+      const remaining = MAX_PIN_ATTEMPTS - attempts;
+      throw new AppError(
+        401,
+        "INVALID_SESSION_PIN",
+        `That PIN is not right. ${remaining} ${remaining === 1 ? "try" : "tries"} left before the table locks.`,
+        { attempts_remaining: remaining, failed_attempts: attempts, locked: false },
+      );
+    }
+
+    const granted = await client.query<SessionRow>(
+      `UPDATE restaurant_tables
+          SET failed_pin_attempts = 0
+        WHERE id = $1
+        RETURNING ${SESSION_COLUMNS}`,
+      [table.id],
+    );
+
+    const row = granted.rows[0];
+    if (!row) {
+      throw new AppError(500, "INTERNAL_ERROR", "The table session could not be joined.");
+    }
+
+    await upsertTableMember(client, row.id, input.member);
+
+    await client.query("COMMIT");
+    committed = true;
+    return grantedSession(row);
+  } catch (err) {
+    if (!committed) {
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
+    throw err;
+  } finally {
+    client.release();
   }
-  // Locked before the comparison was even attempted.
-  throw new AppError(423, "TABLE_PIN_LOCKED", PIN_LOCKED_MESSAGE, {
-    attempts_remaining: 0,
-    failed_attempts: table.failed_pin_attempts,
-    locked: true,
-  });
 }
 
 /* E1c — POST /api/v1/sessions/join-pass.
    The QR fallback: a 20-character secret from a tablemate's screen. A
    correct pass also clears the failed-attempt counter, which is what
-   unflags a locked table. */
+   unflags a locked table. One transaction covers the reset, the roster
+   entry and the stale-page check. */
 export async function joinWithPass(input: {
   table_token: string;
   secret: string;
-}): Promise<GrantedSession> {
-  const granted = await pool.query<SessionRow>(
-    `UPDATE restaurant_tables
-        SET failed_pin_attempts = 0
-      WHERE code = $1
-        AND deleted_at IS NULL
-        AND status = 'active'
-        AND session_secret = $2
-      RETURNING ${SESSION_COLUMNS}`,
-    [input.table_token, input.secret],
-  );
+} & SessionEntryOptions): Promise<GrantedSession> {
+  const client = await pool.connect();
+  let committed = false;
 
-  const row = granted.rows[0];
-  if (row) return grantedSession(row);
+  try {
+    await client.query("BEGIN");
 
-  const table = await requireSessionRow(input.table_token);
-  if (table.status !== "active" || !table.session_secret) {
-    throw new AppError(403, "SESSION_ENDED", SESSION_ENDED_MESSAGE);
+    const found = await client.query<SessionRow>(
+      `SELECT ${SESSION_COLUMNS}
+         FROM restaurant_tables
+        WHERE code = $1 AND deleted_at IS NULL
+          FOR UPDATE`,
+      [input.table_token],
+    );
+    const table = found.rows[0];
+    if (!table) {
+      throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table token parsed.");
+    }
+
+    assertFreshSession(table, input.scan_time);
+
+    if (table.status !== "active" || !table.session_secret) {
+      throw new AppError(403, "SESSION_ENDED", SESSION_ENDED_MESSAGE);
+    }
+    if (table.session_secret !== input.secret) {
+      throw new AppError(
+        401,
+        "INVALID_SESSION_SECRET",
+        "That table pass is not valid for this table. Ask a tablemate to show their pass again.",
+      );
+    }
+
+    const granted = await client.query<SessionRow>(
+      `UPDATE restaurant_tables
+          SET failed_pin_attempts = 0
+        WHERE id = $1
+        RETURNING ${SESSION_COLUMNS}`,
+      [table.id],
+    );
+
+    const row = granted.rows[0];
+    if (!row) {
+      throw new AppError(500, "INTERNAL_ERROR", "The table session could not be joined.");
+    }
+
+    await upsertTableMember(client, row.id, input.member);
+
+    await client.query("COMMIT");
+    committed = true;
+    return grantedSession(row);
+  } catch (err) {
+    if (!committed) {
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
+    throw err;
+  } finally {
+    client.release();
   }
-
-  throw new AppError(
-    401,
-    "INVALID_SESSION_SECRET",
-    "That table pass is not valid for this table. Ask a tablemate to show their pass again.",
-  );
 }
 
 /* E1d — POST /api/v1/sessions/reconnect.
@@ -362,8 +519,10 @@ export async function joinWithPass(input: {
 export async function reconnectSession(input: {
   table_token: string;
   secret: string;
-}): Promise<GrantedSession> {
+} & Pick<SessionEntryOptions, "scan_time">): Promise<GrantedSession> {
   const table = await requireSessionRow(input.table_token);
+
+  assertFreshSession(table, input.scan_time);
 
   if (table.status !== "active" || !table.session_secret) {
     throw new AppError(403, "SESSION_ENDED", SESSION_ENDED_MESSAGE);
@@ -488,7 +647,9 @@ export async function checkAndAutoReleaseTable(tableId: string): Promise<AutoRel
 
 /* Shared cleanup for every path that hands a table to its next party:
    auto-release, a staff clear, and an admin override. Orders are history and
-   are never deleted; the session credentials, cart and presence all die. */
+   are never deleted; the session credentials, cart, roster and presence all
+   die, and `last_cleared_at` records WHEN — that timestamp is what makes a
+   long-cached phone page answer STALE_SESSION instead of seating a stranger. */
 async function clearTableRows(client: PoolClient, tableId: string): Promise<void> {
   await client.query(
     `UPDATE restaurant_tables
@@ -500,12 +661,14 @@ async function clearTableRows(client: PoolClient, tableId: string): Promise<void
             bill_status         = 'unrequested',
             bill_requested_at   = NULL,
             bill_paid_at        = NULL,
-            clear_requested_at  = NULL
+            clear_requested_at  = NULL,
+            last_cleared_at     = now()
       WHERE id = $1`,
     [tableId],
   );
 
   await client.query("DELETE FROM cart_items WHERE table_id = $1", [tableId]);
+  await client.query("DELETE FROM table_members WHERE table_id = $1", [tableId]);
   await client.query("DELETE FROM table_device_presence WHERE table_id = $1", [tableId]);
 }
 
@@ -560,7 +723,11 @@ export async function clearTableSession(
     /* Money owed is scoped to the CURRENT session. Orders are never deleted
        (history is immutable), so counting every order on the table would
        make one past bill block staff clears forever. Only tickets fired
-       after this session started can belong to this party. */
+       after this session started can belong to this party.
+
+       A DENIED ticket is excluded on purpose: no food was cooked or run, so
+       it is not a debt. Without this filter one out-of-stock round would
+       mark the table permanently unpaid and only a manager could clear it. */
     const counts = await client.query<{
       order_count: number;
       session_order_count: number;
@@ -569,6 +736,7 @@ export async function clearTableSession(
       `SELECT count(*)::int AS order_count,
               count(*) FILTER (
                 WHERE created_at >= $2
+                  AND status <> 'denied'
               )::int AS session_order_count,
               count(*) FILTER (
                 WHERE status IN ('pending', 'preparing', 'ready')

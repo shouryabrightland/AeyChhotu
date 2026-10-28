@@ -1,24 +1,42 @@
-import { Router } from "express";
+import { Router, raw } from "express";
+import { AppError } from "../errors/app-error.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import {
   archiveMenuItem,
   archiveTable,
   clearTableAsAdmin,
   createMenuItem,
+  deactivateTableAsAdmin,
   createTable,
   listAdminMenu,
   listAdminTables,
   regenerateTableToken,
   topSellingAnalytics,
   updateMenuItem,
+  updateTableCode,
   updateTableName,
 } from "../services/admin.service.js";
 import {
+  createCategory,
+  deleteCategory,
+  listCategories,
+  updateCategory,
+} from "../services/catalog.service.js";
+import {
+  MAX_IMAGE_BYTES,
+  removeMenuItemImage,
+  replaceMenuItemImage,
+} from "../services/menu-image.service.js";
+import {
+  adminCategoryParamsSchema,
+  adminCreateCategorySchema,
   adminCreateMenuItemSchema,
   adminCreateTableSchema,
   adminMenuItemParamsSchema,
   adminTableParamsSchema,
+  adminUpdateCategorySchema,
   adminUpdateMenuItemSchema,
+  adminUpdateTableCodeSchema,
   adminUpdateTableSchema,
   parseOrThrow,
 } from "../validation/schemas.js";
@@ -28,14 +46,23 @@ import {
  *   POST   /api/v1/admin/tables                              create a table
  *   GET    /api/v1/admin/tables                              live table grid
  *   PATCH  /api/v1/admin/tables/:table_id                    rename
+ *   PATCH  /api/v1/admin/tables/:table_id/code               repair the table code (empty tables only)
  *   POST   /api/v1/admin/tables/:table_id/regenerate-token   reset QR + session
  *   POST   /api/v1/admin/tables/:table_id/clear              override a staff clear
+ *   POST   /api/v1/admin/tables/:table_id/deactivate         close the table now, unconditionally
  *   DELETE /api/v1/admin/tables/:table_id                    archive
  *
  *   GET    /api/v1/admin/menu                                full live catalog
  *   POST   /api/v1/admin/menu                                add a dish
  *   PATCH  /api/v1/admin/menu/:menu_item_id                  edit a dish
  *   DELETE /api/v1/admin/menu/:menu_item_id                  archive a dish
+ *   POST   /api/v1/admin/menu/:menu_item_id/image            upload/replace a photo
+ *   DELETE /api/v1/admin/menu/:menu_item_id/image            remove a photo
+ *
+ *   GET    /api/v1/admin/categories                          catalogue folders
+ *   POST   /api/v1/admin/categories                          create a folder
+ *   PATCH  /api/v1/admin/categories/:category_id             rename/move/cover
+ *   DELETE /api/v1/admin/categories/:category_id             archive an empty folder
  *
  *   GET    /api/v1/admin/analytics/top-selling               money + leaderboard
  *
@@ -67,6 +94,15 @@ adminRouter.patch("/tables/:table_id", async (req, res) => {
   res.status(200).json({ success: true, data });
 });
 
+/* Correcting the code a QR stand was printed with. A separate path from the
+   rename PATCH because it carries its own rule: the table must be empty. */
+adminRouter.patch("/tables/:table_id/code", async (req, res) => {
+  const params = parseOrThrow(adminTableParamsSchema, req.params);
+  const body = parseOrThrow(adminUpdateTableCodeSchema, req.body);
+  const data = await updateTableCode(params.table_id, body);
+  res.status(200).json({ success: true, data });
+});
+
 adminRouter.post("/tables/:table_id/regenerate-token", async (req, res) => {
   const params = parseOrThrow(adminTableParamsSchema, req.params);
   const data = await regenerateTableToken(params.table_id);
@@ -78,6 +114,13 @@ adminRouter.post("/tables/:table_id/regenerate-token", async (req, res) => {
 adminRouter.post("/tables/:table_id/clear", async (req, res) => {
   const params = parseOrThrow(adminTableParamsSchema, req.params);
   const data = await clearTableAsAdmin(params.table_id);
+  res.status(200).json({ success: true, data });
+});
+
+/* The manager's unconditional "stop this table". */
+adminRouter.post("/tables/:table_id/deactivate", async (req, res) => {
+  const params = parseOrThrow(adminTableParamsSchema, req.params);
+  const data = await deactivateTableAsAdmin(params.table_id);
   res.status(200).json({ success: true, data });
 });
 
@@ -110,6 +153,67 @@ adminRouter.patch("/menu/:menu_item_id", async (req, res) => {
 adminRouter.delete("/menu/:menu_item_id", async (req, res) => {
   const params = parseOrThrow(adminMenuItemParamsSchema, req.params);
   const data = await archiveMenuItem(params.menu_item_id);
+  res.status(200).json({ success: true, data });
+});
+
+// ---- Catalogue folders -----------------------------------------------
+
+adminRouter.get("/categories", async (_req, res) => {
+  const data = await listCategories();
+  res.status(200).json({ success: true, data });
+});
+
+adminRouter.post("/categories", async (req, res) => {
+  const body = parseOrThrow(adminCreateCategorySchema, req.body);
+  const data = await createCategory(body);
+  res.status(201).json({ success: true, data });
+});
+
+adminRouter.patch("/categories/:category_id", async (req, res) => {
+  const params = parseOrThrow(adminCategoryParamsSchema, req.params);
+  const body = parseOrThrow(adminUpdateCategorySchema, req.body);
+  const data = await updateCategory(params.category_id, body);
+  res.status(200).json({ success: true, data });
+});
+
+adminRouter.delete("/categories/:category_id", async (req, res) => {
+  const params = parseOrThrow(adminCategoryParamsSchema, req.params);
+  const data = await deleteCategory(params.category_id);
+  res.status(200).json({ success: true, data });
+});
+
+// ---- Dish photos ------------------------------------------------------
+
+/* The body IS the file, with its own Content-Type — no multipart envelope.
+   That keeps the handler free of a form parser and makes the 8 MB ceiling a
+   property of the route itself. What lands in `req.body` is untrusted bytes;
+   the service sniffs the magic number before sharp ever touches it. */
+adminRouter.post(
+  "/menu/:menu_item_id/image",
+  raw({ type: () => true, limit: MAX_IMAGE_BYTES }),
+  async (req, res) => {
+    const params = parseOrThrow(adminMenuItemParamsSchema, req.params);
+
+    if (!Buffer.isBuffer(req.body)) {
+      throw new AppError(
+        415,
+        "INVALID_IMAGE",
+        "Send the image file itself as the request body.",
+      );
+    }
+
+    const data = await replaceMenuItemImage(
+      params.menu_item_id,
+      req.body,
+      String(req.headers["content-type"] ?? ""),
+    );
+    res.status(200).json({ success: true, data });
+  },
+);
+
+adminRouter.delete("/menu/:menu_item_id/image", async (req, res) => {
+  const params = parseOrThrow(adminMenuItemParamsSchema, req.params);
+  const data = await removeMenuItemImage(params.menu_item_id);
   res.status(200).json({ success: true, data });
 });
 

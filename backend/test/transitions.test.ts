@@ -8,27 +8,36 @@ import { describe, it } from "node:test";
    be noticed. These are the rules the API layer may rely on. */
 
 const LIVE_STATUSES = ["pending", "preparing", "ready"] as const;
-const ALL_STATUSES = [...LIVE_STATUSES, "served"] as const;
+const ALL_STATUSES = [...LIVE_STATUSES, "served", "denied"] as const;
 
-/** Mirrors enforce_order_status_transition() in sql/004_hardening.sql:
-      pending→preparing, preparing→ready, any live→served; everything
-      else (backwards, skipping, repeating, touching 'served') is refused. */
+/** Mirrors enforce_order_status_transition() in sql/011 (which supersedes
+   sql/004): pending→preparing, preparing→ready, any live→served, and any
+   live→denied. Everything else (backwards, skipping, repeating, or leaving a
+   terminal state) is refused. */
 function isLegalTransition(from: string, to: string): boolean {
   if (from === to) return false;
   if (from === "pending" && to === "preparing") return true;
   if (from === "preparing" && to === "ready") return true;
-  if (to === "served" && (LIVE_STATUSES as readonly string[]).includes(from)) return true;
+  if (
+    (to === "served" || to === "denied") &&
+    (LIVE_STATUSES as readonly string[]).includes(from)
+  ) {
+    return true;
+  }
   return false;
 }
 
 describe("order status transition matrix (Rule 13)", () => {
-  it("allows exactly the three documented forward moves", () => {
+  it("allows exactly the documented forward moves plus refusal", () => {
     const legal = new Set([
       "pending>preparing",
       "preparing>ready",
       "pending>served",
       "preparing>served",
       "ready>served",
+      "pending>denied",
+      "preparing>denied",
+      "ready>denied",
     ]);
     for (const from of ALL_STATUSES) {
       for (const to of ALL_STATUSES) {
@@ -58,6 +67,20 @@ describe("order status transition matrix (Rule 13)", () => {
     for (const to of ALL_STATUSES) {
       assert.equal(isLegalTransition("served", to), false, `served>${to} must be illegal`);
     }
+  });
+
+  it("treats 'denied' as terminal too — a retry is a NEW ticket", () => {
+    for (const to of ALL_STATUSES) {
+      assert.equal(isLegalTransition("denied", to), false, `denied>${to} must be illegal`);
+    }
+  });
+
+  it("allows refusal from every live stage, never from a closed one", () => {
+    for (const from of LIVE_STATUSES) {
+      assert.equal(isLegalTransition(from, "denied"), true, `${from}>denied must be legal`);
+    }
+    assert.equal(isLegalTransition("served", "denied"), false);
+    assert.equal(isLegalTransition("denied", "denied"), false);
   });
 });
 

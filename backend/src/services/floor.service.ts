@@ -31,6 +31,9 @@ export interface FloorTable {
   bill_status: BillStatus;
   /** Set when a staff clear was refused for an unpaid bill. */
   clear_requested_at: string | null;
+  /** True when this seating has tickets and the bill is not marked paid.
+      Staff can see it, but only a manager may clear the table. */
+  bill_unpaid: boolean;
   active_order: {
     order_id: string;
     status: string;
@@ -72,6 +75,7 @@ export async function listFloorTables(params: {
     status: string;
     bill_status: BillStatus;
     clear_requested_at: Date | null;
+    bill_unpaid: boolean;
     active_order: FloorTable["active_order"];
     cart_line_count: number;
     active_devices: number;
@@ -82,6 +86,16 @@ export async function listFloorTables(params: {
             t.status,
             t.bill_status,
             t.clear_requested_at,
+            (t.bill_status <> 'paid'
+             AND t.session_started_at IS NOT NULL
+             AND EXISTS (
+               SELECT 1
+                 FROM orders o2
+                WHERE o2.table_id = t.id
+                  AND o2.created_at >= t.session_started_at
+                  -- A DENIED round was never cooked, so it is not a debt.
+                  AND o2.status <> 'denied'
+             )) AS bill_unpaid,
             (
               SELECT jsonb_build_object(
                        'order_id',   o.id,
@@ -96,6 +110,7 @@ export async function listFloorTables(params: {
                                       'quantity',     oi.quantity,
                                       'request_note', oi.request_note,
                                       'allergy_note', oi.allergy_note,
+                                      'added_by',     oi.added_by,
                                       -- price charged at fire time (sql/004_hardening.sql)
                                       'unit_price',   oi.unit_price
                                     )
@@ -147,6 +162,7 @@ export async function listFloorTables(params: {
       status: row.status,
       bill_status: row.bill_status,
       clear_requested_at: row.clear_requested_at ? iso(row.clear_requested_at) : null,
+      bill_unpaid: row.bill_unpaid,
       active_order: activeOrder,
       cart_line_count: row.cart_line_count,
       active_devices: row.active_devices,
@@ -214,6 +230,68 @@ export interface ClearFloorTableResult {
   table_id: string;
   cleared: true;
   bill_status: BillStatus;
+}
+
+/* POST /api/v1/floor/tables/:table_id/notify
+
+   The staff action for a flagged table that still owes money: instead of a
+   clear that the server would refuse, this raises the manager alert on
+   purpose. It refuses when nothing is owed, because then the staff clear is
+   the right action — a notification would just make a manager walk over for
+   no reason. */
+export interface NotifyAdminResult {
+  table_id: string;
+  notified: true;
+  clear_requested_at: string;
+}
+
+export async function notifyAdminForTable(tableId: string): Promise<NotifyAdminResult> {
+  const found = await pool.query<{ bill_unpaid: boolean }>(
+    `SELECT (t.bill_status <> 'paid'
+             AND t.session_started_at IS NOT NULL
+             AND EXISTS (
+               SELECT 1
+                 FROM orders o
+                WHERE o.table_id = t.id
+                  AND o.created_at >= t.session_started_at
+                  AND o.status <> 'denied'
+             )) AS bill_unpaid
+       FROM restaurant_tables t
+      WHERE t.id = $1 AND t.deleted_at IS NULL`,
+    [tableId],
+  );
+
+  const row = found.rows[0];
+  if (!row) {
+    throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table id parsed.");
+  }
+
+  if (!row.bill_unpaid) {
+    throw new AppError(
+      409,
+      "NO_OUTSTANDING_BILL",
+      "Nothing is owed on this table — you can clear it directly.",
+    );
+  }
+
+  const updated = await pool.query<{ clear_requested_at: Date }>(
+    `UPDATE restaurant_tables
+        SET clear_requested_at = COALESCE(clear_requested_at, now())
+      WHERE id = $1
+      RETURNING clear_requested_at`,
+    [tableId],
+  );
+
+  const requestedAt = updated.rows[0]?.clear_requested_at;
+  if (!requestedAt) {
+    throw new AppError(500, "INTERNAL_ERROR", "The manager alert could not be raised.");
+  }
+
+  return {
+    table_id: tableId,
+    notified: true,
+    clear_requested_at: iso(requestedAt),
+  };
 }
 
 export async function clearFloorTable(tableId: string): Promise<ClearFloorTableResult> {

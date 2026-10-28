@@ -24,6 +24,7 @@ import {
   fetchAllPages,
   getFloorTables as apiGetFloorTables,
   getMenu as apiGetMenu,
+  subscribeMenuUpdates,
   toMenuItem,
   toggleItemAvailability,
 } from "@/lib/api-client";
@@ -105,6 +106,18 @@ export function useStaffMenuCatalog(tokenHint?: string | null): StaffMenuCatalog
       cancelled = true;
     };
   }, [load]);
+
+  /* An 86 taken on ANOTHER staff screen (the kitchen drawer talking to the
+     floor tablet) must show up here too: without this channel the drawer
+     would offer a dish the kitchen already stopped serving, and the next
+     "unavailable" tap would silently re-enable it. */
+  useEffect(() => {
+    if (!ready) return;
+
+    return subscribeMenuUpdates(() => {
+      void refresh();
+    });
+  }, [ready, refresh]);
 
   const setAvailability = useCallback(async (menuItemId: string, isAvailable: boolean) => {
     try {

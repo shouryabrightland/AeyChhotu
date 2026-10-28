@@ -1,5 +1,11 @@
 import { Router } from "express";
-import { fireOrder, getOrderStatus, listOrders } from "../services/orders.service.js";
+import {
+  dismissDeniedOrder,
+  fireOrder,
+  getOrderStatus,
+  listOrders,
+  requeueDeniedOrder,
+} from "../services/orders.service.js";
 import {
   fireSchema,
   orderStatusParamsSchema,
@@ -32,5 +38,26 @@ ordersRouter.get("/:order_id/status", async (req, res) => {
   const params = parseOrThrow(orderStatusParamsSchema, req.params);
   const query = parseOrThrow(orderStatusQuerySchema, req.query);
   const data = await getOrderStatus(params.order_id, query.table_token);
+  res.status(200).json({ success: true, data });
+});
+
+/* POST /api/v1/orders/:order_id/requeue?table_token=…
+   The diner's "Move to list" (and the second half of "Retry"): the denied
+   round's still-available lines go back into the shared cart for editing and
+   the refused ticket is removed. Scoped to the caller's table like E15. */
+ordersRouter.post("/:order_id/requeue", async (req, res) => {
+  const params = parseOrThrow(orderStatusParamsSchema, req.params);
+  const query = parseOrThrow(orderStatusQuerySchema, req.query);
+  const data = await requeueDeniedOrder(params.order_id, query.table_token);
+  res.status(200).json({ success: true, data });
+});
+
+/* POST /api/v1/orders/:order_id/dismiss?table_token=…
+   The diner's "Cancel": only a denied round may be discarded, and it is
+   removed outright because it was never cooked or billed. */
+ordersRouter.post("/:order_id/dismiss", async (req, res) => {
+  const params = parseOrThrow(orderStatusParamsSchema, req.params);
+  const query = parseOrThrow(orderStatusQuerySchema, req.query);
+  const data = await dismissDeniedOrder(params.order_id, query.table_token);
   res.status(200).json({ success: true, data });
 });

@@ -56,9 +56,23 @@ describe("the bill request signal", () => {
 });
 
 describe("settlement", () => {
-  it("ignores a settle for a table that never asked", () => {
+  /* A staff member can take payment without the diner ever tapping "request
+     the bill" (the floor board settles the table directly, and the broadcast
+     arrives over Realtime). The diner's screen must still show the thank-you,
+     so settlement is recorded even with no prior request — the request time is
+     back-filled from the settlement. This is the cross-device half of the
+     handoff; the old "ignore it" rule left that guest on a dead menu. */
+  it("records a settle even for a table that never asked", () => {
     settleBill("bill-never-asked");
-    assert.equal(getBill("bill-never-asked"), null);
+
+    const event = getBill("bill-never-asked");
+    assert.ok(event, "a settle must be visible without a prior request");
+    assert.ok(event.settled_at, "the diner must see that the bill was settled");
+    assert.equal(
+      event.requested_at,
+      event.settled_at,
+      "the missing request is back-filled with the settlement time",
+    );
   });
 
   it("keeps the original request when a server takes payment", () => {

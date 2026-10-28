@@ -1,18 +1,18 @@
 "use client";
 
-import { ArrowLeft, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { motion } from "motion/react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { DishCard } from "@/components/diner/dish-card";
 import { DishDeck } from "@/components/diner/dish-deck";
-import { DiscoveryCard } from "@/components/diner/discovery-card";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
+import { getMenuCategories, type MenuCategoryNode } from "@/lib/api-client";
 import type { MenuItem } from "@/lib/api/types";
 import { DIET_FILTERS, matchesDiet, type DietFilter } from "@/lib/diner/diet";
-import { buildMenuAtlas, searchMenu } from "@/lib/diner/menu-atlas";
+import { buildMenuSections } from "@/lib/diner/menu-sections";
+import { searchMenu } from "@/lib/diner/menu-atlas";
 import { transitionBase } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
@@ -31,21 +31,18 @@ export interface MenuBrowserProps {
   stickyTopClass?: string;
 }
 
-/* Search is a filter over the whole menu rather than a place you navigate to,
-   so it is deliberately not a stage: clearing the query puts the guest back
-   exactly where they were. */
-type Stage =
-  | { level: "cuisines" }
-  | { level: "categories"; cuisineId: string }
-  | { level: "dishes"; cuisineId: string; categoryName: string | null };
+/* The menu, laid out exactly as the manager organised it.
 
-/* The menu, opened the way a menu opens: a few broad menus first, then the
-   sections inside one, then the dishes themselves.
+   Every section is a folder from the admin catalogue (menu_categories), in
+   the folder order the admin set, with child folders nested one step in.
+   Inside a section sits the one-card deck: swipe right to add, left to skip,
+   and the next two dishes peek out from behind so the rail reads as a row
+   that continues rather than a single card.
 
-   Every level is derived from the dishes the API already sent — the cuisines
-   are a presentation layer (lib/diner/menu-atlas) and the sections inside
-   them are the backend's own category strings. Search stays as the secondary
-   way in for a guest who already knows what they want. */
+   The admin tree can fail to load (older API, flaky network). When it does,
+   `buildMenuSections` falls back to the dishes' own category labels, so the
+   table never loses its menu because a grouping convenience failed. Search is
+   still a flat filter over everything, independent of the sections. */
 export function MenuBrowser({
   menu,
   quantities,
@@ -57,81 +54,46 @@ export function MenuBrowser({
   stickyTopClass = "top-0",
 }: MenuBrowserProps) {
   const [query, setQuery] = useState("");
-  const [stage, setStage] = useState<Stage>({ level: "cuisines" });
   // One diet at a time, with "All" as an explicit choice — see lib/diner/diet.
   const [diet, setDiet] = useState<DietFilter>("all");
+  const [categories, setCategories] = useState<MenuCategoryNode[] | null>(null);
 
-  /* The filter narrows the menu BEFORE the atlas is built, so a cuisine card
-     and its count only ever describe dishes the guest can order under the
-     active diet. Changing the filter returns to the top, because the level
-     the guest was standing on may no longer exist. */
+  /* The tree is decoration over the dishes: while it loads (or if it fails),
+     the fallback grouping is what renders. An error is deliberately silent —
+     a guest should never be shown "category service unavailable". */
+  useEffect(() => {
+    let cancelled = false;
+
+    getMenuCategories()
+      .then((rows) => {
+        if (!cancelled) setCategories(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setCategories([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /* The filter narrows the menu BEFORE the sections are built, so a section
+     only ever describes dishes the guest can order under the active diet. */
   const visibleMenu = useMemo(() => menu.filter((item) => matchesDiet(item, diet)), [menu, diet]);
-  const atlas = useMemo(() => buildMenuAtlas(visibleMenu), [visibleMenu]);
   const matches = useMemo(() => searchMenu(visibleMenu, query), [visibleMenu, query]);
-
-  function chooseDiet(next: DietFilter) {
-    setDiet(next);
-    setStage({ level: "cuisines" });
-  }
+  const sections = useMemo(
+    () => buildMenuSections(visibleMenu, categories),
+    [visibleMenu, categories],
+  );
 
   const searching = query.trim().length > 0;
-  const cuisines = atlas.cuisines;
-  const activeCuisine =
-    stage.level === "categories" || stage.level === "dishes"
-      ? (cuisines.find((cuisine) => cuisine.id === stage.cuisineId) ?? null)
-      : null;
-  const activeCategory =
-    stage.level === "dishes" && stage.categoryName
-      ? (activeCuisine?.categories.find((category) => category.name === stage.categoryName) ?? null)
-      : null;
-
-  /* When the backend's vocabulary is unknown, the atlas collapses to a single
-     group and the root stage leads with the real categories instead — the two
-     levels survive, they just start one rung lower. */
-  const rootCuisine = atlas.grouped ? null : (cuisines[0] ?? null);
-  const dishes = activeCategory
-    ? activeCategory.items
-    : (activeCuisine?.categories.flatMap((category) => category.items) ?? []);
-
-  const stageKey = searching
-    ? `search:${diet}`
-    : stage.level === "cuisines"
-      ? `cuisines:${diet}`
-      : stage.level === "categories"
-        ? `categories:${diet}:${stage.cuisineId}`
-        : `dishes:${diet}:${stage.cuisineId}:${stage.categoryName ?? "all"}`;
-
-  function selectCuisine(cuisineId: string, categoryName: string | null) {
-    // A cuisine with one section goes straight to its dishes: a level that
-    // only ever holds a single card is friction, not discovery.
-    setStage(
-      categoryName === null
-        ? { level: "categories", cuisineId }
-        : { level: "dishes", cuisineId, categoryName },
-    );
-  }
-
-  function goBack() {
-    setStage(
-      stage.level === "dishes" && stage.categoryName && activeCuisine && !activeCuisine.singleCategory
-        ? { level: "categories", cuisineId: stage.cuisineId }
-        : { level: "cuisines" },
-    );
-  }
 
   return (
     <div className="flex flex-col gap-7">
       {/* Sticky so search and the diet filter stay reachable while the guest
-          scrolls a long section. The offset is `--diner-nav-h`, published by
-          the navbar's ResizeObserver, so the two bands dock together instead
-          of the search sliding under the header.
-
-          TWO rows on a phone, ONE row from `sm` up. Side by side seemed
-          compact, but at 320–380px the diet strip squeezed the search input
-          down to a stub ("Ready to or…") that could not show a query. On a
-          phone the input now owns line 1 at full width and the chips own
-          line 2, scrolling sideways inside their own strip so the sticky band
-          never grows past two rows. From `sm` the two share a line again. */}
+          scrolls a long menu. The offset is `--diner-nav-h`, published by the
+          navbar's ResizeObserver, so the two bands dock together instead of
+          the search sliding under the header. */}
       <div
         className={cn(
           "sticky z-20 -mx-1 rounded-lg bg-canvas/90 px-1 py-1.5 backdrop-blur-md",
@@ -163,7 +125,7 @@ export function MenuBrowser({
               <button
                 key={option.id}
                 type="button"
-                onClick={() => chooseDiet(option.id)}
+                onClick={() => setDiet(option.id)}
                 aria-pressed={diet === option.id}
                 className={cn(
                   "flex h-full shrink-0 cursor-pointer items-center rounded-sm px-3 text-sm font-semibold transition-colors duration-[var(--duration-fast)] sm:px-3.5",
@@ -178,76 +140,18 @@ export function MenuBrowser({
       </div>
 
       <motion.div
-        key={stageKey}
+        key={searching ? "search" : `rails:${diet}`}
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={transitionBase}
         className="flex flex-col gap-7"
       >
-        {/* Path + way back. Two ways out of any level, so nobody gets lost. */}
-        {searching ? null : (
-          <div className="flex flex-wrap items-center gap-3">
-            {/* One way up, one trail. The arrow is the control a thumb
-                reaches for; the trail says where you are. */}
-            {stage.level === "cuisines" ? null : (
-              <IconButton
-                label={
-                  activeCategory && activeCuisine && !activeCuisine.singleCategory
-                    ? `Back to all ${activeCuisine.name}`
-                    : atlas.grouped
-                      ? "Back to all menus"
-                      : "Back to the full menu"
-                }
-                size="sm"
-                tone="outline"
-                onClick={goBack}
-              >
-                <ArrowLeft className="size-4" aria-hidden />
-              </IconButton>
-            )}
-
-            <nav
-              aria-label="Where you are in the menu"
-              className="flex flex-wrap items-center gap-2 text-xs font-medium text-ink-subtle"
-            >
-              <button
-                type="button"
-                onClick={() => setStage({ level: "cuisines" })}
-                className="cursor-pointer rounded-sm transition-colors duration-[var(--duration-fast)] hover:text-ember"
-              >
-                {atlas.grouped ? "All menus" : "Full menu"}
-              </button>
-              {atlas.grouped && activeCuisine ? (
-                <>
-                  <span aria-hidden>/</span>
-                  <button
-                    type="button"
-                    onClick={goBack}
-                    className="cursor-pointer rounded-sm transition-colors duration-[var(--duration-fast)] hover:text-ember"
-                  >
-                    {activeCuisine.name}
-                  </button>
-                </>
-              ) : null}
-              {/* Skip the section crumb when it repeats the menu's own name:
-                  a single-section cuisine would otherwise read
-                  "South Indian / South Indian". */}
-              {activeCategory && activeCategory.name !== activeCuisine?.name ? (
-                <>
-                  <span aria-hidden>/</span>
-                  <span className="text-ink">{activeCategory.name}</span>
-                </>
-              ) : null}
-            </nav>
-          </div>
-        )}
-
-        {!searching && visibleMenu.length === 0 ? (
+        {visibleMenu.length === 0 ? (
           <EmptyState
             title="Nothing on the menu fits that"
             description="No dish is tagged for this diet yet. Try another filter."
             action={
-              <Button variant="soft" size="md" onClick={() => chooseDiet("all")}>
+              <Button variant="soft" size="md" onClick={() => setDiet("all")}>
                 Show everything
               </Button>
             }
@@ -256,7 +160,7 @@ export function MenuBrowser({
           matches.length === 0 ? (
             <EmptyState
               title="Nothing matches that"
-              description="Try another dish, or clear the search to browse the menus."
+              description="Try another dish, or clear the search to browse the menu."
               action={
                 <Button variant="soft" size="md" onClick={() => setQuery("")}>
                   Clear search
@@ -278,139 +182,55 @@ export function MenuBrowser({
               />
             </section>
           )
-        ) : stage.level === "cuisines" ? (
-          atlas.grouped ? (
-            <section className="flex flex-col gap-5">
-              <StageHeading
-                title="What are you in the mood for?"
-                description="Pick a menu, then the section you want."
-              />
-              <div className="grid gap-5 sm:grid-cols-2">
-                {cuisines.map((cuisine) => {
-                  // Every cuisine the atlas builds has at least one dish; the
-                  // guard is here so the type is honest, not because it fires.
-                  const dish = cuisine.categories[0]?.items[0];
-                  if (!dish) return null;
-
-                  return (
-                    <DiscoveryCard
-                      key={cuisine.id}
-                      name={cuisine.name}
-                      tagline={cuisine.tagline}
-                      itemCount={cuisine.itemCount}
-                      representative={dish}
-                      onSelect={() =>
-                        selectCuisine(
-                          cuisine.id,
-                          cuisine.singleCategory ? (cuisine.categories[0]?.name ?? null) : null,
-                        )
-                      }
-                    />
-                  );
-                })}
-              </div>
-            </section>
-          ) : (
-            <section className="flex flex-col gap-5">
-              <StageHeading title="Sections" description="Everything the kitchen is serving today." />
-              <div className="grid gap-5 sm:grid-cols-2">
-                {(rootCuisine?.categories ?? []).map((category) => {
-                  const dish = category.items[0];
-                  if (!dish) return null;
-
-                  return (
-                    <DiscoveryCard
-                      key={category.name}
-                      name={category.name}
-                      itemCount={category.items.length}
-                      representative={dish}
-                      variant="category"
-                      onSelect={() =>
-                        setStage({
-                          level: "dishes",
-                          cuisineId: rootCuisine?.id ?? "",
-                          categoryName: category.name,
-                        })
-                      }
-                    />
-                  );
-                })}
-              </div>
-            </section>
-          )
-        ) : stage.level === "categories" && activeCuisine ? (
-          <section className="flex flex-col gap-5">
-            <StageHeading
-              title={activeCuisine.name}
-              description={activeCuisine.tagline}
-            />
-            <div className="grid gap-5 sm:grid-cols-2">
-              {activeCuisine.categories.map((category) => {
-                const dish = category.items[0];
-                if (!dish) return null;
-
-                return (
-                  <DiscoveryCard
-                    key={category.name}
-                    name={category.name}
-                    itemCount={category.items.length}
-                    representative={dish}
-                    variant="category"
-                    onSelect={() =>
-                      setStage({
-                        level: "dishes",
-                        cuisineId: activeCuisine.id,
-                        categoryName: category.name,
-                      })
-                    }
-                  />
-                );
-              })}
-            </div>
-            <Button
-              variant="soft"
-              size="md"
-              className="self-start"
-              onClick={() =>
-                setStage({ level: "dishes", cuisineId: activeCuisine.id, categoryName: null })
-              }
-            >
-              See everything in {activeCuisine.name}
-            </Button>
-          </section>
         ) : (
-          <section className="flex flex-col gap-5">
+          <div className="flex flex-col gap-9">
             <StageHeading
-              title={activeCategory?.name ?? (activeCuisine?.name ?? "The menu")}
-              description={
-                activeCategory
-                  ? `${activeCategory.items.length} ${
-                      activeCategory.items.length === 1 ? "dish" : "dishes"
-                    } the kitchen is serving.`
-                  : "Every section of this menu, in one run."
-              }
+              title="Today’s menu"
+              description={`${visibleMenu.length} ${
+                visibleMenu.length === 1 ? "dish" : "dishes"
+              } in ${sections.length} ${sections.length === 1 ? "section" : "sections"} · swipe right to add, left to skip.`}
             />
 
-            {dishes.length === 0 ? (
-              <EmptyState
-                title="Nothing in this section yet"
-                description="The kitchen has not stocked it under this filter. Try another section."
-              />
-            ) : (
-              <DishDeck
-                key={stageKey}
-                items={dishes}
-                quantities={quantities}
-                pendingItemId={pendingItemId}
-                itemErrors={itemErrors}
-                onAdd={onAdd}
-                stageLabel={activeCategory?.name ?? (activeCuisine?.name ?? "this section")}
-                cartItemCount={cartItemCount}
-                onReview={onReview}
-                className="mx-auto w-full max-w-xl"
-              />
-            )}
-          </section>
+            {sections.map((section) => (
+              <section
+                key={section.id}
+                className={cn(
+                  "flex flex-col gap-4",
+                  // Child folders read as one step in, like a nested menu.
+                  section.depth > 0 && "border-l border-line pl-4 sm:pl-6",
+                )}
+              >
+                <header className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h3
+                    className={cn(
+                      "font-display text-ink",
+                      section.depth === 0 ? "text-heading" : "text-subheading",
+                    )}
+                  >
+                    {section.name}
+                  </h3>
+                  <span className="text-xs font-medium text-ink-subtle tabular-nums">
+                    {section.items.length} {section.items.length === 1 ? "dish" : "dishes"}
+                  </span>
+                </header>
+
+                <DishDeck
+                  /* Remount when the section's dish set changes (86'ing,
+                     re-filtering), so the queue can never hold a stale dish. */
+                  key={`${section.id}:${diet}:${section.items.map((item) => item.id).join(",")}`}
+                  items={section.items}
+                  quantities={quantities}
+                  pendingItemId={pendingItemId}
+                  itemErrors={itemErrors}
+                  onAdd={onAdd}
+                  stageLabel={section.name}
+                  cartItemCount={cartItemCount}
+                  onReview={onReview}
+                  className="w-full"
+                />
+              </section>
+            ))}
+          </div>
         )}
       </motion.div>
     </div>
@@ -420,9 +240,6 @@ export function MenuBrowser({
 function StageHeading({ title, description }: { title: string; description?: string }) {
   return (
     <div className="relative flex w-full flex-col gap-2 border-b border-line pb-4">
-      {/* No max-width here: a long cuisine name ("Indo-Chinese · Street Food")
-          was clipped rather than wrapped on a narrow phone. The heading takes
-          the full column and balances its lines. */}
       <h2 className="font-display text-heading text-balance text-ink">{title}</h2>
       {description ? <p className="text-sm text-ink-muted">{description}</p> : null}
       <span aria-hidden className="absolute -bottom-px left-0 h-0.5 w-12 bg-ember" />

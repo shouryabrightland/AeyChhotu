@@ -20,8 +20,29 @@ const note = z.string().max(500, "Notes must be 500 characters or fewer.");
 
 // ---- Module 1: Session & Access -------------------------------------
 
+/* When the CLIENT opened the page. The backend refuses a session whose
+   scan_time predates restaurant_tables.last_cleared_at (STALE_SESSION), so a
+   long-cached page cannot resurrect the previous party's table. Parsed rather
+   than pattern-matched: any string Date can read is a valid instant. */
+const scanTime = z
+  .string()
+  .trim()
+  .refine((value) => !Number.isNaN(Date.parse(value)), "scan_time must be an ISO timestamp.")
+  .optional();
+
+/* The anonymous device identity registered in table_members. Optional for
+   backwards compatibility; when present the guest appears on the roster. */
+const sessionMember = {
+  user_id: z.string().trim().min(1, "user_id cannot be empty.").max(64, "user_id must be 64 characters or fewer.").optional(),
+  name: z.string().trim().max(40, "name must be 40 characters or fewer.").optional(),
+};
+
 /** E1 POST /api/v1/sessions/initialize */
-export const initializeSchema = z.object({ table_token: tableToken });
+export const initializeSchema = z.object({
+  table_token: tableToken,
+  scan_time: scanTime,
+  ...sessionMember,
+});
 
 /** E1b POST /api/v1/sessions/join-pin — the 2-digit table PIN.
     '00'–'99' only: the keypad can never produce anything else, so a
@@ -29,6 +50,8 @@ export const initializeSchema = z.object({ table_token: tableToken });
 export const joinPinSchema = z.object({
   table_token: tableToken,
   pin: z.string().regex(/^\d{2}$/, "PIN must be exactly two digits (00-99)."),
+  scan_time: scanTime,
+  ...sessionMember,
 });
 
 /** The 20-character pass shared by join-pass and reconnect. */
@@ -40,12 +63,15 @@ const tableSecret = z
 export const joinPassSchema = z.object({
   table_token: tableToken,
   secret: tableSecret,
+  scan_time: scanTime,
+  ...sessionMember,
 });
 
 /** E1d POST /api/v1/sessions/reconnect — a returning device, no keypad. */
 export const reconnectSchema = z.object({
   table_token: tableToken,
   secret: tableSecret,
+  scan_time: scanTime,
 });
 
 /** E2 POST /api/v1/auth/kds-login */
@@ -159,6 +185,16 @@ export const orderStatusSchema = z.object({
   status: z.enum(["preparing", "ready"]),
 });
 
+/** PATCH /api/v1/kds/tickets/:order_id/deny — the chef's refusal.
+    The reason is mandatory and is what the diner's tracker renders. */
+export const denyTicketSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(1, "Tell the diner why the order was refused.")
+    .max(300, "The denial reason must be 300 characters or fewer."),
+});
+
 /** E13 POST /api/v1/kds/shift/activate */
 export const shiftActivateSchema = z.object({
   device_id: z.string().min(1, "device_id is required.").max(64, "device_id must be 64 characters or fewer."),
@@ -202,6 +238,16 @@ export const adminUpdateTableSchema = z.object({
     .optional(),
 });
 
+/** PATCH /api/v1/admin/tables/:table_id/code — repair a table's printed QR
+    code. Uppercase is accepted and folded down by the service; the shape is
+    the same 5–8 character alphabet every generated code uses. */
+export const adminUpdateTableCodeSchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9]{5,8}$/, "Use 5–8 letters or digits, e.g. k7x2p16."),
+});
+
 /** Shared path params for the admin table sub-routes. */
 export const adminTableParamsSchema = z.object({ table_id: uuid("table_id") });
 
@@ -232,7 +278,10 @@ const adminDishDescription = z
 export const adminCreateMenuItemSchema = z.object({
   name: adminDishName,
   price: adminDishPrice,
-  category: adminDishCategory,
+  /* The folder id is authoritative when supplied; the text label remains for
+     clients that predate folders and is resolved to a root folder. */
+  category_id: uuid("category_id").nullable().optional(),
+  category: adminDishCategory.optional(),
   description: adminDishDescription.default(""),
   vegetarian: z.boolean().default(true),
   is_available: z.boolean().default(true),
@@ -244,6 +293,7 @@ export const adminUpdateMenuItemSchema = z
   .object({
     name: adminDishName.optional(),
     price: adminDishPrice.optional(),
+    category_id: uuid("category_id").nullable().optional(),
     category: adminDishCategory.optional(),
     description: adminDishDescription.optional(),
     vegetarian: z.boolean().optional(),
@@ -255,6 +305,42 @@ export const adminUpdateMenuItemSchema = z
 
 /** Path params for the admin menu item routes. */
 export const adminMenuItemParamsSchema = z.object({ menu_item_id: uuid("menu_item_id") });
+
+/** GET /api/v1/menu/items/:menu_item_id/image/:size — public dish photo. */
+export const menuImageParamsSchema = z.object({
+  menu_item_id: uuid("menu_item_id"),
+  size: z.enum(["original", "small", "tiny"]),
+});
+
+/** POST /api/v1/admin/categories */
+export const adminCreateCategorySchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1, "Give the folder a name.")
+    .max(60, "Folder names must be 60 characters or fewer."),
+  parent_id: uuid("parent_id").nullable().optional(),
+});
+
+/** PATCH /api/v1/admin/categories/:category_id */
+export const adminUpdateCategorySchema = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(1, "The folder name cannot be empty.")
+      .max(60, "Folder names must be 60 characters or fewer.")
+      .optional(),
+    parent_id: uuid("parent_id").nullable().optional(),
+    sort_order: z.coerce.number().int().min(0).max(100_000).optional(),
+    thumbnail_menu_item_id: uuid("thumbnail_menu_item_id").nullable().optional(),
+  })
+  .refine((body) => Object.values(body).some((value) => value !== undefined), {
+    message: "Provide at least one field to update.",
+  });
+
+/** Path params for the admin category routes. */
+export const adminCategoryParamsSchema = z.object({ category_id: uuid("category_id") });
 
 /* Validates a request slice and converts failures into the contract's
    400 VALIDATION_ERROR envelope with per-field messages (docs/7 §1.1). */

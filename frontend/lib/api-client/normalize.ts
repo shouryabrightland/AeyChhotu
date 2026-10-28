@@ -43,9 +43,13 @@ export function toMenuItem(item: ApiMenuItem): MenuItem {
     name: item.name,
     price: item.price,
     category: item.category,
+    category_id: item.category_id ?? null,
     is_available: item.is_available,
     description: item.description,
     vegetarian: item.vegetarian,
+    image_url: item.image_url ?? null,
+    image_small_url: item.image_small_url ?? null,
+    blur_data_url: item.blur_data_url ?? null,
   };
 }
 
@@ -73,7 +77,9 @@ function toOrderItems(orderId: string, items: OrderItemLine[]): OrderItem[] {
     quantity: item.quantity,
     request_note: item.request_note,
     allergy_note: item.allergy_note,
-    added_by: "",
+    // attribution is persisted on the ticket since sql/011, so the running
+    // bill can finally be split by person. Older payloads read as Guest.
+    added_by: item.added_by?.trim() || "Guest",
   }));
 }
 
@@ -88,6 +94,7 @@ export function toOrder(
     status: row.status as OrderStatus,
     created_at: row.created_at,
     updated_at: row.created_at,
+    denial_reason: row.denial_reason ?? "",
     items: toOrderItems(row.order_id, row.items),
   };
 }
@@ -119,6 +126,7 @@ export function toFloorSummary(row: FloorTableResponse): FloorTableSummary {
     active_devices: row.active_devices,
     needs_attention: row.needs_attention,
     clear_requested_at: row.clear_requested_at,
+    bill_unpaid: row.bill_unpaid,
   };
 }
 

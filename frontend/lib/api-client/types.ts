@@ -3,8 +3,12 @@
    Envelope: success { success: true, data, meta? }
              error   { success: false, error: { code, message, ...details } } */
 
-export type OrderStatus = "pending" | "preparing" | "ready" | "served";
-export type ActiveOrderStatus = Exclude<OrderStatus, "served">;
+/** A ticket the kitchen refused (an 86 after firing, or a chef's manual
+    denial). It is CLOSED — not served, not active — and it never appears on
+    the KDS board or in the bill. */
+export type OrderStatus = "pending" | "preparing" | "ready" | "served" | "denied";
+/** The three states that are still being worked on the line. */
+export type ActiveOrderStatus = "pending" | "preparing" | "ready";
 export type TableStatus = "active" | "empty";
 /** Bill lifecycle: a table is only releasable once 'paid'. */
 export type BillStatus = "unrequested" | "requested" | "paid";
@@ -39,9 +43,15 @@ export interface MenuItem {
   name: string;
   price: number;
   category: string;
+  /** Catalogue folder the dish lives in (absent on older payloads). */
+  category_id?: string | null;
   is_available: boolean;
   description: string;
   vegetarian: boolean;
+  /** An uploaded photo. Null/absent means the app's curated photography. */
+  image_url?: string | null;
+  image_small_url?: string | null;
+  blur_data_url?: string | null;
 }
 
 /** E4 cart row. */
@@ -101,6 +111,18 @@ export interface TableSessionLocked {
 /** E1 — the discriminated reply to a scan. */
 export type TableScan = TableSessionGrant | TableSessionLocked;
 
+/** Extra context every session entry point sends.
+
+    `scan_time` is when THIS page was opened. The backend refuses a session
+    whose scan_time predates the table's last clear (STALE_SESSION), which is
+    what stops a long-cached page from joining the previous party's table.
+    `user_id`/`name` register the device in table_members. */
+export interface SessionEntryPayload {
+  scan_time?: string;
+  user_id?: string;
+  name?: string;
+}
+
 /** E9 anti-duplicate guardrail (discriminated union). */
 export interface ActiveOrderBlocked {
   has_active_order: true;
@@ -146,6 +168,8 @@ export interface OrderItemLine {
   quantity: number;
   request_note: string;
   allergy_note: string;
+  /** Who ordered the line — copied from the cart at fire time (sql/011). */
+  added_by?: string;
   unit_price?: number;
 }
 
@@ -172,6 +196,8 @@ export interface OrderHistoryItem {
   table_id: string;
   status: OrderStatus;
   created_at: string;
+  /** Why the kitchen refused this round ('' unless status = 'denied'). */
+  denial_reason?: string;
   /** Bill frozen at fire time (sql/004_hardening.sql). */
   total?: number;
   items: OrderItemLine[];
@@ -206,10 +232,33 @@ export interface ShiftActivation {
   message: string;
 }
 
-/** E14 response. */
+/** E14 response. `denied_orders` counts the PENDING rounds the 86 stopped. */
 export interface AvailabilityResult {
   menu_item_id: string;
   is_available: boolean;
+  denied_orders?: number;
+}
+
+/** PATCH /api/v1/kds/tickets/:order_id/deny — the chef's refusal. */
+export interface KdsDenyResult {
+  order_id: string;
+  status: "denied";
+  denial_reason: string;
+  table_cleared: boolean;
+}
+
+/** POST /api/v1/orders/:order_id/requeue — "Move to list" / "Retry". */
+export interface RequeuedDeniedOrder {
+  order_id: string;
+  moved: number;
+  /** Dish names the cart could not take because the kitchen has none left. */
+  omitted: string[];
+}
+
+/** POST /api/v1/orders/:order_id/dismiss — the diner's "Cancel". */
+export interface DismissedDeniedOrder {
+  order_id: string;
+  dismissed: true;
 }
 
 /** E7 response. */
@@ -237,6 +286,8 @@ export interface FloorTable {
   bill_status: BillStatus;
   /** Set when staff tried to clear the table with an unpaid bill. */
   clear_requested_at: string | null;
+  /** This seating has tickets and the bill is not marked paid. */
+  bill_unpaid: boolean;
   active_order: FloorActiveOrder | null;
   cart_line_count: number;
   /** Devices that sent a heartbeat in the stale-detection window. */
@@ -350,6 +401,8 @@ export interface AdminTable {
   clear_requested_at: string | null;
   active_order_count: number;
   cart_line_count: number;
+  /** Phones heartbeating on this table inside the stale window. */
+  active_devices: number;
   has_session: boolean;
   session_started_at: string | null;
   created_at: string;
@@ -363,18 +416,69 @@ export interface AdminTableToken {
 }
 
 /** GET /api/v1/admin/menu — includes 86'd dishes, excludes archived ones. */
-export interface AdminMenuItem extends MenuItem {}
+export interface AdminMenuItem extends MenuItem {
+  category_id: string | null;
+  image_url: string | null;
+  image_small_url: string | null;
+  blur_data_url: string | null;
+}
 
 export interface CreateAdminMenuItemInput {
   name: string;
   price: number;
-  category: string;
+  category_id?: string | null;
+  category?: string;
   description: string;
   vegetarian: boolean;
   is_available: boolean;
 }
 
 export type UpdateAdminMenuItemInput = Partial<CreateAdminMenuItemInput>;
+
+/** The three derivatives the API exposes for one dish photo. */
+export interface MenuImage {
+  image_url: string;
+  image_small_url: string;
+  blur_data_url: string;
+}
+
+/** POST /api/v1/admin/menu/:menu_item_id/image */
+export interface AdminMenuImage extends MenuImage {
+  width: number;
+  height: number;
+  size_bytes: number;
+}
+
+/** One node of the public category tree (GET /api/v1/menu/categories). */
+export interface MenuCategoryNode {
+  category_id: string;
+  name: string;
+  parent_id: string | null;
+  sort_order: number;
+}
+
+/** One folder in the catalogue explorer. */
+export interface AdminCategory {
+  category_id: string;
+  name: string;
+  parent_id: string | null;
+  sort_order: number;
+  item_count: number;
+  thumbnail_menu_item_id: string | null;
+  thumbnail: MenuImage | null;
+}
+
+export interface CreateAdminCategoryInput {
+  name: string;
+  parent_id?: string | null;
+}
+
+export interface UpdateAdminCategoryInput {
+  name?: string;
+  parent_id?: string | null;
+  sort_order?: number;
+  thumbnail_menu_item_id?: string | null;
+}
 
 /** One row of the best-sellers leaderboard. */
 export interface TopSellingItem {

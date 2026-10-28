@@ -63,12 +63,18 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction): v
   next();
 }
 
-/* requireRole — access policy for administrative / kitchen layout
-   changes (status tags, 86ing, …). A valid token whose role claim is not
-   the required role is blocked with 403 FORBIDDEN. */
-export function requireRole(role: string) {
+/* requireRole — access policy for administrative / kitchen layout changes
+   (status tags, 86ing, …) and for the floor's own actions.
+
+   Accepts MORE than one allowed role. The floor and the kitchen are two
+   shifts, not two ranks: a waiter taking payment for a flagged table is
+   exactly as legitimate as a cook doing it, so the floor routes pass
+   `requireRole("kitchen", "floor")` instead of forcing every server to hold
+   the kitchen PIN. A valid token with none of the listed roles is still 403. */
+export function requireRole(...roles: string[]) {
   return (req: Request, _res: Response, next: NextFunction): void => {
-    if (req.shift?.role !== role) {
+    const role = req.shift?.role;
+    if (!role || !roles.includes(role)) {
       next(
         new AppError(403, "FORBIDDEN", "This session role is not permitted to perform this action."),
       );

@@ -18,6 +18,31 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  /* Next's dev server blocks its own script chunks when the page is opened
+     from a host it does not know, which looks like a blank page with dead
+     buttons rather than a network error. A phone on the restaurant Wi-Fi
+     opens the dev build at a LAN IP, so each private-range host is allowed
+     here. Development only — next start ignores this entirely. */
+  allowedDevOrigins: [
+    "192.168.*.*",
+    "10.*.*.*",
+    "172.16.*.*",
+    "172.17.*.*",
+    "172.18.*.*",
+    "172.19.*.*",
+    "172.20.*.*",
+    "172.21.*.*",
+    "172.22.*.*",
+    "172.23.*.*",
+    "172.24.*.*",
+    "172.25.*.*",
+    "172.26.*.*",
+    "172.27.*.*",
+    "172.28.*.*",
+    "172.29.*.*",
+    "172.30.*.*",
+    "172.31.*.*",
+  ],
   /* Dish photography is resolved in the frontend (lib/diner/food-photos)
      because the menu contract has no image column, and every photo ships in
      public/food — so the optimiser only ever reads from disk and no remote

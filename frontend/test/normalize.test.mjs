@@ -99,6 +99,46 @@ describe("toOrder / toKdsOrder price snapshot", () => {
   });
 });
 
+describe("ticket attribution and denial (sql/011)", () => {
+  const row = {
+    order_id: "o9",
+    table_id: "t1",
+    status: "denied",
+    created_at: "2026-10-28T10:00:00Z",
+    denial_reason: "Item Paneer Tikka went out of stock",
+    items: [
+      {
+        menu_item_id: "m1",
+        name: "Paneer Tikka",
+        quantity: 1,
+        request_note: "",
+        allergy_note: "",
+        added_by: "Amit",
+        unit_price: 210,
+      },
+    ],
+  };
+
+  it("carries added_by onto the ticket so the bill can be split per person", () => {
+    const order = toOrder(row, "k7x2p");
+    assert.equal(order.items[0].added_by, "Amit");
+  });
+
+  it("reads a legacy ticket with no added_by as Guest rather than blank", () => {
+    const legacy = toOrder(
+      { ...row, items: [{ ...row.items[0], added_by: undefined }] },
+      "k7x2p",
+    );
+    assert.equal(legacy.items[0].added_by, "Guest");
+  });
+
+  it("carries the denial reason the tracker renders", () => {
+    const order = toOrder(row, "k7x2p");
+    assert.equal(order.status, "denied");
+    assert.equal(order.denial_reason, "Item Paneer Tikka went out of stock");
+  });
+});
+
 describe("toFloorSummary", () => {
   it("maps a live table row with an active order", () => {
     const ui = toFloorSummary({

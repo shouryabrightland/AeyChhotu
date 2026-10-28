@@ -3,11 +3,16 @@
 import {
   BarChart3,
   Check,
+  ChevronRight,
   Download,
+  Folder,
+  FolderPlus,
+  ImagePlus,
   IndianRupee,
   KeyRound,
   LayoutGrid,
   LogOut,
+  PowerOff,
   Pencil,
   Plus,
   Printer,
@@ -17,8 +22,10 @@ import {
   Trash2,
   Utensils,
 } from "lucide-react";
+import Image from "next/image";
 import QRCode from "qrcode";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Logo } from "@/components/brand/logo";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Container } from "@/components/ui/container";
@@ -31,25 +38,37 @@ import { useToast } from "@/components/ui/toast";
 import {
   ApiError,
   clearAdminToken,
+  deactivateAdminTable,
   clearAdminTable,
   createAdminMenuItem,
   createAdminTable,
+  deleteAdminCategory,
   deleteAdminMenuItem,
   deleteAdminTable,
   getAdminAnalytics,
+  getAdminCategories,
+  createAdminCategory,
   getAdminMenu,
   getAdminTables,
   getAdminToken,
   loginAdmin,
   regenerateAdminTableToken,
   renameAdminTable,
+  resolveApiAssetUrl,
   subscribeMenuUpdates,
   subscribeTableUpdates,
+  deleteAdminMenuImage,
+  uploadAdminMenuImage,
+  updateAdminCategory,
   updateAdminMenuItem,
+  updateAdminTableCode,
   type AdminAnalytics,
+  type AdminCategory,
+  type AdminMenuImage,
   type AdminMenuItem,
   type AdminTable,
 } from "@/lib/api-client";
+import { resolveDishPhoto } from "@/lib/diner/food-photos";
 import { formatIstDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -219,25 +238,29 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const [analytics, setAnalytics] = useState<AdminAnalytics | null>(null);
   const [tables, setTables] = useState<AdminTable[]>([]);
   const [menu, setMenu] = useState<AdminMenuItem[]>([]);
+  const [categories, setCategories] = useState<AdminCategory[]>([]);
   const [phase, setPhase] = useState<"loading" | "error" | "success">("loading");
   const [error, setError] = useState<ApiError | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [clearingId, setClearingId] = useState<string | null>(null);
+  const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       try {
-        const [nextAnalytics, nextTables, nextMenu] = await Promise.all([
+        const [nextAnalytics, nextTables, nextMenu, nextCategories] = await Promise.all([
           getAdminAnalytics(),
           getAdminTables(),
           getAdminMenu(),
+          getAdminCategories(),
         ]);
         if (cancelled) return;
         setAnalytics(nextAnalytics);
         setTables(nextTables);
         setMenu(nextMenu);
+        setCategories(nextCategories);
         setPhase("success");
       } catch (err) {
         if (cancelled) return;
@@ -260,6 +283,32 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     setPhase("loading");
     setError(null);
     setReloadKey((key) => key + 1);
+  }
+
+  /* The unconditional "stop this table" override. Works on any table, at
+     any point — including one that owes money or has a live ticket. */
+  async function deactivateTable(table: AdminTable) {
+    if (deactivatingId) return;
+    setDeactivatingId(table.table_id);
+    try {
+      const result = await deactivateAdminTable(table.table_id);
+      toast({
+        title: `${table.name} deactivated`,
+        description:
+          result.closed_orders > 0
+            ? `${result.closed_orders} open ${result.closed_orders === 1 ? "ticket was" : "tickets were"} closed as served.`
+            : "Session ended. The table is ready for its next guests.",
+        tone: "success",
+      });
+      refresh();
+    } catch (err) {
+      toast({
+        title: err instanceof ApiError ? err.message : "Could not deactivate that table.",
+        tone: "error",
+      });
+    } finally {
+      setDeactivatingId(null);
+    }
   }
 
   /* A staff clear was refused for an unpaid bill and stamped a request.
@@ -297,11 +346,12 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     const revalidate = () => {
       if (revalidating.current) return;
       revalidating.current = true;
-      void Promise.all([getAdminAnalytics(), getAdminTables(), getAdminMenu()])
-        .then(([nextAnalytics, nextTables, nextMenu]) => {
+      void Promise.all([getAdminAnalytics(), getAdminTables(), getAdminMenu(), getAdminCategories()])
+        .then(([nextAnalytics, nextTables, nextMenu, nextCategories]) => {
           setAnalytics(nextAnalytics);
           setTables(nextTables);
           setMenu(nextMenu);
+          setCategories(nextCategories);
         })
         .catch((err: unknown) => {
           if (err instanceof ApiError && err.status === 401) {
@@ -491,16 +541,24 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
             ))}
           </div>
         ) : tab === "analytics" ? (
-          <AnalyticsTab analytics={analytics} tables={tables} />
+          <AnalyticsTab
+            analytics={analytics}
+            tables={tables}
+            deactivatingId={deactivatingId}
+            onDeactivate={(table) => void deactivateTable(table)}
+          />
         ) : tab === "tables" ? (
           <TablesTab
             tables={tables}
+            deactivatingId={deactivatingId}
+            onDeactivate={(table) => void deactivateTable(table)}
             onChanged={refresh}
             onError={(message) => toast({ title: message, tone: "error" })}
           />
         ) : (
           <MenuTab
             menu={menu}
+            categories={categories}
             onChanged={refresh}
             onError={(message) => toast({ title: message, tone: "error" })}
           />
@@ -517,15 +575,29 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 function AnalyticsTab({
   analytics,
   tables,
+  deactivatingId,
+  onDeactivate,
 }: {
   analytics: AdminAnalytics | null;
   tables: AdminTable[];
+  deactivatingId: string | null;
+  onDeactivate: (table: AdminTable) => void;
 }) {
   if (!analytics) {
     return <EmptyState title="No analytics yet" description="Fire and serve an order to see it here." />;
   }
 
   const activeTables = tables.filter((table) => table.status === "active").length;
+
+  /* The same signal the floor uses, expressed from the console's row: a live
+     session with no phone heartbeating and no open ticket is a table nobody
+     is sitting at properly. A clear request is escalated above those. */
+  const flagged = tables
+    .filter(
+      (table) =>
+        table.has_session && table.active_order_count === 0 && table.active_devices === 0,
+    )
+    .sort((a, b) => Number(Boolean(b.clear_requested_at)) - Number(Boolean(a.clear_requested_at)));
 
   return (
     <div className="flex flex-col gap-8">
@@ -549,6 +621,68 @@ function AnalyticsTab({
           hint="Sessions open right now"
         />
       </div>
+
+      {/* Live floor: the tables that need a person, not a graph. Deactivate
+          is here as well as on the floor tab because this is where a manager
+          looks when they open the console. */}
+      <section className="rounded-xl border border-line bg-surface">
+        <header className="flex flex-wrap items-baseline justify-between gap-3 border-b border-line px-5 py-4">
+          <div>
+            <h2 className="font-display text-subheading text-ink">Tables that need a look</h2>
+            <p className="mt-1 text-sm text-ink-muted">
+              A live session with no phone on it and no open ticket. Clear requests come first.
+            </p>
+          </div>
+          <Badge tone={flagged.length > 0 ? "alert" : "neutral"}>
+            {flagged.length} flagged
+          </Badge>
+        </header>
+
+        {flagged.length === 0 ? (
+          <p className="px-5 py-8 text-sm text-ink-muted">
+            Every live table has a phone on it. Nothing to chase right now.
+          </p>
+        ) : (
+          <ul className="divide-y divide-line">
+            {flagged.map((table) => (
+              <li
+                key={table.table_id}
+                className="flex flex-wrap items-center justify-between gap-3 px-5 py-4"
+              >
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-display text-base text-ink">{table.name}</p>
+                    {table.clear_requested_at ? (
+                      <Badge tone="alert">Manager requested</Badge>
+                    ) : (
+                      <Badge tone="pending">No device</Badge>
+                    )}
+                  </div>
+                  <p className="mt-0.5 text-xs text-ink-muted">
+                    Table {table.code} · {table.bill_status === "paid" ? "paid" : "unpaid"}
+                    {table.cart_line_count > 0
+                      ? ` · ${table.cart_line_count} staged`
+                      : ""}
+                    {table.session_started_at
+                      ? ` · open since ${formatIstDateTime(table.session_started_at)}`
+                      : ""}
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  loading={deactivatingId === table.table_id}
+                  disabled={deactivatingId !== null && deactivatingId !== table.table_id}
+                  onClick={() => onDeactivate(table)}
+                  leftIcon={<PowerOff className="size-3.5" aria-hidden />}
+                >
+                  Deactivate
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       <section className="rounded-xl border border-line bg-surface">
         <header className="flex flex-wrap items-baseline justify-between gap-3 border-b border-line px-5 py-4">
@@ -645,10 +779,14 @@ function Stat({
 
 function TablesTab({
   tables,
+  deactivatingId,
+  onDeactivate,
   onChanged,
   onError,
 }: {
   tables: AdminTable[];
+  deactivatingId: string | null;
+  onDeactivate: (table: AdminTable) => void;
   onChanged: () => void;
   onError: (message: string) => void;
 }) {
@@ -656,7 +794,9 @@ function TablesTab({
   const [addOpen, setAddOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<AdminTable | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<AdminTable | null>(null);
+  const [deactivateTarget, setDeactivateTarget] = useState<AdminTable | null>(null);
   const [qrTarget, setQrTarget] = useState<{ code: string; name: string } | null>(null);
+  const [codeTarget, setCodeTarget] = useState<AdminTable | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function regenerate(table: AdminTable) {
@@ -737,12 +877,23 @@ function TablesTab({
                   </Badge>
                 </header>
 
-                <div className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2">
+                {/* The code strip is the QR entry point: a manager looking for
+                    the code is the manager who wants the sheet it is printed
+                    on, so one tap opens the printable card. */}
+                <button
+                  type="button"
+                  onClick={() => setQrTarget({ code: table.code, name: table.name })}
+                  aria-label={`Show the printable QR code for ${table.name}`}
+                  className="flex cursor-pointer items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2 text-left transition-colors duration-[var(--duration-fast)] hover:bg-sand"
+                >
                   <span className="font-mono text-sm font-semibold tracking-[0.12em] text-ink">
                     {table.code}
                   </span>
-                  <QrCode className="size-4 text-ink-subtle" aria-hidden />
-                </div>
+                  <span className="flex items-center gap-1.5 text-label text-ink-subtle uppercase">
+                    QR
+                    <QrCode className="size-4" aria-hidden />
+                  </span>
+                </button>
 
                 <dl className="grid grid-cols-2 gap-3 text-sm">
                   <div>
@@ -769,10 +920,26 @@ function TablesTab({
                   <Button
                     variant="soft"
                     size="sm"
+                    onClick={() => setQrTarget({ code: table.code, name: table.name })}
+                    leftIcon={<QrCode className="size-3.5" aria-hidden />}
+                  >
+                    Show QR
+                  </Button>
+                  <Button
+                    variant="soft"
+                    size="sm"
                     onClick={() => setRenameTarget(table)}
                     leftIcon={<Pencil className="size-3.5" aria-hidden />}
                   >
                     Edit name
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCodeTarget(table)}
+                    leftIcon={<KeyRound className="size-3.5" aria-hidden />}
+                  >
+                    Edit ID
                   </Button>
                   <Button
                     variant="outline"
@@ -782,6 +949,15 @@ function TablesTab({
                     leftIcon={<RefreshCw className="size-3.5" aria-hidden />}
                   >
                     Regenerate QR
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={deactivatingId === table.table_id}
+                    onClick={() => setDeactivateTarget(table)}
+                    leftIcon={<PowerOff className="size-3.5" aria-hidden />}
+                  >
+                    Deactivate
                   </Button>
                   <Button
                     variant="ghost"
@@ -817,6 +993,32 @@ function TablesTab({
       />
 
       <QrCodeModal target={qrTarget} onClose={() => setQrTarget(null)} />
+
+      <EditTableCodeModal
+        table={codeTarget}
+        onClose={() => setCodeTarget(null)}
+        onSaved={(saved) => {
+          setCodeTarget(null);
+          setQrTarget({ code: saved.code, name: saved.name });
+          onChanged();
+        }}
+        onError={onError}
+      />
+
+      <ConfirmModal
+        open={deactivateTarget !== null}
+        title={`Deactivate ${deactivateTarget?.name ?? "this table"}?`}
+        description="Ends the session immediately, even if the bill is unpaid or a ticket is open. Open tickets are closed as served, and the table code (and its printed QR) is kept."
+        confirmLabel="Deactivate table"
+        busy={deactivateTarget !== null && deactivatingId === deactivateTarget.table_id}
+        onClose={() => setDeactivateTarget(null)}
+        onConfirm={() => {
+          if (deactivateTarget) {
+            onDeactivate(deactivateTarget);
+            setDeactivateTarget(null);
+          }
+        }}
+      />
 
       <ConfirmModal
         open={archiveTarget !== null}
@@ -979,6 +1181,129 @@ function RenameTableModal({
   );
 }
 
+/* A table is editable only while nobody is using it. Mirrors the server's
+   guard in `updateTableCode` so the dialog can explain itself before a save
+   comes back as 409. */
+function tableIsEmpty(table: AdminTable) {
+  return (
+    table.status === "empty" &&
+    !table.has_session &&
+    table.active_order_count === 0 &&
+    table.cart_line_count === 0
+  );
+}
+
+function EditTableCodeModal({
+  table,
+  onClose,
+  onSaved,
+  onError,
+}: {
+  table: AdminTable | null;
+  onClose: () => void;
+  onSaved: (saved: { code: string; name: string }) => void;
+  onError: (message: string) => void;
+}) {
+  const [code, setCode] = useState("");
+  const [error, setError] = useState<string | undefined>();
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!table) return;
+    const timer = window.setTimeout(() => {
+      setCode(table.code);
+      setError(undefined);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [table]);
+
+  const empty = table !== null && tableIsEmpty(table);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!table || !empty) return;
+
+    const next = code.trim().toLowerCase();
+    if (!/^[a-z0-9]{5,8}$/.test(next)) {
+      setError("Use 5–8 letters or digits, e.g. k7x2p or table12.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const saved = await updateAdminTableCode(table.table_id, next);
+      onSaved(saved);
+    } catch (err) {
+      if (err instanceof ApiError) setError(err.message);
+      else onError("Could not update the table code.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={table !== null}
+      onClose={onClose}
+      title="Edit table ID"
+      size="sm"
+      footer={
+        <>
+          <Button variant="soft" size="lg" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="ember"
+            size="lg"
+            type="submit"
+            form="edit-table-code-form"
+            loading={busy}
+            disabled={!empty}
+          >
+            Save ID
+          </Button>
+        </>
+      }
+    >
+      <form id="edit-table-code-form" onSubmit={submit} className="flex flex-col gap-4" noValidate>
+        {empty ? null : (
+          <p
+            role="status"
+            className="rounded-md border border-alert/40 bg-alert-surface px-3.5 py-3 text-sm leading-relaxed text-ink-muted"
+          >
+            This table is not empty — a party is seated, a cart is staged, or a ticket is open.
+            Clear the table first; its ID cannot change under the guests already holding it.
+          </p>
+        )}
+
+        <Input
+          label="Table ID"
+          hint="5–8 lowercase letters or digits. The QR code encodes /table/&lt;id&gt;."
+          value={code}
+          error={error}
+          maxLength={8}
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          disabled={!empty}
+          onChange={(event) => {
+            setError(undefined);
+            setCode(event.target.value.toLowerCase());
+          }}
+        />
+
+        <p className="text-xs text-ink-subtle">
+          Use this after regenerating a code: set it back to the one printed on the stand, or
+          print a fresh QR from the next screen.
+        </p>
+      </form>
+    </Modal>
+  );
+}
+
+/* The printable sheet: brand at the top, the code at the bottom, and nothing
+   that does not belong on a table stand. The dialog is the preview; the
+   download draws the same card at print resolution (see buildQrCardImage). */
 function QrCodeModal({
   target,
   onClose,
@@ -987,6 +1312,8 @@ function QrCodeModal({
   onClose: () => void;
 }) {
   const [svg, setSvg] = useState<{ code: string; markup: string | null } | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!target) return;
@@ -1018,22 +1345,28 @@ function QrCodeModal({
 
   const markup = target && svg?.code === target.code ? svg.markup : null;
 
-  function download() {
-    if (!target || !markup) return;
-    const blob = new Blob([markup], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `aeychhotu-table-${target.code}.svg`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+  async function download() {
+    if (!target) return;
+    setDownloading(true);
+    setError(null);
+    try {
+      const dataUrl = await buildQrCardImage(target.code, target.name);
+      const anchor = document.createElement("a");
+      anchor.href = dataUrl;
+      anchor.download = `aeychhotu-table-${target.code}.png`;
+      anchor.click();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not build the QR sheet.");
+    } finally {
+      setDownloading(false);
+    }
   }
 
   return (
     <Modal
       open={target !== null}
       onClose={onClose}
-      title={target ? `QR for ${target.name}` : "Table QR"}
+      title="Table QR sheet"
       description="Print it, stick it on the stand, and the table is live."
       size="sm"
       footer={
@@ -1049,41 +1382,141 @@ function QrCodeModal({
           <Button
             variant="ember"
             size="lg"
-            onClick={download}
+            onClick={() => void download()}
+            loading={downloading}
             disabled={!markup}
             leftIcon={<Download className="size-4" aria-hidden />}
           >
-            Download SVG
+            Download PNG
           </Button>
         </>
       }
     >
       {/* Only this block survives the print stylesheet — see globals.css. */}
-      <div className="admin-print-area flex flex-col items-center gap-4">
-        <div className="flex size-64 items-center justify-center rounded-xl border border-line bg-surface p-3">
-          {markup ? (
-            <div
-              role="img"
-              aria-label={`QR code for table ${target?.code ?? ""}`}
-              className="[&>svg]:size-full"
-              dangerouslySetInnerHTML={{ __html: markup }}
-            />
-          ) : (
-            <span className="text-sm text-ink-subtle">Drawing the code…</span>
-          )}
-        </div>
+      <div className="admin-print-area w-full">
+        <article className="mx-auto flex w-full max-w-sm flex-col items-center rounded-xl border border-line bg-surface px-6 py-7 text-center">
+          <Logo />
 
-        <div className="text-center">
-          <p className="font-mono text-lg font-semibold tracking-[0.14em] text-ink">
+          <span aria-hidden className="mt-4 h-px w-16 bg-line-strong" />
+
+          <div className="mt-5 flex size-64 items-center justify-center rounded-lg border border-line bg-white p-3">
+            {markup ? (
+              <div
+                role="img"
+                aria-label={`QR code for table ${target?.code ?? ""}`}
+                className="[&>svg]:size-full"
+                dangerouslySetInnerHTML={{ __html: markup }}
+              />
+            ) : (
+              <span className="text-sm text-ink-subtle">Drawing the code…</span>
+            )}
+          </div>
+
+          <p className="mt-5 font-display text-lg font-semibold text-ink">{target?.name}</p>
+          <p className="mt-1.5 text-sm text-ink-muted">Scan to activate this table</p>
+          <p className="mt-3 text-label text-ink-subtle uppercase">Table ID</p>
+          <p className="font-mono text-base font-semibold tracking-[0.16em] text-ink">
             {target?.code}
           </p>
-          <p className="mt-1 text-xs text-ink-subtle">
-            Scanning opens this table&apos;s shared cart. Regenerating invalidates this printout.
-          </p>
-        </div>
+        </article>
       </div>
+
+      {error ? (
+        <p role="alert" className="mt-3 text-center text-sm text-alert">
+          {error}
+        </p>
+      ) : null}
+
+      <p className="mt-4 text-center text-xs text-ink-subtle">
+        Scanning opens this table&apos;s shared cart. Regenerating the code invalidates this stand.
+      </p>
     </Modal>
   );
+}
+
+/* Draws the printable card at 1000×1400 so the QR is ~660px wide — a printer
+   resolves that crisply, where an upscaled 256px thumbnail would not. Kept in
+   step with the dialog preview by hand: same order, same words. */
+async function buildQrCardImage(code: string, name: string): Promise<string> {
+  const width = 1000;
+  const height = 1400;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("This browser cannot draw the QR sheet.");
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  // The brand rule along the top edge: the same ember the UI uses.
+  ctx.fillStyle = "#b4552d";
+  ctx.fillRect(0, 0, width, 14);
+
+  const logo = await loadImage("/logo.png").catch(() => null);
+  if (logo) {
+    ctx.drawImage(logo, width / 2 - 60, 110, 120, 120);
+  }
+
+  const markY = logo ? 320 : 220;
+  const brand = "AeyChhotu";
+  const bang = "!";
+  ctx.font = "600 60px Georgia, 'Times New Roman', serif";
+  ctx.textAlign = "left";
+
+  const total = ctx.measureText(brand + bang).width;
+  let x = (width - total) / 2;
+  ctx.fillStyle = "#1c1512";
+  ctx.fillText(brand, x, markY);
+  x += ctx.measureText(brand).width;
+  ctx.fillStyle = "#b4552d";
+  ctx.fillText(bang, x, markY);
+
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#7a6a5f";
+  ctx.font = "400 26px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  ctx.fillText("one table, one order, live from the kitchen", width / 2, markY + 48);
+
+  ctx.fillStyle = "#e7ded4";
+  ctx.fillRect(width / 2 - 140, 400, 280, 2);
+
+  const payload = `${window.location.origin}/table/${code}`;
+  const qrDataUrl = await QRCode.toDataURL(payload, {
+    margin: 2,
+    width: 660,
+    errorCorrectionLevel: "M",
+    color: { dark: "#1c1512", light: "#ffffff" },
+  });
+  const qr = await loadImage(qrDataUrl);
+  ctx.drawImage(qr, (width - 660) / 2, 440, 660, 660);
+
+  ctx.fillStyle = "#1c1512";
+  ctx.font = "500 44px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  ctx.fillText(name, width / 2, 1180);
+
+  ctx.font = "600 38px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  ctx.fillText("Scan to activate this table", width / 2, 1244);
+
+  ctx.fillStyle = "#7a6a5f";
+  ctx.font = "600 22px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  ctx.fillText("TABLE ID", width / 2, 1296);
+
+  ctx.fillStyle = "#b4552d";
+  ctx.font = "600 40px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillText(code, width / 2, 1344);
+
+  return canvas.toDataURL("image/png");
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`Could not load ${src}`));
+    image.src = src;
+  });
 }
 
 /* =====================================================================
@@ -1092,18 +1525,45 @@ function QrCodeModal({
 
 function MenuTab({
   menu,
+  categories,
   onChanged,
   onError,
 }: {
   menu: AdminMenuItem[];
+  categories: AdminCategory[];
   onChanged: () => void;
   onError: (message: string) => void;
 }) {
   const { toast } = useToast();
+  const [currentId, setCurrentId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AdminMenuItem | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<AdminMenuItem | null>(null);
+  const [folderDraft, setFolderDraft] = useState<{
+    parentId: string | null;
+    folder: AdminCategory | null;
+  } | null>(null);
+  const [folderDelete, setFolderDelete] = useState<AdminCategory | null>(null);
+  const [coverTarget, setCoverTarget] = useState<AdminCategory | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  const folders = categories.filter((folder) => folder.parent_id === currentId);
+  const dishes = menu.filter((item) => (item.category_id ?? null) === currentId);
+
+  /* Breadcrumb: walk to the root once. Cheap (the tree is tiny) and it always
+     shows the way back out of a deep folder. */
+  const trail: AdminCategory[] = [];
+  let cursor: AdminCategory | null =
+    categories.find((folder) => folder.category_id === currentId) ?? null;
+  while (cursor) {
+    trail.unshift(cursor);
+    const parentId: string | null = cursor.parent_id;
+    cursor = parentId
+      ? (categories.find((folder) => folder.category_id === parentId) ?? null)
+      : null;
+  }
+
+  const pathLabel = trail.length > 0 ? trail[trail.length - 1]?.name : "Catalog";
 
   async function toggleAvailability(item: AdminMenuItem) {
     if (busyId) return;
@@ -1136,106 +1596,341 @@ function MenuTab({
     }
   }
 
+  async function removeFolder(folder: AdminCategory) {
+    setBusyId(folder.category_id);
+    try {
+      await deleteAdminCategory(folder.category_id);
+      if (currentId === folder.category_id) setCurrentId(folder.parent_id);
+      setFolderDelete(null);
+      toast({ title: `${folder.name} removed`, tone: "success" });
+      onChanged();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Could not remove the folder.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const isEmpty = folders.length === 0 && dishes.length === 0;
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h2 className="font-display text-title font-semibold text-ink">Menu catalog</h2>
           <p className="mt-1 text-sm text-ink-muted">
-            Archived dishes leave the diner menu but keep their history.
+            Categories are folders. Open one to see its dishes; a cover is any dish photo inside it.
           </p>
         </div>
-        <Button
-          variant="ember"
-          size="md"
-          onClick={() => setAddOpen(true)}
-          leftIcon={<Plus className="size-4" aria-hidden />}
-        >
-          Add new dish
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="md"
+            onClick={() => setFolderDraft({ parentId: currentId, folder: null })}
+            leftIcon={<FolderPlus className="size-4" aria-hidden />}
+          >
+            New folder
+          </Button>
+          <Button
+            variant="ember"
+            size="md"
+            onClick={() => setAddOpen(true)}
+            leftIcon={<Plus className="size-4" aria-hidden />}
+          >
+            Add dish
+          </Button>
+        </div>
       </div>
 
-      {menu.length === 0 ? (
-        <EmptyState
-          title="The catalog is empty"
-          description="Add the first dish and it appears on every active table's menu."
-        />
+      <nav aria-label="Catalogue path" className="flex flex-wrap items-center gap-1 text-sm">
+        <button
+          type="button"
+          onClick={() => setCurrentId(null)}
+          className={cn(
+            "cursor-pointer rounded-md px-2 py-1 transition-colors duration-[var(--duration-fast)]",
+            currentId === null
+              ? "bg-ink text-ink-inverse"
+              : "text-ink-muted hover:bg-sand hover:text-ink",
+          )}
+        >
+          Catalog
+        </button>
+        {trail.map((folder) => (
+          <span key={folder.category_id} className="flex items-center gap-1">
+            <ChevronRight className="size-3.5 text-ink-subtle" aria-hidden />
+            <button
+              type="button"
+              onClick={() => setCurrentId(folder.category_id)}
+              className={cn(
+                "cursor-pointer rounded-md px-2 py-1 transition-colors duration-[var(--duration-fast)]",
+                folder.category_id === currentId
+                  ? "bg-ink text-ink-inverse"
+                  : "text-ink-muted hover:bg-sand hover:text-ink",
+              )}
+            >
+              {folder.name}
+            </button>
+          </span>
+        ))}
+      </nav>
+
+      {folders.length > 0 ? (
+        <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {folders.map((folder) => {
+            const cover = resolveApiAssetUrl(folder.thumbnail?.image_small_url ?? null);
+            const subfolders = categories.filter(
+              (entry) => entry.parent_id === folder.category_id,
+            ).length;
+
+            return (
+              <li key={folder.category_id}>
+                <article className="flex h-full flex-col overflow-hidden rounded-xl border border-line bg-surface">
+                  <button
+                    type="button"
+                    onClick={() => setCurrentId(folder.category_id)}
+                    aria-label={`Open folder ${folder.name}`}
+                    className="flex flex-1 cursor-pointer items-center gap-3 p-4 text-left transition-colors duration-[var(--duration-fast)] hover:bg-sand/60"
+                  >
+                    <span className="relative block size-16 shrink-0 overflow-hidden rounded-lg bg-surface-sunken">
+                      {cover ? (
+                        <Image
+                          src={cover}
+                          alt=""
+                          fill
+                          unoptimized
+                          sizes="64px"
+                          className="object-cover"
+                        />
+                      ) : (
+                        <span className="flex size-full items-center justify-center text-ember">
+                          <Folder className="size-7" aria-hidden />
+                        </span>
+                      )}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-label text-ink-subtle uppercase">Folder</span>
+                      <span className="mt-0.5 block truncate font-display text-subheading text-ink">
+                        {folder.name}
+                      </span>
+                      <span className="mt-0.5 block text-xs text-ink-subtle">
+                        {folder.item_count} {folder.item_count === 1 ? "dish" : "dishes"}
+                        {subfolders > 0
+                          ? ` · ${subfolders} ${subfolders === 1 ? "folder" : "folders"}`
+                          : ""}
+                      </span>
+                    </span>
+                  </button>
+
+                  <div className="flex flex-wrap gap-1 border-t border-line px-2 py-1.5">
+                    <Button variant="ghost" size="sm" onClick={() => setCoverTarget(folder)}>
+                      Cover
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        setFolderDraft({ parentId: folder.parent_id, folder })
+                      }
+                    >
+                      Rename
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busyId === folder.category_id}
+                      onClick={() => setFolderDelete(folder)}
+                      leftIcon={<Trash2 className="size-3.5" aria-hidden />}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </article>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+
+      {dishes.length === 0 ? (
+        isEmpty ? (
+          <EmptyState
+            title={currentId === null ? "The catalog is empty" : `${pathLabel} is empty`}
+            description={
+              currentId === null
+                ? "Add the first dish, or create a folder to organise them."
+                : "Add a dish here, or open another folder."
+            }
+            action={
+              <div className="flex flex-wrap justify-center gap-2">
+                <Button
+                  variant="ember"
+                  size="md"
+                  onClick={() => setAddOpen(true)}
+                  leftIcon={<Plus className="size-4" aria-hidden />}
+                >
+                  Add dish
+                </Button>
+                <Button
+                  variant="outline"
+                  size="md"
+                  onClick={() => setFolderDraft({ parentId: currentId, folder: null })}
+                >
+                  New folder
+                </Button>
+              </div>
+            }
+          />
+        ) : (
+          <p className="rounded-lg border border-line bg-surface px-4 py-6 text-center text-sm text-ink-muted">
+            No dishes directly in this folder. Open one of the folders above.
+          </p>
+        )
       ) : (
         <ul className="flex flex-col gap-3">
-          {menu.map((item) => (
-            <li key={item.menu_item_id}>
-              <article className="flex flex-wrap items-center gap-4 rounded-lg border border-line bg-surface p-4">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="font-display text-subheading text-ink">{item.name}</h3>
-                    <span
-                      aria-label={item.vegetarian ? "Vegetarian" : "Non-vegetarian"}
-                      className={cn(
-                        "flex size-4 items-center justify-center rounded-[3px] border",
-                        item.vegetarian ? "border-ready text-ready" : "border-alert text-alert",
-                      )}
-                    >
-                      <span className="size-2 rounded-pill bg-current" />
-                    </span>
-                    {item.is_available ? null : <Badge tone="alert">86&apos;d</Badge>}
-                  </div>
-                  <p className="mt-1 line-clamp-2 text-sm text-ink-muted">
-                    {item.description || "No description yet."}
-                  </p>
-                  <p className="mt-1.5 text-xs text-ink-subtle">
-                    {item.category} · {money(item.price)}
-                  </p>
-                </div>
+          {dishes.map((item) => {
+            const uploaded = resolveApiAssetUrl(item.image_small_url);
+            const photo = uploaded ?? resolveDishPhoto(item);
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant={item.is_available ? "soft" : "ember"}
-                    size="sm"
-                    disabled={busyId === item.menu_item_id}
-                    onClick={() => void toggleAvailability(item)}
-                  >
-                    {item.is_available ? "86 this dish" : "Bring back"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setEditTarget(item)}
-                    leftIcon={<Pencil className="size-3.5" aria-hidden />}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setArchiveTarget(item)}
-                    leftIcon={<Trash2 className="size-3.5" aria-hidden />}
-                  >
-                    Archive
-                  </Button>
-                </div>
-              </article>
-            </li>
-          ))}
+            return (
+              <li key={item.menu_item_id}>
+                <article className="flex flex-wrap items-center gap-4 rounded-lg border border-line bg-surface p-3">
+                  <span className="relative block size-20 shrink-0 overflow-hidden rounded-lg bg-surface-sunken">
+                    {photo ? (
+                      <Image
+                        src={photo}
+                        alt=""
+                        fill
+                        unoptimized={Boolean(uploaded)}
+                        sizes="80px"
+                        className="object-cover"
+                      />
+                    ) : (
+                      <span className="flex size-full items-center justify-center text-ember">
+                        <Utensils className="size-6" aria-hidden />
+                      </span>
+                    )}
+                  </span>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="font-display text-subheading text-ink">{item.name}</h3>
+                      <span
+                        aria-label={item.vegetarian ? "Vegetarian" : "Non-vegetarian"}
+                        className={cn(
+                          "flex size-4 items-center justify-center rounded-[3px] border",
+                          item.vegetarian ? "border-ready text-ready" : "border-alert text-alert",
+                        )}
+                      >
+                        <span className="size-2 rounded-pill bg-current" />
+                      </span>
+                      {item.is_available ? null : <Badge tone="alert">86&apos;d</Badge>}
+                      {item.image_small_url ? (
+                        <Badge tone="neutral">Photo</Badge>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-sm text-ink-muted">
+                      {item.description || "No description yet."}
+                    </p>
+                    <p className="mt-1.5 text-xs text-ink-subtle">
+                      {money(item.price)}
+                      {currentId === null ? ` · ${item.category}` : ""}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant={item.is_available ? "soft" : "ember"}
+                      size="sm"
+                      disabled={busyId === item.menu_item_id}
+                      onClick={() => void toggleAvailability(item)}
+                    >
+                      {item.is_available ? "86 this dish" : "Bring back"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setEditTarget(item)}
+                      leftIcon={<Pencil className="size-3.5" aria-hidden />}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setArchiveTarget(item)}
+                      leftIcon={<Trash2 className="size-3.5" aria-hidden />}
+                    >
+                      Archive
+                    </Button>
+                  </div>
+                </article>
+              </li>
+            );
+          })}
         </ul>
       )}
 
       <DishModal
         open={addOpen}
         item={null}
+        categories={categories}
+        defaultCategoryId={currentId}
         onClose={() => setAddOpen(false)}
         onSaved={() => {
           setAddOpen(false);
           onChanged();
         }}
+        onImageChanged={onChanged}
       />
 
       <DishModal
         open={editTarget !== null}
         item={editTarget}
+        categories={categories}
+        defaultCategoryId={editTarget?.category_id ?? currentId}
         onClose={() => setEditTarget(null)}
         onSaved={() => {
           setEditTarget(null);
           onChanged();
+        }}
+        onImageChanged={onChanged}
+      />
+
+      <FolderModal
+        open={folderDraft !== null}
+        folder={folderDraft?.folder ?? null}
+        parentId={folderDraft?.parentId ?? null}
+        parentName={
+          categories.find(
+            (folder) => folder.category_id === (folderDraft?.parentId ?? null),
+          )?.name ?? null
+        }
+        onClose={() => setFolderDraft(null)}
+        onSaved={(message) => {
+          setFolderDraft(null);
+          toast({ title: message, tone: "success" });
+          onChanged();
+        }}
+        onError={onError}
+      />
+
+      <CoverPickerModal
+        folder={coverTarget}
+        menu={menu}
+        onClose={() => setCoverTarget(null)}
+        onChanged={onChanged}
+        onError={onError}
+      />
+
+      <ConfirmModal
+        open={folderDelete !== null}
+        title={`Delete ${folderDelete?.name ?? "this folder"}?`}
+        description="Only an empty folder can be deleted. Its dishes and subfolders must be moved or archived first."
+        confirmLabel="Delete folder"
+        busy={busyId === folderDelete?.category_id}
+        onClose={() => setFolderDelete(null)}
+        onConfirm={() => {
+          if (folderDelete) void removeFolder(folderDelete);
         }}
       />
 
@@ -1254,20 +1949,263 @@ function MenuTab({
   );
 }
 
+/* =====================================================================
+   Folders
+   ===================================================================== */
+
+function folderOptions(categories: AdminCategory[]): { id: string; label: string }[] {
+  const byParent = new Map<string | null, AdminCategory[]>();
+  for (const folder of categories) {
+    const siblings = byParent.get(folder.parent_id) ?? [];
+    siblings.push(folder);
+    byParent.set(folder.parent_id, siblings);
+  }
+
+  const options: { id: string; label: string }[] = [];
+  const walk = (parentId: string | null, depth: number) => {
+    for (const folder of byParent.get(parentId) ?? []) {
+      options.push({
+        id: folder.category_id,
+        label: `${"— ".repeat(depth)}${folder.name}`,
+      });
+      walk(folder.category_id, depth + 1);
+    }
+  };
+  walk(null, 0);
+  return options;
+}
+
+function FolderModal({
+  open,
+  folder,
+  parentId,
+  parentName,
+  onClose,
+  onSaved,
+  onError,
+}: {
+  open: boolean;
+  folder: AdminCategory | null;
+  parentId: string | null;
+  parentName: string | null;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | undefined>();
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setTimeout(() => {
+      setName(folder?.name ?? "");
+      setError(undefined);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [open, folder]);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!name.trim()) {
+      setError("Give the folder a name.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      if (folder) {
+        await updateAdminCategory(folder.category_id, { name: name.trim() });
+        onSaved(`Renamed to ${name.trim()}`);
+      } else {
+        await createAdminCategory({ name: name.trim(), parent_id: parentId });
+        onSaved(`Folder ${name.trim()} created`);
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not save the folder.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={folder ? "Rename folder" : "New folder"}
+      description={
+        folder
+          ? "Dishes inside keep their photos and prices."
+          : parentName
+            ? `Inside ${parentName}.`
+            : "At the top level of the catalog."
+      }
+      size="sm"
+      footer={
+        <>
+          <Button variant="soft" size="lg" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="ember" size="lg" type="submit" form="folder-form" loading={busy}>
+            {folder ? "Save name" : "Create folder"}
+          </Button>
+        </>
+      }
+    >
+      <form id="folder-form" onSubmit={submit} className="flex flex-col gap-4" noValidate>
+        <Input
+          label="Folder name"
+          value={name}
+          error={error}
+          maxLength={60}
+          placeholder="Starters"
+          onChange={(event) => {
+            setError(undefined);
+            setName(event.target.value);
+          }}
+        />
+        <p className="text-xs text-ink-subtle">
+          Folders are categories. You can nest them as deep as the menu needs.
+        </p>
+      </form>
+    </Modal>
+  );
+}
+
+function CoverPickerModal({
+  folder,
+  menu,
+  onClose,
+  onChanged,
+  onError,
+}: {
+  folder: AdminCategory | null;
+  menu: AdminMenuItem[];
+  onClose: () => void;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  async function pick(item: AdminMenuItem | null) {
+    if (!folder) return;
+    setBusyId(item?.menu_item_id ?? "clear");
+    try {
+      await updateAdminCategory(folder.category_id, {
+        thumbnail_menu_item_id: item?.menu_item_id ?? null,
+      });
+      onChanged();
+      onClose();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Could not set the folder cover.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Modal
+      open={folder !== null}
+      onClose={onClose}
+      title={folder ? `Cover for ${folder.name}` : "Folder cover"}
+      description="Pick one of your dish photos — the folder shows it in the explorer."
+      size="lg"
+      footer={
+        <>
+          <Button
+            variant="soft"
+            size="lg"
+            onClick={() => void pick(null)}
+            loading={busyId === "clear"}
+          >
+            Use folder icon
+          </Button>
+          <Button variant="outline" size="lg" onClick={onClose}>
+            Close
+          </Button>
+        </>
+      }
+    >
+      {menu.length === 0 ? (
+        <p className="py-6 text-center text-sm text-ink-muted">
+          Add a dish with a photo first.
+        </p>
+      ) : (
+        <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {menu.map((item) => {
+            const uploaded = resolveApiAssetUrl(item.image_small_url);
+            const photo = uploaded ?? resolveDishPhoto(item);
+
+            return (
+              <li key={item.menu_item_id}>
+                <button
+                  type="button"
+                  disabled={busyId !== null}
+                  onClick={() => void pick(item)}
+                  className={cn(
+                    "flex w-full cursor-pointer flex-col overflow-hidden rounded-lg border bg-surface text-left transition-[border-color,transform] duration-[var(--duration-fast)] hover:-translate-y-0.5",
+                    folder?.thumbnail_menu_item_id === item.menu_item_id
+                      ? "border-ember ring-1 ring-ember/30"
+                      : "border-line hover:border-line-strong",
+                    busyId === item.menu_item_id && "opacity-60",
+                  )}
+                >
+                  <span className="relative block aspect-[4/3] w-full bg-surface-sunken">
+                    {photo ? (
+                      <Image
+                        src={photo}
+                        alt=""
+                        fill
+                        unoptimized={Boolean(uploaded)}
+                        sizes="(min-width: 640px) 160px, 45vw"
+                        className="object-cover"
+                      />
+                    ) : (
+                      <span className="flex size-full items-center justify-center text-ember">
+                        <Utensils className="size-6" aria-hidden />
+                      </span>
+                    )}
+                  </span>
+                  <span className="block truncate px-2.5 py-2 text-xs font-semibold text-ink">
+                    {item.name}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Modal>
+  );
+}
+
+/* =====================================================================
+   Dish editor (fields + photo)
+   ===================================================================== */
+
+const DISH_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/avif"];
+const DISH_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+
 function DishModal({
   open,
   item,
+  categories,
+  defaultCategoryId,
   onClose,
   onSaved,
+  onImageChanged,
 }: {
   open: boolean;
   item: AdminMenuItem | null;
+  categories: AdminCategory[];
+  defaultCategoryId: string | null;
   onClose: () => void;
   onSaved: () => void;
+  onImageChanged: () => void;
 }) {
   const [name, setName] = useState("");
   const [price, setPrice] = useState("0");
-  const [category, setCategory] = useState("Main Course");
+  const [categoryId, setCategoryId] = useState<string | null>(null);
   const [description, setDescription] = useState("");
   const [vegetarian, setVegetarian] = useState(true);
   const [available, setAvailable] = useState(true);
@@ -1275,32 +2213,30 @@ function DishModal({
   const [busy, setBusy] = useState(false);
 
   /* Fill the form when it opens (edit) or open it empty (create). Deferred a
-     frame so the effect body never writes state synchronously, which would
-     cascade a second render before the modal has even painted. */
+     frame so the effect body never writes state synchronously. */
   useEffect(() => {
     if (!open) return;
     const timer = window.setTimeout(() => {
       setName(item?.name ?? "");
       setPrice(String(item?.price ?? 0));
-      setCategory(item?.category ?? "Main Course");
+      setCategoryId(item?.category_id ?? defaultCategoryId ?? null);
       setDescription(item?.description ?? "");
       setVegetarian(item?.vegetarian ?? true);
       setAvailable(item?.is_available ?? true);
       setError(undefined);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [open, item]);
+  }, [open, item, defaultCategoryId]);
+
+  const folders = folderOptions(categories);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
 
     const amount = Number(price);
+
     if (!name.trim()) {
       setError("Give the dish a name.");
-      return;
-    }
-    if (!category.trim()) {
-      setError("Pick a category.");
       return;
     }
     if (!Number.isFinite(amount) || amount < 0) {
@@ -1313,7 +2249,7 @@ function DishModal({
       const payload = {
         name: name.trim(),
         price: amount,
-        category: category.trim(),
+        category_id: categoryId,
         description: description.trim(),
         vegetarian,
         is_available: available,
@@ -1379,15 +2315,24 @@ function DishModal({
               setPrice(event.target.value);
             }}
           />
-          <Input
-            label="Category"
-            value={category}
-            onChange={(event) => {
-              setError(undefined);
-              setCategory(event.target.value);
-            }}
-            maxLength={80}
-          />
+          <FieldShell id="dish-folder" label="Folder">
+            <select
+              id="dish-folder"
+              value={categoryId ?? ""}
+              onChange={(event) => {
+                setError(undefined);
+                setCategoryId(event.target.value || null);
+              }}
+              className={controlStyles()}
+            >
+              <option value="">Unfiled (top level)</option>
+              {folders.map((folder) => (
+                <option key={folder.id} value={folder.id}>
+                  {folder.label}
+                </option>
+              ))}
+            </select>
+          </FieldShell>
         </div>
 
         <FieldShell id="dish-description" label="Description">
@@ -1417,6 +2362,14 @@ function DishModal({
           />
         </div>
 
+        {item ? (
+          <DishImageEditor item={item} onChanged={onImageChanged} />
+        ) : (
+          <p className="rounded-md border border-line bg-surface-sunken px-3 py-2.5 text-xs leading-relaxed text-ink-subtle">
+            Save the dish first, then open it again to upload a photo.
+          </p>
+        )}
+
         {error ? (
           <p role="alert" className="text-sm font-medium text-alert">
             {error}
@@ -1426,6 +2379,140 @@ function DishModal({
     </Modal>
   );
 }
+
+/* The photo section of the dish editor. Uploading is immediate and separate
+   from saving the form: the photo belongs to the dish row, and a failed upload
+   must never silently roll back a price edit the manager just made. */
+function DishImageEditor({
+  item,
+  onChanged,
+}: {
+  item: AdminMenuItem;
+  onChanged: () => void;
+}) {
+  const { toast } = useToast();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [uploaded, setUploaded] = useState<AdminMenuImage | null>(null);
+  const [removed, setRemoved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const existing = item.image_small_url
+    ? {
+        image_url: item.image_url ?? item.image_small_url,
+        image_small_url: item.image_small_url,
+        blur_data_url: item.blur_data_url ?? "",
+      }
+    : null;
+  const current = removed ? null : (uploaded ?? existing);
+
+  async function upload(file: File | undefined) {
+    if (!file) return;
+    setError(null);
+
+    if (file.size > DISH_IMAGE_MAX_BYTES) {
+      setError("Photos must be 8 MB or smaller.");
+      return;
+    }
+    if (file.type && !DISH_IMAGE_TYPES.includes(file.type)) {
+      setError("Use a JPEG, PNG, WebP or AVIF photo.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const saved = await uploadAdminMenuImage(item.menu_item_id, file);
+      setUploaded(saved);
+      setRemoved(false);
+      toast({ title: "Photo saved", tone: "success" });
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not upload the photo.");
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteAdminMenuImage(item.menu_item_id);
+      setUploaded(null);
+      setRemoved(true);
+      toast({ title: "Photo removed", tone: "success" });
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not remove the photo.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const preview = resolveApiAssetUrl(current?.image_small_url ?? null);
+
+  return (
+    <div className="rounded-lg border border-line bg-surface-sunken p-3">
+      <p className="text-label text-ink-subtle uppercase">Dish photo</p>
+
+      <div className="mt-2 flex items-center gap-3">
+        <span className="relative block size-20 shrink-0 overflow-hidden rounded-md bg-canvas">
+          {preview ? (
+            <Image
+              src={preview}
+              alt={`Photo of ${item.name}`}
+              fill
+              unoptimized
+              sizes="80px"
+              className="object-cover"
+            />
+          ) : (
+            <span className="flex size-full items-center justify-center text-ink-subtle">
+              <ImagePlus className="size-5" aria-hidden />
+            </span>
+          )}
+        </span>
+
+        <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            accept={DISH_IMAGE_TYPES.join(",")}
+            className="sr-only"
+            onChange={(event) => void upload(event.target.files?.[0])}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            loading={busy}
+            onClick={() => fileRef.current?.click()}
+            leftIcon={<ImagePlus className="size-3.5" aria-hidden />}
+          >
+            {current ? "Replace photo" : "Upload photo"}
+          </Button>
+          {current ? (
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => void remove()}>
+              Remove
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
+      <p className="mt-2 text-xs leading-relaxed text-ink-subtle">
+        JPEG, PNG, WebP or AVIF, up to 8 MB. The app stores a full, a 480px and a 50px copy —
+        the tiny one is blurred in while the card loads on a slow connection.
+      </p>
+
+      {error ? (
+        <p role="alert" className="mt-2 text-sm font-medium text-alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 
 function ToggleField({
   label,

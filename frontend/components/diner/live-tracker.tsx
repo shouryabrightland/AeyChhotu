@@ -9,12 +9,17 @@ import {
   CircleCheck,
   Clock,
   Flame,
+  ListPlus,
+  RotateCcw,
+  ShieldX,
   ShoppingBasket,
   Timer,
   TriangleAlert,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ActiveDinersBadge } from "@/components/diner/active-diners-badge";
 import { InactiveTableState } from "@/components/diner/inactive-table-state";
@@ -24,9 +29,11 @@ import { Button, buttonStyles } from "@/components/ui/button";
 import { Container } from "@/components/ui/container";
 import { EmptyState, ErrorState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/loading-state";
+import { Modal } from "@/components/ui/modal";
+import { useToast } from "@/components/ui/toast";
 import { useNow } from "@/hooks/use-now";
 import { usePresence } from "@/hooks/use-presence";
-import { useLiveTable } from "@/hooks/use-live-table";
+import { useLiveTable, type LiveTableValue } from "@/hooks/use-live-table";
 import { clearStoredSession } from "@/lib/api/table-session";
 import type { Order, OrderStatus } from "@/lib/api/types";
 import { ACTIVITY_LINES, estimateArrival } from "@/lib/diner/tracker";
@@ -72,6 +79,12 @@ const statusMeta: Record<OrderStatus, StatusMeta> = {
     emblem: "border-ready/45 bg-ready-surface text-ready",
     halo: "border-ready/30",
   },
+  denied: {
+    label: "Not available",
+    Icon: ShieldX,
+    emblem: "border-alert/45 bg-alert-surface text-alert",
+    halo: "border-transparent",
+  },
 };
 
 const steps: { status: OrderStatus; label: string }[] = [
@@ -85,6 +98,8 @@ const stepIndex: Record<OrderStatus, number> = {
   preparing: 1,
   ready: 2,
   served: 3,
+  // Never rendered: a denied round has its own screen, not the journey.
+  denied: -1,
 };
 
 export interface LiveTrackerProps {
@@ -201,6 +216,22 @@ export function LiveTracker({ tableToken }: LiveTrackerProps) {
               </Link>
             }
           />
+        </Container>
+      </main>
+    );
+  }
+
+  /* ---- State matrix: denied (the kitchen refused this round) ---------
+     A refused round is not an error page and not a dead end: the diner is
+     told exactly why, sees which dishes are gone, and chooses one of the
+     three documented ways forward. Every one of them calls the API, so two
+     phones at the table cannot disagree about what happened. */
+  if (order.status === "denied") {
+    return (
+      <main id="main" className="relative isolate min-h-dvh bg-canvas">
+        {header}
+        <Container size="narrow" className="py-12 sm:py-16">
+          <DeniedOrderPanel live={live} order={order} />
         </Container>
       </main>
     );
@@ -493,6 +524,248 @@ function ActivityLine({ status }: { status: OrderStatus }) {
         </motion.span>
       </AnimatePresence>
     </span>
+  );
+}
+
+/* The refused-round screen.
+
+   Three outcomes, and they are genuinely different things:
+
+     Retry         preview the re-fire, then send the still-available lines
+     Move to list  put those lines back in the cart and go edit them there
+     Cancel        discard the refused round entirely
+
+   The preview exists because Retry is destructive in a subtle way: a dish
+   that is still 86'd cannot come back, so the diner must SEE that it is
+   being left out before confirming, not discover it on the next ticket. */
+function DeniedOrderPanel({ live, order }: { live: LiveTableValue; order: Order }) {
+  const router = useRouter();
+  const { toast } = useToast();
+  const plan = live.deniedRetryPlan;
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [busy, setBusy] = useState<"retry" | "move" | "cancel" | null>(null);
+
+  const reason =
+    order.denial_reason?.trim() ||
+    plan?.reason ||
+    "The kitchen could not prepare this round.";
+  const keep = plan?.keep ?? [];
+  const omitted = plan?.omitted ?? [];
+  const itemCount = keep.reduce((total, line) => total + line.quantity, 0);
+
+  async function handleRetry() {
+    if (busy) return;
+    setBusy("retry");
+
+    const result = await live.retryDenied();
+    setBusy(null);
+
+    if (!result.ok) {
+      toast({
+        title: result.message ?? "The round could not be re-fired.",
+        tone: "error",
+      });
+      return;
+    }
+
+    setPreviewOpen(false);
+    toast({
+      title: "Round re-fired",
+      description: result.omitted?.length
+        ? `${result.omitted.join(", ")} left out — still out of stock.`
+        : "The kitchen has the new ticket.",
+      tone: "success",
+    });
+  }
+
+  async function handleMoveToCart() {
+    if (busy) return;
+    setBusy("move");
+
+    const result = await live.moveDeniedToCart();
+    setBusy(null);
+
+    if (!result.ok) {
+      toast({
+        title: result.message ?? "Those items could not be moved back.",
+        tone: "error",
+      });
+      return;
+    }
+
+    toast({
+      title: "Back in the cart",
+      description: result.omitted?.length
+        ? `${result.omitted.join(", ")} stayed out — out of stock. Edit and fire when ready.`
+        : "Edit the lines and fire when ready.",
+      tone: "success",
+    });
+    router.push(`/table/${order.table_code}`);
+  }
+
+  async function handleCancel() {
+    if (busy) return;
+    setBusy("cancel");
+
+    const result = await live.dismissDenied();
+    setBusy(null);
+
+    if (!result.ok) {
+      toast({ title: result.message ?? "That order could not be cancelled.", tone: "error" });
+      return;
+    }
+
+    toast({ title: "Order cancelled", description: "Nothing was charged." });
+  }
+
+  return (
+    <div className="flex flex-col items-center gap-8 text-center">
+      <span className="flex size-24 items-center justify-center rounded-pill border border-alert/40 bg-alert-surface text-alert sm:size-28">
+        <ShieldX className="size-10 sm:size-11" aria-hidden />
+      </span>
+
+      <div className="flex flex-col gap-3">
+        <span className="text-label text-ink-subtle uppercase">Live order</span>
+        <h1 className="font-display text-title font-semibold text-ink">
+          This round was not cooked
+        </h1>
+        <p className="max-w-md text-lead text-ink-muted">
+          The kitchen could not take it. Nothing on it has been charged.
+        </p>
+      </div>
+
+      <div
+        role="status"
+        className="w-full rounded-lg border-2 border-alert/35 bg-alert-surface px-5 py-4 text-left"
+      >
+        <span className="text-label text-alert uppercase">Kitchen said</span>
+        <p className="mt-1.5 text-base leading-relaxed font-medium text-ink">{reason}</p>
+      </div>
+
+      {omitted.length > 0 ? (
+        <section
+          aria-label="Out of stock items"
+          className="w-full rounded-lg border border-line bg-surface p-5 text-left"
+        >
+          <span className="text-label text-ink-subtle uppercase">Out of stock</span>
+          <ul className="mt-2 flex flex-col gap-1.5">
+            {omitted.map((line) => (
+              <li key={line.name} className="flex items-baseline gap-2 text-sm text-ink-muted">
+                <span className="font-display font-semibold text-ink-subtle tabular-nums">
+                  {line.quantity}×
+                </span>
+                <span className="line-through decoration-ink-subtle/60">{line.name}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      <div className="flex w-full max-w-sm flex-col gap-3">
+        <Button
+          variant="ember"
+          size="lg"
+          fullWidth
+          disabled={busy !== null || keep.length === 0}
+          loading={busy === "retry"}
+          onClick={() => setPreviewOpen(true)}
+          leftIcon={<RotateCcw className="size-4" aria-hidden />}
+        >
+          Retry order
+        </Button>
+
+        <Button
+          variant="soft"
+          size="lg"
+          fullWidth
+          disabled={busy !== null}
+          loading={busy === "move"}
+          onClick={() => void handleMoveToCart()}
+          leftIcon={<ListPlus className="size-4" aria-hidden />}
+        >
+          Move to list
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="lg"
+          fullWidth
+          disabled={busy !== null}
+          loading={busy === "cancel"}
+          onClick={() => void handleCancel()}
+          leftIcon={<X className="size-4" aria-hidden />}
+        >
+          Cancel
+        </Button>
+
+        {keep.length === 0 ? (
+          <p className="text-xs leading-snug text-ink-subtle">
+            Every dish on this round is out of stock right now — cancel it or pick something else
+            from the menu.
+          </p>
+        ) : null}
+      </div>
+
+      {/* ---- Retry preview: what will be re-fired, what will be left out ---- */}
+      <Modal
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        size="sm"
+        title="Re-fire this round?"
+        description="Check what goes back to the kitchen before you confirm."
+        footer={
+          <>
+            <Button
+              variant="ember"
+              size="md"
+              disabled={busy !== null || itemCount === 0}
+              loading={busy === "retry"}
+              onClick={() => void handleRetry()}
+              leftIcon={<Flame className="size-4" aria-hidden />}
+            >
+              Re-fire {itemCount} {itemCount === 1 ? "item" : "items"}
+            </Button>
+            <Button variant="ghost" size="md" onClick={() => setPreviewOpen(false)}>
+              Back
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-5 text-left">
+          <section className="flex flex-col">
+            <span className="text-label text-ink-subtle uppercase">Going back in</span>
+            <ul className="mt-2 flex flex-col divide-y divide-line/70">
+              {keep.map((line) => (
+                <li key={line.name} className="flex items-baseline justify-between gap-3 py-2.5">
+                  <span className="flex items-baseline gap-2 text-sm text-ink">
+                    <span className="font-display font-semibold tabular-nums">{line.quantity}×</span>
+                    {line.name}
+                  </span>
+                  <Check className="size-4 shrink-0 text-ready" aria-hidden />
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          {omitted.length > 0 ? (
+            <section className="flex flex-col rounded-md border border-alert/30 bg-alert-surface p-3">
+              <span className="text-label text-alert uppercase">Left out — out of stock</span>
+              <ul className="mt-2 flex flex-col gap-1.5">
+                {omitted.map((line) => (
+                  <li
+                    key={line.name}
+                    className="flex items-baseline gap-2 text-sm text-ink-muted line-through decoration-alert/50"
+                  >
+                    <span className="font-display font-semibold tabular-nums">{line.quantity}×</span>
+                    {line.name}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+        </div>
+      </Modal>
+    </div>
   );
 }
 

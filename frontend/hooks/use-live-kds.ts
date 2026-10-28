@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   fetchAllPages,
+  denyKdsTicket as apiDenyKdsTicket,
   getKdsTickets as apiGetKdsTickets,
   pruneKdsTicket as apiPruneKdsTicket,
   subscribeKdsOrders,
@@ -42,6 +43,8 @@ export interface LiveKdsValue {
   retry: () => void;
   refresh: () => Promise<void>;
   advance: (order: Order, next: OrderStatus) => Promise<KdsAdvanceResult>;
+  /** Refuse an active ticket with a reason the diner will read. */
+  deny: (order: Order, reason: string) => Promise<KdsAdvanceResult>;
 }
 
 const LIST_LIMIT = 100;
@@ -189,5 +192,39 @@ export function useLiveKds(): LiveKdsValue {
     [refresh],
   );
 
-  return { phase, error, tickets, busy, retry, refresh, advance };
+  /* ---- Manual denial (kitchen refusal) ----------------------------------
+     Same per-ticket busy guard as advance, so a double-tap cannot submit two
+     denial reasons for one ticket. A ticket can be denied from pending,
+     preparing OR ready — a dish can run out at any point before it reaches
+     the table — and the reason is required by the server. */
+  const deny = useCallback(
+    async (order: Order, reason: string): Promise<KdsAdvanceResult> => {
+      if (busyRef.current[order.id]) {
+        return { ok: false, message: "That ticket is already updating." };
+      }
+      busyRef.current = { ...busyRef.current, [order.id]: true };
+      setBusy(busyRef.current);
+
+      try {
+        await apiDenyKdsTicket(order.id, reason);
+        await refresh();
+        return { ok: true };
+      } catch (err) {
+        if (err instanceof ApiError) {
+          if (err.status === 0) {
+            setError(err);
+            setPhase("error");
+          }
+          return { ok: false, message: err.message };
+        }
+        return { ok: false, message: "Could not deny that ticket." };
+      } finally {
+        busyRef.current = { ...busyRef.current, [order.id]: false };
+        if (mountedRef.current) setBusy(busyRef.current);
+      }
+    },
+    [refresh],
+  );
+
+  return { phase, error, tickets, busy, retry, refresh, advance, deny };
 }

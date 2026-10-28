@@ -116,7 +116,13 @@ export function subscribeTableCart(
 
 // ---- Catalog & floor updates (admin console / floor board) ------------
 
-/** menu_items INSERT/UPDATE/DELETE — 86s, edits and new dishes. */
+/** menu_items AND menu_item_images INSERT/UPDATE/DELETE.
+
+    Both tables are watched on ONE channel because an 86 writes menu_items
+    while a replaced dish photo writes menu_item_images: a diner's open menu
+    has to react to either without a refresh. sql/011 publishes
+    menu_item_images and grants read on its non-secret columns for exactly
+    this. */
 export function subscribeMenuUpdates(onUpdate: () => void): Detach {
   const client = getSupabase();
   if (!client) return NOOP_DETACH;
@@ -130,6 +136,13 @@ export function subscribeMenuUpdates(onUpdate: () => void): Detach {
         onUpdate();
       },
     )
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "menu_item_images" },
+      () => {
+        onUpdate();
+      },
+    )
     .subscribe();
 
   return () => {
@@ -137,9 +150,20 @@ export function subscribeMenuUpdates(onUpdate: () => void): Detach {
   };
 }
 
-/** restaurant_tables INSERT/UPDATE/DELETE — bill requests, settles and new
-    tables. REPLICA IDENTITY FULL (sql/008) keeps DELETE payloads useful. */
-export function subscribeTableUpdates(onUpdate: () => void): Detach {
+/** What changed on a table row. `status` and `bill_status` are the two facts
+    diner screens act on: 'empty' means the session was terminated, 'paid'
+    means the bill was settled from another device. */
+export interface TableUpdateEvent {
+  event: "INSERT" | "UPDATE" | "DELETE";
+  table_id: string | null;
+  code: string | null;
+  status: string | null;
+  bill_status: string | null;
+}
+
+export function subscribeTableUpdates(
+  onChange: (event: TableUpdateEvent) => void,
+): Detach {
   const client = getSupabase();
   if (!client) return NOOP_DETACH;
 
@@ -148,8 +172,23 @@ export function subscribeTableUpdates(onUpdate: () => void): Detach {
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "restaurant_tables" },
-      () => {
-        onUpdate();
+      (payload) => {
+        /* REPLICA IDENTITY FULL (sql/008, sql/011) means a DELETE also carries
+           the old row, so an archived/removed table is detectable. */
+        const row =
+          (payload.new as unknown as Record<string, unknown> | null) ??
+          (payload.old as unknown as Record<string, unknown> | null) ??
+          {};
+
+        const str = (value: unknown) => (typeof value === "string" ? value : null);
+
+        onChange({
+          event: payload.eventType as TableUpdateEvent["event"],
+          table_id: str(row.id),
+          code: str(row.code),
+          status: str(row.status),
+          bill_status: str(row.bill_status),
+        });
       },
     )
     .subscribe();

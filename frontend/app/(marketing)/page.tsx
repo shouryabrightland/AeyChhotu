@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useSyncExternalStore, type FormEvent } from "react";
 import { Logo } from "@/components/brand/logo";
-import { HomeQrAnimation } from "@/components/diner/home-qr-animation";
+import { BaawarchiHero } from "@/components/brand/baawarchi-hero";
 import { InAppQrScanner } from "@/components/diner/in-app-qr-scanner";
 import { InstallPrompt } from "@/components/pwa/install-prompt";
 import { Button } from "@/components/ui/button";
@@ -269,7 +269,7 @@ export default function HomePage() {
         </div>
 
         <div className="order-first w-full lg:order-none">
-          <HomeQrAnimation />
+          <BaawarchiHero />
         </div>
       </section>
 

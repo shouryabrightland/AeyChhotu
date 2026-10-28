@@ -202,6 +202,50 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
     assert.equal(row.code, table.code);
   });
 
+  it("re-codes an empty table, folding the case, and refuses once it is in use", async () => {
+    const table = await admin.createTable({ name: `Recode ${stamp}` });
+    createdTableIds.push(table.table_id);
+
+    const desired = `x${stamp.slice(-6)}`.slice(0, 8).toLowerCase();
+    assert.match(desired, CODE_RE);
+
+    const saved = await admin.updateTableCode(table.table_id, { code: desired.toUpperCase() });
+    assert.equal(saved.code, desired, "uppercase input is stored lowercase");
+    assert.equal(saved.name, table.name);
+
+    // Re-saving the current code is a no-op, not a conflict.
+    const again = await admin.updateTableCode(table.table_id, { code: desired });
+    assert.equal(again.code, desired);
+
+    // Once a party is seated the code is pinned under their phones.
+    await pool.query(
+      `UPDATE restaurant_tables
+          SET status = 'active', session_pin = '12', session_started_at = now()
+        WHERE id = $1`,
+      [table.table_id],
+    );
+
+    const error = await expectAppError(
+      admin.updateTableCode(table.table_id, { code: `${desired.slice(0, 4)}q` }),
+      "TABLE_NOT_EMPTY",
+    );
+    assert.equal(error.status, 409);
+  });
+
+  it("refuses a code another live table already owns", async () => {
+    const [owner, other] = await Promise.all([
+      admin.createTable({ name: `Code owner ${stamp}` }),
+      admin.createTable({ name: `Code other ${stamp}` }),
+    ]);
+    createdTableIds.push(owner.table_id, other.table_id);
+
+    const error = await expectAppError(
+      admin.updateTableCode(other.table_id, { code: owner.code }),
+      "TABLE_CODE_TAKEN",
+    );
+    assert.equal(error.status, 409);
+  });
+
   it("regenerates the token: new code, cart wiped, orders served, session cleared", async () => {
     const table = await admin.createTable({ name: `Regenerate ${stamp}` });
     createdTableIds.push(table.table_id);

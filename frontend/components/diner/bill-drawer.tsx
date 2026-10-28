@@ -55,7 +55,12 @@ export function BillDrawer({
   const mineOnly = scope === "mine";
   const matches = (addedBy: string) => !mineOnly || addedBy === displayName;
 
-  const fired = orders
+  /* A DENIED round was never cooked, so it is not a line on the bill. Keeping
+     it here would charge the table for food the kitchen refused — the single
+     most damaging place for the wrong answer. */
+  const billable = orders.filter((order) => order.status !== "denied");
+
+  const fired = billable
     .map((order) => ({
       order,
       lines: order.items
@@ -64,6 +69,7 @@ export function BillDrawer({
           key: item.id,
           name: item.name,
           quantity: item.quantity,
+          // persisted at fire time (sql/011); "Guest" for older tickets
           addedBy: ownerName(item.added_by),
           amount: item.price * item.quantity,
         })),
@@ -94,7 +100,7 @@ export function BillDrawer({
   // Every guest's running total, fired plus staged, made from the unscoped
   // data so the split always accounts for the whole table.
   const personTotals = new Map<string, number>();
-  for (const order of orders) {
+  for (const order of billable) {
     for (const item of order.items) {
       const owner = ownerName(item.added_by);
       personTotals.set(owner, (personTotals.get(owner) ?? 0) + item.price * item.quantity);

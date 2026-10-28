@@ -9,7 +9,10 @@ import {
   availabilitySchema,
   cartAddSchema,
   cartUpdateSchema,
+  denyTicketSchema,
   fireSchema,
+  initializeSchema,
+  joinPinSchema,
   kdsLoginSchema,
   kdsTicketsQuerySchema,
   menuQuerySchema,
@@ -161,6 +164,54 @@ describe("availabilitySchema (E14)", () => {
     assert.equal(availabilitySchema.safeParse({ is_available: true }).success, true);
     assert.equal(availabilitySchema.safeParse({ is_available: "true" }).success, false);
     assert.equal(availabilitySchema.safeParse({ is_available: 1 }).success, false);
+  });
+});
+
+describe("denyTicketSchema (kitchen refusal)", () => {
+  it("requires a reason and trims it", () => {
+    assert.equal(denyTicketSchema.safeParse({ reason: "Paneer ran out" }).success, true);
+    assert.equal(denyTicketSchema.safeParse({}).success, false);
+    assert.equal(denyTicketSchema.safeParse({ reason: "   " }).success, false);
+
+    const parsed = denyTicketSchema.parse({ reason: "  Out of stock  " });
+    assert.equal(parsed.reason, "Out of stock");
+  });
+
+  it("caps the reason at 300 characters", () => {
+    assert.equal(denyTicketSchema.safeParse({ reason: "x".repeat(300) }).success, true);
+    assert.equal(denyTicketSchema.safeParse({ reason: "x".repeat(301) }).success, false);
+  });
+});
+
+describe("session entry (stale refresh + roster)", () => {
+  it("accepts an ISO scan_time and a device identity", () => {
+    const parsed = initializeSchema.parse({
+      table_token: "k7x2p",
+      scan_time: "2026-10-28T10:15:00.000Z",
+      user_id: "dev_1a2b3c4d",
+      name: "Amit",
+    });
+    assert.equal(parsed.scan_time, "2026-10-28T10:15:00.000Z");
+    assert.equal(parsed.user_id, "dev_1a2b3c4d");
+  });
+
+  it("stays backwards compatible without scan_time or identity", () => {
+    assert.equal(initializeSchema.safeParse({ table_token: "k7x2p" }).success, true);
+    assert.equal(
+      joinPinSchema.safeParse({ table_token: "k7x2p", pin: "07" }).success,
+      true,
+    );
+  });
+
+  it("rejects an unparseable scan_time and an oversized user_id", () => {
+    assert.equal(
+      initializeSchema.safeParse({ table_token: "k7x2p", scan_time: "not-a-date" }).success,
+      false,
+    );
+    assert.equal(
+      initializeSchema.safeParse({ table_token: "k7x2p", user_id: "x".repeat(65) }).success,
+      false,
+    );
   });
 });
 

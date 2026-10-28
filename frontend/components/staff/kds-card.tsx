@@ -1,13 +1,19 @@
 "use client";
 
 import { motion, useReducedMotion } from "motion/react";
-import { ArrowRight, Check, Clock, TriangleAlert } from "lucide-react";
-import { useMemo } from "react";
+import { ArrowRight, Check, Clock, ShieldX, TriangleAlert } from "lucide-react";
+import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Modal } from "@/components/ui/modal";
+import { Textarea } from "@/components/ui/textarea";
 import type { Order, OrderStatus } from "@/lib/api/types";
 import { formatElapsed } from "@/lib/format";
 import { transitionBase } from "@/lib/motion";
 import { cn } from "@/lib/utils";
+
+/** The three states a card can represent. `served` and `denied` are closed
+    tickets and never render a card at all. */
+type ActiveStatus = "pending" | "preparing" | "ready";
 
 interface AdvanceAction {
   label: string;
@@ -15,17 +21,24 @@ interface AdvanceAction {
   next: OrderStatus;
 }
 
-const actions: Record<Exclude<OrderStatus, "served">, AdvanceAction> = {
+const actions: Record<ActiveStatus, AdvanceAction> = {
   pending: { label: "Start cooking", variant: "ember", next: "preparing" },
   preparing: { label: "Mark ready", variant: "ember", next: "ready" },
   ready: { label: "Mark served", variant: "primary", next: "served" },
 };
 
-const statusRail: Record<Exclude<OrderStatus, "served">, string> = {
+const statusRail: Record<ActiveStatus, string> = {
   pending: "bg-pending",
   preparing: "bg-preparing",
   ready: "bg-ready",
 };
+
+/** Quick reasons first: the chef usually taps one and types nothing. */
+const QUICK_REASONS = [
+  "Out of stock",
+  "Kitchen equipment down",
+  "Too many tickets on the line",
+];
 
 /* Time-on-ticket is the one number a chef scans for, so it escalates through
    the status colours rather than sitting in flat grey. */
@@ -46,6 +59,8 @@ export interface KdsCardProps {
   /** Frontend-only: flips one line's tick. Never talks to the backend. */
   onToggleItem?: (orderId: string, itemId: string) => void;
   onAdvance: (order: Order, next: OrderStatus) => void;
+  /** Refuse the ticket with a required reason (confirmation modal first). */
+  onDeny: (order: Order, reason: string) => void;
 }
 
 export function KdsCard({
@@ -55,15 +70,21 @@ export function KdsCard({
   checkedItemIds,
   onToggleItem,
   onAdvance,
+  onDeny,
 }: KdsCardProps) {
   const reduceMotion = useReducedMotion();
   // Narrowed once into a local: `order.status` is a property access, so
-  // TypeScript cannot carry the `served` exclusion through to later reads.
+  // TypeScript cannot carry the closed-state exclusions through to later
+  // reads. Both closed states are filtered here, before any lookup.
   const status = order.status;
 
   const checked = useMemo(() => new Set(checkedItemIds ?? []), [checkedItemIds]);
 
-  if (status === "served") return null;
+  // ---- Denial confirmation (no reason, no denial) ----------------------
+  const [denyOpen, setDenyOpen] = useState(false);
+  const [reason, setReason] = useState("");
+
+  if (status === "served" || status === "denied") return null;
 
   const action = actions[status];
   const checklist = status === "preparing";
@@ -235,7 +256,82 @@ export function KdsCard({
         >
           {busy ? "Updating…" : action.label}
         </Button>
+
+        {/* Denial is available at every active stage, but it is destructive:
+            it is a quiet secondary action that always opens a confirmation
+            modal, never a one-tap mistake next to the main advance button. */}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            setReason("");
+            setDenyOpen(true);
+          }}
+          className="inline-flex cursor-pointer items-center justify-center gap-1.5 text-xs font-semibold text-ink-subtle transition-colors duration-[var(--duration-fast)] hover:text-alert disabled:pointer-events-none disabled:opacity-45"
+        >
+          <ShieldX className="size-3.5" aria-hidden />
+          Deny order
+        </button>
       </div>
+
+      <Modal
+        open={denyOpen}
+        onClose={() => setDenyOpen(false)}
+        size="sm"
+        title="Deny this order?"
+        description={`Table ${order.table_code} will see your reason and can retry, edit the order, or cancel it. Nothing is cooked and nothing is charged.`}
+        footer={
+          <>
+            <Button
+              variant="danger"
+              size="md"
+              disabled={busy || reason.trim().length === 0}
+              loading={busy}
+              onClick={() => {
+                if (reason.trim().length === 0 || busy) return;
+                onDeny(order, reason.trim());
+                setDenyOpen(false);
+              }}
+              leftIcon={<ShieldX className="size-4" aria-hidden />}
+            >
+              Deny order
+            </Button>
+            <Button variant="ghost" size="md" onClick={() => setDenyOpen(false)}>
+              Keep cooking
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-wrap gap-2">
+            {QUICK_REASONS.map((quick) => (
+              <button
+                key={quick}
+                type="button"
+                onClick={() => setReason(quick)}
+                className={cn(
+                  "cursor-pointer rounded-pill border px-3 py-1.5 text-xs font-semibold transition-colors duration-[var(--duration-fast)]",
+                  reason === quick
+                    ? "border-alert/50 bg-alert-surface text-alert"
+                    : "border-line-strong bg-surface text-ink-muted hover:border-ink-subtle",
+                )}
+              >
+                {quick}
+              </button>
+            ))}
+          </div>
+
+          <Textarea
+            label="Reason for the diner"
+            hint="Required. Shown on the table's tracker — be specific and kind."
+            value={reason}
+            maxLength={300}
+            rows={3}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="e.g. Paneer ran out mid-service"
+          />
+        </div>
+      </Modal>
     </motion.li>
   );
 }

@@ -35,24 +35,36 @@ import {
  * credentials they return are the diner's own. */
 export const sessionsRouter = Router();
 
+/* Every session entry point forwards the client's `scan_time` and (where the
+   guest can identity themselves) their roster entry. The service owns the
+   decision — a stale page is refused with 409 STALE_SESSION and a device that
+   joined is upserted into table_members. */
+function memberOf(body: { user_id?: string; name?: string }) {
+  if (!body.user_id) return undefined;
+  return { user_id: body.user_id, name: body.name };
+}
+
 // E1 — POST /api/v1/sessions/initialize
 sessionsRouter.post("/initialize", async (req, res) => {
   const body = parseOrThrow(initializeSchema, req.body);
-  const data = await initializeSession(body.table_token);
+  const data = await initializeSession(body.table_token, {
+    scan_time: body.scan_time,
+    member: memberOf(body),
+  });
   res.status(200).json({ success: true, data });
 });
 
 // E1b — POST /api/v1/sessions/join-pin
 sessionsRouter.post("/join-pin", async (req, res) => {
   const body = parseOrThrow(joinPinSchema, req.body);
-  const data = await joinWithPin(body);
+  const data = await joinWithPin({ ...body, member: memberOf(body) });
   res.status(200).json({ success: true, data });
 });
 
 // E1c — POST /api/v1/sessions/join-pass
 sessionsRouter.post("/join-pass", async (req, res) => {
   const body = parseOrThrow(joinPassSchema, req.body);
-  const data = await joinWithPass(body);
+  const data = await joinWithPass({ ...body, member: memberOf(body) });
   res.status(200).json({ success: true, data });
 });
 

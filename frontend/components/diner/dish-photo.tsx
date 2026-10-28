@@ -3,6 +3,7 @@
 import { UtensilsCrossed } from "lucide-react";
 import Image from "next/image";
 import { useState } from "react";
+import { resolveApiAssetUrl } from "@/lib/api-client";
 import type { MenuItem } from "@/lib/api/types";
 import {
   dishFallbackWash,
@@ -28,7 +29,13 @@ export interface DishPhotoProps {
    layout and the reading order never move. */
 export function DishPhoto({ item, sizes, muted = false, className }: DishPhotoProps) {
   const [failed, setFailed] = useState(false);
-  const src = resolveDishPhoto(item);
+
+  /* An uploaded photo wins over the curated map. The 480px small variant is
+     the card image; the 50px tiny is inlined as the blur so a slow phone sees
+     the dish immediately instead of an empty box. */
+  const uploaded = resolveApiAssetUrl(item.image_small_url ?? item.image_url ?? null);
+  const src = uploaded ?? resolveDishPhoto(item);
+  const blur = item.blur_data_url ?? null;
   const showPhoto = Boolean(src) && !failed;
 
   // Spans, not divs: the same plate has to be legal inside a card that is
@@ -46,6 +53,10 @@ export function DishPhoto({ item, sizes, muted = false, className }: DishPhotoPr
           alt={dishPhotoAlt(item)}
           fill
           sizes={sizes}
+          /* The API already serves three pre-sized derivatives, so the Next
+             optimiser would only add a hop. */
+          unoptimized={Boolean(uploaded)}
+          {...(blur ? { placeholder: "blur" as const, blurDataURL: blur } : {})}
           onError={() => setFailed(true)}
           className={cn(
             "object-cover transition-[filter,transform] duration-[var(--duration-slow)] ease-organic",

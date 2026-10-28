@@ -18,19 +18,24 @@ export interface KdsTicket {
     quantity: number;
     request_note: string;
     allergy_note: string;
+    /** Who ordered it — copied off the cart at fire time (sql/011). */
+    added_by: string;
     /** Frozen at fire time — see sql/004_hardening.sql. */
     unit_price: number;
   }>;
 }
 
-/* E10 — GET /api/v1/kds/tickets (active columns; served tickets pruned). */
+/* E10 — GET /api/v1/kds/tickets (active columns only).
+   `status IN (...)` rather than `<> 'served'`:
+   a DENIED ticket is closed as well — it must not sit on the line waiting
+   for a cook who has already refused it. */
 export async function listTickets(params: {
   status?: string;
   page: number;
   limit: number;
 }): Promise<{ data: KdsTicket[]; meta: PageMeta }> {
   const args: unknown[] = [];
-  let where = "o.status <> 'served'";
+  let where = "o.status IN ('pending', 'preparing', 'ready')";
   if (params.status) {
     args.push(params.status);
     where = `o.status = $${args.length}`;
@@ -62,6 +67,7 @@ export async function listTickets(params: {
                            'quantity',      oi.quantity,
                            'request_note',  oi.request_note,
                            'allergy_note',  oi.allergy_note,
+                           'added_by',      oi.added_by,
                            -- price charged at fire time (sql/004_hardening.sql)
                            'unit_price',    oi.unit_price
                          )
@@ -179,6 +185,75 @@ export async function pruneTicket(orderId: string) {
   } finally {
     client.release();
   }
+}
+
+/* PATCH /api/v1/kds/tickets/:order_id/deny — the kitchen's refusal.
+
+   Available from EVERY active status (pending, preparing, ready): a dish can
+   run out before it is started or after it is plated. The reason is
+   required — a ticket the diner sees as "denied" with no explanation is
+   worse than one that never changed state — and it is stored on the row so
+   the tracker can render it without a second read.
+
+   Denial leaves the ticket in history (nothing is deleted) but frees the
+   table to fire a replacement round, because the one-active-ticket index
+   only covers pending/preparing/ready. The release engine then runs, since
+   refusing the last open ticket on a paid, device-free table means the
+   table can be handed over. */
+export interface DenyTicketResult {
+  order_id: string;
+  status: "denied";
+  denial_reason: string;
+  table_cleared: boolean;
+}
+
+export async function denyTicket(orderId: string, reason: string): Promise<DenyTicketResult> {
+  const denialReason = reason.trim();
+  if (!denialReason) {
+    throw new AppError(400, "VALIDATION_ERROR", "Request payload failed validation.", {
+      fields: { reason: "Tell the diner why the order was refused." },
+    });
+  }
+
+  const updated = await pool.query<{ id: string; table_id: string }>(
+    `UPDATE orders
+        SET status        = 'denied',
+            denial_reason = $2,
+            updated_at    = now()
+      WHERE id = $1
+        AND status IN ('pending', 'preparing', 'ready')
+      RETURNING id, table_id`,
+    [orderId, denialReason],
+  );
+
+  const row = updated.rows[0];
+  if (!row) {
+    const current = await pool.query<{ status: string }>(
+      "SELECT status FROM orders WHERE id = $1",
+      [orderId],
+    );
+    const currentStatus = current.rows[0]?.status;
+    if (!currentStatus) {
+      throw new AppError(404, "ORDER_NOT_FOUND", "That ticket no longer exists.");
+    }
+    throw new AppError(
+      409,
+      "INVALID_STATUS_TRANSITION",
+      `Ticket cannot be denied from ${currentStatus}.`,
+      { current_status: currentStatus, requested_status: "denied" },
+    );
+  }
+
+  // Separate transaction: the release engine takes its own FOR UPDATE lock on
+  // the table row, which must not be nested inside the order UPDATE.
+  const { released } = await checkAndAutoReleaseTable(row.table_id);
+
+  return {
+    order_id: row.id,
+    status: "denied",
+    denial_reason: denialReason,
+    table_cleared: released,
+  };
 }
 
 /* E13 — POST /api/v1/kds/shift/activate (in-memory registry per docs/4;

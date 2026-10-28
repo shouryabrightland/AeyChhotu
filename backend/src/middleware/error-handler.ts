@@ -26,6 +26,16 @@ export function errorHandler(
     return;
   }
 
+  /* Raw image bodies (and any other route-level parser) exceed their limit:
+     answer 413 instead of collapsing into a 500. */
+  if (bodyError?.type === "entity.too.large") {
+    res.status(413).json({
+      success: false,
+      error: { code: "PAYLOAD_TOO_LARGE", message: "That file is too large for this endpoint." },
+    });
+    return;
+  }
+
   if (err instanceof AppError) {
     res.status(err.status).json({
       success: false,

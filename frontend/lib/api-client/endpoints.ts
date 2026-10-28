@@ -13,12 +13,16 @@ import { storeKdsToken } from "./token";
 import type {
   ActiveCheck,
   AdminAnalytics,
+  AdminCategory,
   AdminLogin,
+  AdminMenuImage,
   AdminMenuItem,
   AdminTable,
   AdminTableToken,
   AvailabilityResult,
+  CreateAdminCategoryInput,
   CreateAdminMenuItemInput,
+  UpdateAdminCategoryInput,
   UpdateAdminMenuItemInput,
   DeviceHeartbeat,
   HeartbeatRemoval,
@@ -35,11 +39,16 @@ import type {
   KdsTicketsQuery,
   KdsTicket,
   LiveOrderStatus,
+  MenuCategoryNode,
   MenuItem,
   MenuQuery,
   OrderHistoryItem,
   Paged,
   RemoveCartItemPayload,
+  RequeuedDeniedOrder,
+  DismissedDeniedOrder,
+  KdsDenyResult,
+  SessionEntryPayload,
   SessionIdentity,
   ShiftActivation,
   TableClearResult,
@@ -59,10 +68,13 @@ const BASE = "/api/v1";
     Also arms the realtime RLS scope: the returned `realtime_token` is what
     Supabase sees as the JWT for this browser, so its channels only receive
     this table's rows. Null/absent ⇒ REST-only (policies match no rows). */
-export async function initializeSession(tableToken: string): Promise<TableSession> {
+export async function initializeSession(
+  tableToken: string,
+  entry: SessionEntryPayload = {},
+): Promise<TableSession> {
   const { data } = await apiRequest<TableSession>(`${BASE}/sessions/initialize`, {
     method: "POST",
-    body: { table_token: tableToken },
+    body: { table_token: tableToken, ...entry },
   });
   setRealtimeAuth(data.realtime_token ?? null);
   return data;
@@ -74,10 +86,13 @@ export async function initializeSession(tableToken: string): Promise<TableSessio
     `locked` (nothing returned). The gate — not the data hook — decides
     which of those the guest sees, which is what keeps `useLiveTable` out of
     the authentication business. */
-export async function startTableSession(tableToken: string): Promise<TableScan> {
+export async function startTableSession(
+  tableToken: string,
+  entry: SessionEntryPayload = {},
+): Promise<TableScan> {
   const { data } = await apiRequest<TableScan>(`${BASE}/sessions/initialize`, {
     method: "POST",
-    body: { table_token: tableToken },
+    body: { table_token: tableToken, ...entry },
   });
   setRealtimeAuth(data.realtime_token ?? null);
   return data;
@@ -94,10 +109,11 @@ export async function startTableSession(tableToken: string): Promise<TableScan> 
 export async function joinTableWithPin(
   tableToken: string,
   pin: string,
+  entry: SessionEntryPayload = {},
 ): Promise<TableSessionGrant> {
   const { data } = await apiRequest<TableSessionGrant>(`${BASE}/sessions/join-pin`, {
     method: "POST",
-    body: { table_token: tableToken, pin },
+    body: { table_token: tableToken, pin, ...entry },
   });
   setRealtimeAuth(data.realtime_token ?? null);
   return data;
@@ -107,10 +123,11 @@ export async function joinTableWithPin(
 export async function joinTableWithPass(
   tableToken: string,
   secret: string,
+  entry: SessionEntryPayload = {},
 ): Promise<TableSessionGrant> {
   const { data } = await apiRequest<TableSessionGrant>(`${BASE}/sessions/join-pass`, {
     method: "POST",
-    body: { table_token: tableToken, secret },
+    body: { table_token: tableToken, secret, ...entry },
   });
   setRealtimeAuth(data.realtime_token ?? null);
   return data;
@@ -120,10 +137,11 @@ export async function joinTableWithPass(
 export async function reconnectTableSession(
   tableToken: string,
   secret: string,
+  scanTime?: string,
 ): Promise<TableSessionGrant> {
   const { data } = await apiRequest<TableSessionGrant>(`${BASE}/sessions/reconnect`, {
     method: "POST",
-    body: { table_token: tableToken, secret },
+    body: { table_token: tableToken, secret, ...(scanTime ? { scan_time: scanTime } : {}) },
   });
   setRealtimeAuth(data.realtime_token ?? null);
   return data;
@@ -252,6 +270,32 @@ export async function fireTableOrder(tableToken: string): Promise<FiredOrder> {
   return data;
 }
 
+/* POST /api/v1/orders/:order_id/requeue — the diner's "Move to list" (and
+   the second half of "Retry"). Available lines go back into the shared cart
+   for editing; lines the kitchen no longer has come back in `omitted`. */
+export async function requeueDeniedOrder(
+  orderId: string,
+  tableToken: string,
+): Promise<RequeuedDeniedOrder> {
+  const { data } = await apiRequest<RequeuedDeniedOrder>(
+    `${BASE}/orders/${encodeURIComponent(orderId)}/requeue`,
+    { method: "POST", query: { table_token: tableToken } },
+  );
+  return data;
+}
+
+/** POST /api/v1/orders/:order_id/dismiss — the diner's "Cancel". */
+export async function dismissDeniedOrder(
+  orderId: string,
+  tableToken: string,
+): Promise<DismissedDeniedOrder> {
+  const { data } = await apiRequest<DismissedDeniedOrder>(
+    `${BASE}/orders/${encodeURIComponent(orderId)}/dismiss`,
+    { method: "POST", query: { table_token: tableToken } },
+  );
+  return data;
+}
+
 // ---- Module 3: Kitchen Display System (back-of-house → bearer token) --
 
 /** E10 — GET /api/v1/kds/tickets (auth) */
@@ -271,6 +315,16 @@ export async function updateKdsStatus(
   const { data } = await apiRequest<KdsStatusUpdate>(
     `${BASE}/kds/tickets/${encodeURIComponent(orderId)}/status`,
     { method: "PATCH", auth: true, body: { status } },
+  );
+  return data;
+}
+
+/** PATCH /api/v1/kds/tickets/:order_id/deny — refuse a ticket with a reason.
+    Valid from pending, preparing and ready. */
+export async function denyKdsTicket(orderId: string, reason: string): Promise<KdsDenyResult> {
+  const { data } = await apiRequest<KdsDenyResult>(
+    `${BASE}/kds/tickets/${encodeURIComponent(orderId)}/deny`,
+    { method: "PATCH", auth: true, body: { reason } },
   );
   return data;
 }
@@ -303,6 +357,22 @@ export async function settleTableBill(tableId: string): Promise<BillSettlement> 
     `${BASE}/floor/tables/${encodeURIComponent(tableId)}/settle`,
     { method: "PATCH", auth: true },
   );
+  return data;
+}
+
+/** POST /api/v1/floor/tables/:table_id/notify (auth; staff role).
+    The explicit alert for a flagged table whose bill is unpaid. */
+export async function notifyFloorTable(
+  tableId: string,
+): Promise<{ table_id: string; notified: true; clear_requested_at: string }> {
+  const { data } = await apiRequest<{
+    table_id: string;
+    notified: true;
+    clear_requested_at: string;
+  }>(`${BASE}/floor/tables/${encodeURIComponent(tableId)}/notify`, {
+    method: "POST",
+    auth: true,
+  });
   return data;
 }
 
@@ -406,6 +476,35 @@ export async function renameAdminTable(
   return data;
 }
 
+/** PATCH /api/v1/admin/tables/:table_id/code — set the printed code by hand.
+    The server refuses unless the table is empty (409 TABLE_NOT_EMPTY). */
+export async function updateAdminTableCode(
+  tableId: string,
+  code: string,
+): Promise<AdminTableToken> {
+  const { data } = await apiRequest<AdminTableToken>(
+    `${BASE}/admin/tables/${encodeURIComponent(tableId)}/code`,
+    { method: "PATCH", adminAuth: true, body: { code } },
+  );
+  return data;
+}
+
+/** POST /api/v1/admin/tables/:table_id/deactivate — close the table now,
+    even with an open ticket or money owed. The table code is kept. */
+export async function deactivateAdminTable(
+  tableId: string,
+): Promise<{ table_id: string; deactivated: true; closed_orders: number }> {
+  const { data } = await apiRequest<{
+    table_id: string;
+    deactivated: true;
+    closed_orders: number;
+  }>(`${BASE}/admin/tables/${encodeURIComponent(tableId)}/deactivate`, {
+    method: "POST",
+    adminAuth: true,
+  });
+  return data;
+}
+
 /** POST /api/v1/admin/tables/:table_id/regenerate-token */
 export async function regenerateAdminTableToken(tableId: string): Promise<AdminTableToken> {
   const { data } = await apiRequest<AdminTableToken>(
@@ -470,6 +569,86 @@ export async function deleteAdminMenuItem(
 ): Promise<{ menu_item_id: string }> {
   const { data } = await apiRequest<{ menu_item_id: string }>(
     `${BASE}/admin/menu/${encodeURIComponent(menuItemId)}`,
+    { method: "DELETE", adminAuth: true },
+  );
+  return data;
+}
+
+/** GET /api/v1/menu/categories — the folder tree the diner menu groups by. */
+export async function getMenuCategories(): Promise<MenuCategoryNode[]> {
+  const { data } = await apiRequest<MenuCategoryNode[]>(`${BASE}/menu/categories`);
+  return data;
+}
+
+/** GET /api/v1/admin/categories — the folder tree with cover photos. */
+export async function getAdminCategories(): Promise<AdminCategory[]> {
+  const { data } = await apiRequest<AdminCategory[]>(`${BASE}/admin/categories`, {
+    adminAuth: true,
+  });
+  return data;
+}
+
+/** POST /api/v1/admin/categories */
+export async function createAdminCategory(
+  input: CreateAdminCategoryInput,
+): Promise<AdminCategory> {
+  const { data } = await apiRequest<AdminCategory>(`${BASE}/admin/categories`, {
+    method: "POST",
+    adminAuth: true,
+    body: input,
+  });
+  return data;
+}
+
+/** PATCH /api/v1/admin/categories/:category_id */
+export async function updateAdminCategory(
+  categoryId: string,
+  input: UpdateAdminCategoryInput,
+): Promise<AdminCategory> {
+  const { data } = await apiRequest<AdminCategory>(
+    `${BASE}/admin/categories/${encodeURIComponent(categoryId)}`,
+    { method: "PATCH", adminAuth: true, body: input },
+  );
+  return data;
+}
+
+/** DELETE /api/v1/admin/categories/:category_id — only an empty folder. */
+export async function deleteAdminCategory(
+  categoryId: string,
+): Promise<{ category_id: string }> {
+  const { data } = await apiRequest<{ category_id: string }>(
+    `${BASE}/admin/categories/${encodeURIComponent(categoryId)}`,
+    { method: "DELETE", adminAuth: true },
+  );
+  return data;
+}
+
+/** POST /api/v1/admin/menu/:menu_item_id/image — the file is the body. */
+export async function uploadAdminMenuImage(
+  menuItemId: string,
+  file: Blob,
+): Promise<AdminMenuImage> {
+  const { data } = await apiRequest<AdminMenuImage>(
+    `${BASE}/admin/menu/${encodeURIComponent(menuItemId)}/image`,
+    {
+      method: "POST",
+      adminAuth: true,
+      rawBody: file,
+      contentType: file.type || "application/octet-stream",
+      // Derivative generation is CPU work on the server; 20s is tight for a
+      // large phone photo on a slow uplink.
+      timeoutMs: 60_000,
+    },
+  );
+  return data;
+}
+
+/** DELETE /api/v1/admin/menu/:menu_item_id/image */
+export async function deleteAdminMenuImage(
+  menuItemId: string,
+): Promise<{ removed: boolean }> {
+  const { data } = await apiRequest<{ removed: boolean }>(
+    `${BASE}/admin/menu/${encodeURIComponent(menuItemId)}/image`,
     { method: "DELETE", adminAuth: true },
   );
   return data;

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BellRing,
   Check,
   ChevronRight,
   Clock,
@@ -24,7 +25,12 @@ import { useToast } from "@/components/ui/toast";
 import { useLiveFloor } from "@/hooks/use-live-floor";
 import { useNow } from "@/hooks/use-now";
 import { useStaffMenuCatalog } from "@/hooks/use-staff-menu-catalog";
-import { ApiError, clearFloorTable, settleTableBill } from "@/lib/api-client";
+import {
+  ApiError,
+  clearFloorTable,
+  notifyFloorTable,
+  settleTableBill,
+} from "@/lib/api-client";
 import type { FloorTableSummary, OrderStatus } from "@/lib/api/types";
 import { formatElapsed } from "@/lib/format";
 import { transitionBase } from "@/lib/motion";
@@ -37,6 +43,7 @@ const statusWord: Record<OrderStatus, string> = {
   preparing: "Preparing",
   ready: "Ready",
   served: "Served",
+  denied: "Denied",
 };
 
 const guidance: Record<OrderStatus, string> = {
@@ -44,6 +51,7 @@ const guidance: Record<OrderStatus, string> = {
   preparing: "On the cooking line right now.",
   ready: "Run the food to the table.",
   served: "Order complete.",
+  denied: "The kitchen refused this round — nothing was cooked or charged.",
 };
 
 const statusText: Record<OrderStatus, string> = {
@@ -51,6 +59,7 @@ const statusText: Record<OrderStatus, string> = {
   preparing: "text-preparing",
   ready: "text-ready",
   served: "text-ink-subtle",
+  denied: "text-alert",
 };
 
 /* A colour rail on the card edge lets a server triage the whole room by
@@ -60,10 +69,14 @@ const statusRail: Record<OrderStatus, string> = {
   preparing: "bg-preparing",
   ready: "bg-ready",
   served: "bg-line-strong",
+  denied: "bg-alert",
 };
 
+/* A denied round is closed: it ranks with served, below anything a server
+   still has to act on. */
 const urgencyRank: Record<OrderStatus, number> = {
   served: 0,
+  denied: 0,
   pending: 2,
   preparing: 3,
   ready: 4,
@@ -193,6 +206,26 @@ export function FloorView({ onLock }: FloorViewProps) {
      and is released when the last heartbeat disappears. */
   /* Clearing a flagged table. If money is owed the server refuses AND raises
      the manager alert; this surface must not pretend otherwise. */
+  /* An unpaid table is not the staff's to clear: the explicit action is to
+     ring the manager, which raises the same persisted alert the console
+     renders. The server enforces this too — the button is not the guard. */
+  async function notifyAdmin(summary: FloorTableSummary) {
+    try {
+      await notifyFloorTable(summary.table.id);
+      toast({
+        title: `Manager notified for ${summary.table.name}`,
+        description: "Only a manager can clear a table with an unpaid bill.",
+        tone: "success",
+      });
+      await refresh();
+    } catch (err) {
+      toast({
+        title: err instanceof ApiError ? err.message : "Could not notify the manager.",
+        tone: "error",
+      });
+    }
+  }
+
   async function clearTable(summary: FloorTableSummary) {
     try {
       await clearFloorTable(summary.table.id);
@@ -374,6 +407,7 @@ export function FloorView({ onLock }: FloorViewProps) {
                 onRelease={release}
                 onSettle={settle}
                 onClear={clearTable}
+                onNotify={notifyAdmin}
               />
             ))}
           </ul>
@@ -422,6 +456,7 @@ function TableCard({
   onRelease,
   onSettle,
   onClear,
+  onNotify,
 }: {
   summary: FloorTableSummary;
   now: number | null;
@@ -430,6 +465,7 @@ function TableCard({
   onRelease: (summary: FloorTableSummary) => void;
   onSettle: (summary: FloorTableSummary) => void;
   onClear: (summary: FloorTableSummary) => void;
+  onNotify: (summary: FloorTableSummary) => void;
 }) {
   const { table, active_order: order, cart_line_count } = summary;
   const status = order?.status ?? null;
@@ -483,6 +519,8 @@ function TableCard({
   // The server's bill state is the only truth here: a settled table stops
   // asking for payment the instant restaurant_tables updates.
   const billRequested = table.bill_status === "requested";
+  const paid = table.bill_status === "paid";
+  const unpaid = Boolean(summary.bill_unpaid);
 
   return (
     <li className="h-full">
@@ -512,6 +550,24 @@ function TableCard({
               <span className="flex items-center gap-1.5 rounded-pill bg-alert-surface px-2.5 py-1 text-label text-alert uppercase">
                 <WifiOff className="size-3.5 shrink-0" aria-hidden />
                 {summary.clear_requested_at ? "Admin notified" : "Check table"}
+              </span>
+            ) : null}
+
+            {/* Paid or not, in one word. Staff cannot clear an unpaid table,
+                so this pill is the reason the action beside it is a manager
+                call rather than a clear. */}
+            {order || table.bill_status !== "unrequested" ? (
+              <span
+                className={cn(
+                  "rounded-pill px-2.5 py-1 text-label uppercase",
+                  paid
+                    ? "bg-ready-surface text-ready"
+                    : unpaid
+                      ? "bg-alert-surface text-alert"
+                      : "bg-surface-sunken text-ink-subtle",
+                )}
+              >
+                {paid ? "Paid" : unpaid ? "Unpaid" : "Bill open"}
               </span>
             ) : null}
 
@@ -582,16 +638,36 @@ function TableCard({
             bill is unpaid (the server decides which, atomically). */}
         {stale ? (
           <div className="mt-5 mb-1">
-            <Button
-              variant={summary.clear_requested_at ? "soft" : "outline"}
-              size="sm"
-              fullWidth
-              disabled={Boolean(summary.clear_requested_at)}
-              onClick={() => onClear(summary)}
-              leftIcon={<WifiOff className="size-3.5" aria-hidden />}
-            >
-              {summary.clear_requested_at ? "Admin notified" : "Clear table"}
-            </Button>
+            {unpaid ? (
+              <Button
+                variant={summary.clear_requested_at ? "soft" : "ember"}
+                size="sm"
+                fullWidth
+                disabled={Boolean(summary.clear_requested_at)}
+                onClick={() => onNotify(summary)}
+                leftIcon={<BellRing className="size-3.5" aria-hidden />}
+              >
+                {summary.clear_requested_at ? "Admin notified" : "Notify admin"}
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                fullWidth
+                onClick={() => onClear(summary)}
+                leftIcon={<WifiOff className="size-3.5" aria-hidden />}
+              >
+                Clear table
+              </Button>
+            )}
+
+            <p className="mt-2 text-xs leading-snug text-ink-subtle">
+              {unpaid
+                ? summary.clear_requested_at
+                  ? "A manager has been alerted. Only a manager can clear an unpaid table."
+                  : "Bill unpaid — a manager must clear this table."
+                : "Nothing is owed, so you can clear this table."}
+            </p>
           </div>
         ) : null}
 

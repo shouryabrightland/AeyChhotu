@@ -31,12 +31,54 @@ export function getBaseUrl(): string {
       "API base URL is not configured (NEXT_PUBLIC_API_URL missing).",
     );
   }
-  return raw.replace(/\/+$/, "");
+  return pointLocalApiAtPageHost(raw.replace(/\/+$/, ""));
+}
+
+const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+
+/** Turn an API-relative asset path (a dish photo) into a browser URL.
+    Absolute URLs and data URLs pass through unchanged. */
+export function resolveApiAssetUrl(path: string | null | undefined): string | null {
+  if (!path) return null;
+  if (/^(https?:|data:|blob:)/i.test(path)) return path;
+  try {
+    return `${getBaseUrl()}${path.startsWith("/") ? path : `/${path}`}`;
+  } catch {
+    return path;
+  }
+}
+
+/* One dev-server convenience, no effect on a deployed build.
+
+   A phone opens the dev app at http://192.168.x.x:3000, where "localhost" in
+   NEXT_PUBLIC_API_URL means the PHONE, not the laptop running the API. Every
+   request then times out and the page looks broken. When the configured API
+   host is loopback and the page itself is not, swap the page's hostname in
+   and keep the port: the device talks to whichever machine served the page.
+   A real API URL is left exactly as configured. */
+function pointLocalApiAtPageHost(base: string): string {
+  if (typeof window === "undefined") return base;
+
+  const pageHost = window.location.hostname;
+  if (!pageHost || LOOPBACK_HOSTS.includes(pageHost)) return base;
+
+  try {
+    const url = new URL(base);
+    if (!LOOPBACK_HOSTS.includes(url.hostname)) return base;
+    url.hostname = pageHost;
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return base;
+  }
 }
 
 export interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
+  /** Send bytes as-is (a dish photo) instead of JSON. */
+  rawBody?: BodyInit;
+  /** MIME type that accompanies rawBody; ignored for JSON requests. */
+  contentType?: string;
   query?: Record<string, string | number | undefined>;
   /** Inject `Authorization: Bearer <shift token>` (back-of-house routes). */
   auth?: boolean;
@@ -164,7 +206,11 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const url = `${getBaseUrl()}${path}${buildQueryString(options.query)}`;
 
   const headers: Record<string, string> = { Accept: "application/json" };
-  if (options.body !== undefined) headers["Content-Type"] = "application/json";
+  if (options.rawBody !== undefined) {
+    headers["Content-Type"] = options.contentType ?? "application/octet-stream";
+  } else if (options.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
 
   const authMode: AuthMode = options.adminAuth ? "admin" : "staff";
 
@@ -193,7 +239,12 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     response = await fetch(url, {
       method,
       headers,
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      body:
+        options.rawBody !== undefined
+          ? options.rawBody
+          : options.body !== undefined
+            ? JSON.stringify(options.body)
+            : undefined,
       signal: controller.signal,
       cache: "no-store",
       ...(options.keepalive ? { keepalive: true } : {}),

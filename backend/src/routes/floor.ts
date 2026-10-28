@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { clearFloorTable, listFloorTables, settleTableBill } from "../services/floor.service.js";
+import {
+  clearFloorTable,
+  listFloorTables,
+  notifyAdminForTable,
+  settleTableBill,
+} from "../services/floor.service.js";
 import {
   floorQuerySchema,
   floorTableParamsSchema,
@@ -8,13 +13,19 @@ import {
 } from "../validation/schemas.js";
 
 /* Module 4 — E17 GET /api/v1/floor/tables (staff-gated Floor View feed)
-   plus the settle action that takes payment on one table.
+   plus the settle/notify/clear actions on one table.
 
    Settling is a staff action, not an admin one: the server holding the card
-   reader is the person who knows the bill was actually paid. requireRole
-   keeps a manager token from being required for the room's most frequent
-   write. */
+   reader is the person who knows the bill was actually paid.
+
+   ROLE: these routes accept BOTH `floor` and `kitchen`. The Floor surface is
+   normally unlocked with the floor role, and requiring `kitchen` here meant a
+   waiter could see the room but every button (take payment, notify a
+   manager, clear an abandoned table) answered 403. The two shifts are
+   different jobs, not different trust levels for the floor; the admin
+   override stays behind `admin`. */
 export const floorRouter = Router();
+const FLOOR_ROLES = ["floor", "kitchen"] as const;
 
 floorRouter.get("/tables", requireAuth, async (req, res) => {
   const query = parseOrThrow(floorQuerySchema, req.query);
@@ -25,10 +36,22 @@ floorRouter.get("/tables", requireAuth, async (req, res) => {
 floorRouter.patch(
   "/tables/:table_id/settle",
   requireAuth,
-  requireRole("kitchen"),
+  requireRole(...FLOOR_ROLES),
   async (req, res) => {
     const params = parseOrThrow(floorTableParamsSchema, req.params);
     const data = await settleTableBill(params.table_id);
+    res.status(200).json({ success: true, data });
+  },
+);
+
+/* The explicit "manager, please come" action for an unpaid flagged table. */
+floorRouter.post(
+  "/tables/:table_id/notify",
+  requireAuth,
+  requireRole(...FLOOR_ROLES),
+  async (req, res) => {
+    const params = parseOrThrow(floorTableParamsSchema, req.params);
+    const data = await notifyAdminForTable(params.table_id);
     res.status(200).json({ success: true, data });
   },
 );
@@ -38,7 +61,7 @@ floorRouter.patch(
 floorRouter.patch(
   "/tables/:table_id/clear",
   requireAuth,
-  requireRole("kitchen"),
+  requireRole(...FLOOR_ROLES),
   async (req, res) => {
     const params = parseOrThrow(floorTableParamsSchema, req.params);
     const data = await clearFloorTable(params.table_id);

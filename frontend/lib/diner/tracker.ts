@@ -15,6 +15,9 @@ export const ACTIVITY_LINES: Record<OrderStatus, string[]> = {
   preparing: ["Cooking on the line", "Plating at the pass", "Final items on the line"],
   ready: ["Ready at the pass", "Runner inbound", "Leaving the pass"],
   served: ["Served", "Round complete"],
+  // Refused, not cooked: the tracker shows a real explanation and the three
+  // recovery actions, so this line is deliberately neutral rather than scary.
+  denied: ["The kitchen could not take this round", "This round was not cooked"],
 };
 
 export interface ArrivalEstimate {
@@ -49,7 +52,10 @@ function clamp(value: number, min: number, max: number) {
    count stands in for the rest of the room. It is not a real kitchen
    algorithm — it only has to feel intelligent and move with the order. */
 export function estimateArrival(orders: Order[]): ArrivalEstimate {
-  const active = orders.filter((order) => order.status !== "served");
+  // Neither a served nor a denied round is food still in flight.
+  const active = orders.filter(
+    (order) => order.status !== "served" && order.status !== "denied",
+  );
   const items = active.reduce(
     (total, order) => total + order.items.reduce((sum, item) => sum + item.quantity, 0),
     0,

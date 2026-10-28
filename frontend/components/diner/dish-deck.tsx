@@ -3,6 +3,7 @@
 import { Flame, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import { DishCard } from "@/components/diner/dish-card";
+import { DishPhoto } from "@/components/diner/dish-photo";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import type { MenuItem } from "@/lib/api/types";
@@ -93,19 +94,53 @@ export function DishDeck({
 
       {current ? (
         <div className="flex flex-col gap-4">
-          {/* The key is the dish id, so React swaps the card the moment the
-              deck advances — after the old one has already left. */}
-          <DishCard
-            key={current.id}
-            item={current}
-            quantityInCart={quantities[current.id] ?? 0}
-            pending={pendingItemId === current.id}
-            error={itemErrors?.[current.id]}
-            onAdd={handleAdd}
-            onSkip={handleSkip}
-            onExited={() => setQueue((rest) => rest.slice(1))}
-            sizes="(min-width: 1024px) 30rem, (min-width: 640px) 28rem, 100vw"
-          />
+          {/* The next two dishes peek out from behind the live card. They are
+              decorative — aria-hidden and pointer-events-none — but they make
+              the section read as a rail of cards instead of a single tile
+              that happens to be replaceable. */}
+          <div className="relative">
+            {queue.slice(1, 3).map((item, index) => {
+              const depth = index + 1;
+              return (
+                <div
+                  key={item.id}
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl border border-line bg-surface shadow-sm"
+                  style={{
+                    transform: `translate(${depth * 14}px, ${depth * 7}px) scale(${1 - depth * 0.035})`,
+                    opacity: depth === 1 ? 0.7 : 0.45,
+                    zIndex: 10 - depth,
+                  }}
+                >
+                  <div className="relative h-1/2 w-full overflow-hidden">
+                    <DishPhoto
+                      item={item}
+                      sizes="(min-width: 1024px) 30rem, (min-width: 640px) 28rem, 100vw"
+                    />
+                  </div>
+                  <div className="p-5">
+                    <p className="font-display text-subheading text-ink-subtle">{item.name}</p>
+                  </div>
+                </div>
+              );
+            })}
+
+            <div className="relative z-20">
+              {/* The key is the dish id, so React swaps the card the moment the
+                  deck advances — after the old one has already left. */}
+              <DishCard
+                key={current.id}
+                item={current}
+                quantityInCart={quantities[current.id] ?? 0}
+                pending={pendingItemId === current.id}
+                error={itemErrors?.[current.id]}
+                onAdd={handleAdd}
+                onSkip={handleSkip}
+                onExited={() => setQueue((rest) => rest.slice(1))}
+                sizes="(min-width: 1024px) 30rem, (min-width: 640px) 28rem, 100vw"
+              />
+            </div>
+          </div>
 
           <div className="flex items-center justify-between gap-4 px-1">
             <p className="text-xs leading-relaxed text-ink-subtle">

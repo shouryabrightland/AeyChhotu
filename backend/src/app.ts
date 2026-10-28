@@ -17,6 +17,19 @@ import { kdsRouter } from "./routes/kds.js";
 import { floorRouter } from "./routes/floor.js";
 import { adminRouter } from "./routes/admin.js";
 
+/* Dev convenience: a phone opening the Next dev server at http://192.168.x.x:3000
+   sends an Origin that CLIENT_URL cannot list in advance (DHCP changes it), so
+   every API call would fail CORS and the UI would look broken rather than
+   unauthorised. Relax the allow-list to loopback and RFC 1918 addresses in
+   DEVELOPMENT only; production still answers exactly to CLIENT_URL. */
+const DEV_ORIGIN_RE =
+  /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?::\d{1,5})?$/;
+
+function originAllowed(origin: string): boolean {
+  if (env.clientUrls.includes(origin)) return true;
+  return env.nodeEnv !== "production" && DEV_ORIGIN_RE.test(origin);
+}
+
 /* Express app factory: security headers → request ids → CORS (CLIENT_URL
    only) → rate limits → routes → 404 → central error handler (registration
    order matters). */
@@ -60,7 +73,7 @@ export function createApp() {
           callback(null, true);
           return;
         }
-        callback(null, env.clientUrls.includes(requestOrigin));
+        callback(null, originAllowed(requestOrigin));
       },
       credentials: true,
       methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],

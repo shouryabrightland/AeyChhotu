@@ -2,7 +2,8 @@
    (docs/2-mvp-ideation.md → Database Tables) so the mock service layer can be
    replaced by the real backend without touching UI code. */
 
-export type OrderStatus = "pending" | "preparing" | "ready" | "served";
+/** `denied` is a refused round: closed, never cooked, never billed. */
+export type OrderStatus = "pending" | "preparing" | "ready" | "served" | "denied";
 
 export type BillStatus = "unrequested" | "requested" | "paid";
 
@@ -20,9 +21,14 @@ export interface MenuItem {
   name: string;
   price: number;
   category: string;
+  category_id?: string | null;
   is_available: boolean;
   description: string;
   vegetarian: boolean;
+  /** Uploaded photo URLs + the inline 50px blur; absent = curated photo. */
+  image_url?: string | null;
+  image_small_url?: string | null;
+  blur_data_url?: string | null;
 }
 
 export interface CartLine {
@@ -56,6 +62,8 @@ export interface Order {
   status: OrderStatus;
   created_at: string;
   updated_at: string;
+  /** Why the kitchen refused it (only meaningful when status = 'denied'). */
+  denial_reason?: string;
   items: OrderItem[];
 }
 
@@ -92,4 +100,6 @@ export interface FloorTableSummary {
   needs_attention?: boolean;
   /** Set when a staff clear was refused for an unpaid bill. */
   clear_requested_at?: string | null;
+  /** True when this seating owes money; only a manager may clear it. */
+  bill_unpaid?: boolean;
 }

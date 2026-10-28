@@ -16,10 +16,12 @@
    One instance powers the menu screen, the cart modal and the tracker, so
    every view at a table observes exactly the same snapshot. */
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useBills } from "@/hooks/use-bills";
 import {
   ApiError,
+  dismissDeniedOrder as apiDismissDeniedOrder,
   fetchAllPages,
   fireTableOrder as apiFire,
   getCartItems as apiGetCartItems,
@@ -27,6 +29,8 @@ import {
   getOrders as apiGetOrders,
   checkActiveOrder,
   removeCartItem as apiRemoveCartItem,
+  requeueDeniedOrder as apiRequeueDeniedOrder,
+  subscribeMenuUpdates,
   subscribeTableCart,
   subscribeTableUpdates,
   toCartLine,
@@ -37,7 +41,12 @@ import {
   upsertCartItem as apiUpsertCartItem,
   watchOrderStatus,
 } from "@/lib/api-client";
-import { getGrantedSession } from "@/lib/api/table-session";
+import { settleBill } from "@/lib/api/bill";
+import {
+  clearStoredSession,
+  forgetGrantedSession,
+  getGrantedSession,
+} from "@/lib/api/table-session";
 import type { CartLine, MenuItem, Order, RestaurantTable } from "@/lib/api/types";
 
 export type LivePhase = "loading" | "error" | "success";
@@ -48,6 +57,29 @@ export interface FireFailure {
   message: string;
   soldOut: string[];
   fields: Record<string, string>;
+}
+
+/** One line of the "what will be re-fired" preview a denied order shows. */
+export interface DeniedRetryLine {
+  name: string;
+  quantity: number;
+}
+
+/** The plan the Retry confirmation modal renders BEFORE anything is written. */
+export interface DeniedRetryPlan {
+  order_id: string;
+  reason: string;
+  /** Lines that still exist and can be re-fired. */
+  keep: DeniedRetryLine[];
+  /** Lines the kitchen no longer has — they will be left out. */
+  omitted: DeniedRetryLine[];
+}
+
+export interface DeniedActionResult {
+  ok: boolean;
+  message?: string;
+  /** Dish names that could not be moved back (out of stock). */
+  omitted?: string[];
 }
 
 interface Snapshot {
@@ -76,6 +108,11 @@ export interface LiveTableValue {
   activeOrder: Order | null;
   soldOutInCart: MenuItem[];
 
+  /** The newest refused round, or null. Drives the denied tracker screen. */
+  deniedOrder: Order | null;
+  /** What Retry would re-fire, and what it would leave out. */
+  deniedRetryPlan: DeniedRetryPlan | null;
+
   /** Per-item add failures keyed by menu item id → inline row messages. */
   itemErrors: Record<string, string>;
 
@@ -91,9 +128,17 @@ export interface LiveTableValue {
   ) => Promise<void>;
   removeLine: (cartItemId: string) => Promise<void>;
   fire: () => Promise<{ ok: true } | { ok: false; failure: FireFailure }>;
+
+  /** Retry: move the still-available lines back to the cart and fire again. */
+  retryDenied: () => Promise<DeniedActionResult>;
+  /** Move to list: the same, but stop at the editable cart. */
+  moveDeniedToCart: () => Promise<DeniedActionResult>;
+  /** Cancel: discard the refused round (only denied orders can be). */
+  dismissDenied: () => Promise<DeniedActionResult>;
 }
 
 export function useLiveTable(tableToken: string): LiveTableValue {
+  const router = useRouter();
   const [phase, setPhase] = useState<LivePhase>("loading");
   const [error, setError] = useState<ApiError | null>(null);
   const [table, setTable] = useState<RestaurantTable | null>(null);
@@ -207,6 +252,21 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     }
   }, [tableToken, fail]);
 
+  /* An 86 or a replaced photo must reach this screen without a refresh: the
+     kitchen flips availability on the menu channel and every open diner menu
+     follows. Walking all pages keeps the whole catalog in sync, not just the
+     page that happens to be visible. */
+  const reloadMenu = useCallback(async () => {
+    try {
+      const rows = await fetchAllPages((page) =>
+        apiGetMenu(tableToken, { page, limit: LIST_LIMIT }),
+      );
+      if (mountedRef.current) setMenu(rows.map(toMenuItem));
+    } catch (err) {
+      fail(err);
+    }
+  }, [tableToken, fail]);
+
   // ---- Initial load + every retry --------------------------------------
   useEffect(() => {
     let cancelled = false;
@@ -250,16 +310,46 @@ export function useLiveTable(tableToken: string): LiveTableValue {
   }, [phase, table, tableToken, reloadCart]);
 
   // ---- Realtime D2: restaurant_tables (bill requests, settles, release) --
-  // A settle can purge the shared cart and end the session. Reloading both
-  // reads on the table channel keeps this screen honest without a refresh.
+  /* Three different things arrive on this one channel, and each has its own
+     correct reaction:
+
+       * status → 'empty'  the table was cleared / archived: this device no
+         longer belongs to a session, so its credentials are wiped and it is
+         forced back to the home page instead of showing a dead menu.
+       * bill_status → 'paid'  someone else (the floor tablet) took payment.
+         The shared bill store is marked settled, which is what makes the
+         diner's "Thank you!" screen appear immediately — the cross-device
+         half of settlement.
+       * anything else     a bill request or a new session: re-read the cart
+         and ticket so the screen stays truthful. */
   useEffect(() => {
     if (phase !== "success" || !table) return;
 
-    return subscribeTableUpdates(() => {
+    return subscribeTableUpdates((change) => {
+      if (change.event === "DELETE" || change.status === "empty") {
+        clearStoredSession(tableToken);
+        forgetGrantedSession();
+        router.replace("/");
+        return;
+      }
+
+      if (change.bill_status === "paid") {
+        settleBill(table.code);
+      }
+
       void reloadCart();
       void reloadOrders();
     });
-  }, [phase, table, reloadCart, reloadOrders]);
+  }, [phase, table, tableToken, reloadCart, reloadOrders, router]);
+
+  // ---- Realtime E: menu_items + menu_item_images ------------------------
+  useEffect(() => {
+    if (phase !== "success") return;
+
+    return subscribeMenuUpdates(() => {
+      void reloadMenu();
+    });
+  }, [phase, reloadMenu]);
 
   // ---- Realtime C: order_tracker for the active order ------------------
   const activeOrder = useMemo(() => {
@@ -473,6 +563,97 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     }
   }, [tableToken, reloadCart, reloadOrders, fail]);
 
+  /* ---- Refused rounds (denied) ----------------------------------------
+     The 86 path and the chef's deny both leave a closed ticket with a
+     reason. The diner gets three ways out of it, and all three go through
+     the backend so two phones cannot disagree about what happened:
+
+       Retry          → requeue the lines that still exist, then fire again
+       Move to list   → the same requeue, but stop at the editable cart
+       Cancel         → discard the refused ticket */
+  const deniedOrder = useMemo(() => {
+    const latest = [...orders].sort((a, b) => b.created_at.localeCompare(a.created_at)).at(0);
+    return latest && latest.status === "denied" ? latest : null;
+  }, [orders]);
+
+  const deniedRetryPlan = useMemo<DeniedRetryPlan | null>(() => {
+    if (!deniedOrder) return null;
+
+    const keep: DeniedRetryLine[] = [];
+    const omitted: DeniedRetryLine[] = [];
+
+    for (const item of deniedOrder.items) {
+      const menuItem = menuIndex.get(item.menu_item_id);
+      const line = { name: item.name, quantity: item.quantity };
+      // A dish that is 86'd (or archived, hence missing from the menu) cannot
+      // go back on a ticket — the fire RPC would purge it and fail again.
+      if (menuItem?.is_available) keep.push(line);
+      else omitted.push(line);
+    }
+
+    return {
+      order_id: deniedOrder.id,
+      reason: deniedOrder.denial_reason?.trim() || "The kitchen could not prepare this order.",
+      keep,
+      omitted,
+    };
+  }, [deniedOrder, menuIndex]);
+
+  const requeueDenied = useCallback(async (): Promise<DeniedActionResult> => {
+    if (!deniedOrder) {
+      return { ok: false, message: "That order is no longer on screen." };
+    }
+
+    try {
+      const result = await apiRequeueDeniedOrder(deniedOrder.id, tableToken);
+      await Promise.all([reloadCart(), reloadOrders()]);
+
+      if (result.moved === 0) {
+        return {
+          ok: false,
+          omitted: result.omitted,
+          message: result.omitted.length
+            ? `${result.omitted.join(", ")} ${result.omitted.length === 1 ? "is" : "are"} out of stock — nothing could be moved back.`
+            : "There was nothing left to move back from that order.",
+        };
+      }
+
+      return { ok: true, omitted: result.omitted };
+    } catch (err) {
+      if (err instanceof ApiError) return { ok: false, message: err.message };
+      fail(err);
+      return { ok: false, message: "That order could not be moved back to the cart." };
+    }
+  }, [deniedOrder, tableToken, reloadCart, reloadOrders, fail]);
+
+  const retryDenied = useCallback(async (): Promise<DeniedActionResult> => {
+    const moved = await requeueDenied();
+    if (!moved.ok) return moved;
+
+    const result = await fire();
+    if (!result.ok) {
+      return { ok: false, omitted: moved.omitted, message: result.failure.message };
+    }
+
+    return { ok: true, omitted: moved.omitted };
+  }, [requeueDenied, fire]);
+
+  const dismissDenied = useCallback(async (): Promise<DeniedActionResult> => {
+    if (!deniedOrder) {
+      return { ok: false, message: "That order is no longer on screen." };
+    }
+
+    try {
+      await apiDismissDeniedOrder(deniedOrder.id, tableToken);
+      await reloadOrders();
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof ApiError) return { ok: false, message: err.message };
+      fail(err);
+      return { ok: false, message: "That order could not be dismissed." };
+    }
+  }, [deniedOrder, tableToken, reloadOrders, fail]);
+
   return {
     phase,
     error,
@@ -487,10 +668,15 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     totals,
     activeOrder,
     soldOutInCart,
+    deniedOrder,
+    deniedRetryPlan,
     itemErrors,
     addToCart,
     updateLine,
     removeLine,
     fire,
+    retryDenied,
+    moveDeniedToCart: requeueDenied,
+    dismissDenied,
   };
 }
