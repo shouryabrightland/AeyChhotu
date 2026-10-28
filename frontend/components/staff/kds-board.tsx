@@ -1,7 +1,7 @@
 "use client";
 
 import { AnimatePresence } from "motion/react";
-import { BellRing, ChefHat, EyeOff, Flame, Lock, Volume2, VolumeX } from "lucide-react";
+import { BellRing, ChefHat, EyeOff, Flame, Lock, RefreshCw, Volume2, VolumeX } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KdsCard } from "@/components/staff/kds-card";
 import { MenuAvailabilityDrawer } from "@/components/staff/menu-availability-drawer";
@@ -17,10 +17,9 @@ import { useLiveKds } from "@/hooks/use-live-kds";
 import { useNow } from "@/hooks/use-now";
 import { usePresence } from "@/hooks/use-presence";
 import { useStaffMenuCatalog } from "@/hooks/use-staff-menu-catalog";
-import { activateShift, getMe, type SessionIdentity } from "@/lib/api-client";
+import { activateShift } from "@/lib/api-client";
 import { getDeviceId } from "@/lib/api/session";
 import type { Order, OrderStatus } from "@/lib/api/types";
-import { formatIstTime } from "@/lib/format";
 import { armAudio, isAudioArmed, playChime } from "@/lib/sound";
 import { cn } from "@/lib/utils";
 
@@ -31,44 +30,36 @@ type ColumnStatus = Exclude<OrderStatus, "served">;
 interface Column {
   status: ColumnStatus;
   title: string;
-  hint: string;
   rail: string;
   count: string;
   Icon: typeof Flame;
   emptyTitle: string;
-  emptyBody: string;
 }
 
 const columns: Column[] = [
   {
     status: "pending",
     title: "Pending",
-    hint: "Waiting to start",
     rail: "bg-pending",
     count: "text-pending",
     Icon: Flame,
     emptyTitle: "No tickets waiting",
-    emptyBody: "Tickets appear here when a table fires an order.",
   },
   {
     status: "preparing",
     title: "Preparing",
-    hint: "On the line",
     rail: "bg-preparing",
     count: "text-preparing",
     Icon: ChefHat,
     emptyTitle: "Nothing is cooking",
-    emptyBody: "Tickets move here the moment the line starts them.",
   },
   {
     status: "ready",
     title: "Ready",
-    hint: "At the pass",
     rail: "bg-ready",
     count: "text-ready",
     Icon: BellRing,
     emptyTitle: "Nothing at the pass",
-    emptyBody: "Finished tickets wait here until the floor runs them.",
   },
 ];
 
@@ -77,14 +68,12 @@ export interface KdsBoardProps {
 }
 
 export function KdsBoard({ onLock }: KdsBoardProps) {
-  const { phase, error, source, tickets, busy, retry, refresh, advance } = useLiveKds();
+  const { phase, error, tickets, busy, retry, refresh, advance } = useLiveKds();
   /* The 86 drawer needs the LIVE catalog. E3 requires a table token that the
      kitchen does not hold, so the hook resolves one from E17 — see
      useStaffMenuCatalog. Was previously read from the offline demo store,
      which meant real dishes could not be 86'd from the board. */
   const catalog = useStaffMenuCatalog();
-  const [shift, setShift] = useState<SessionIdentity | null>(null);
-
   /* Frontend-only checklist ticks, keyed by ticket then by line. Purely
      presentational: ticking a line never writes a status, and the real
      one-tap advance below is untouched. */
@@ -99,20 +88,6 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
     });
   }, []);
 
-  /* E2b — restore the armed shift's identity from the stored bearer token.
-     Claims only (role, terminal, expiry); a lapsed token 401s and the
-     api-client's global guard sends the operator back to the PIN wall. */
-  useEffect(() => {
-    let cancelled = false;
-    void getMe()
-      .then((identity) => {
-        if (!cancelled) setShift(identity);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
   const now = useNow(1000);
   const { toast } = useToast();
   const [audioArmed, setAudioArmed] = useState(false);
@@ -132,19 +107,6 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
   }, []);
 
   usePresence(null);
-
-  // Offline fallback heads-up: one toast so the operator knows the board
-  // is serving seeded demo data instead of the live kitchen.
-  const demoToastShown = useRef(false);
-  useEffect(() => {
-    if (phase !== "success" || source !== "demo" || demoToastShown.current) return;
-    demoToastShown.current = true;
-    toast({
-      title: "Offline demo board",
-      description: "The backend is unreachable — showing the seeded demo tickets.",
-      tone: "info",
-    });
-  }, [phase, source, toast]);
 
   const knownTickets = useRef<Set<string> | null>(null);
   if (knownTickets.current === null) {
@@ -179,7 +141,7 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
     void activateShift(getDeviceId()).catch(() => undefined);
 
     toast({
-      title: armed ? "Audio armed" : "Audio blocked",
+      title: armed ? "Shift active · Audio armed." : "Audio blocked",
       description: armed
         ? "The board will ping every time a table fires an order."
         : "This browser blocked the audio context — the board still updates visually.",
@@ -212,8 +174,6 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
     }
   }
 
-  const boardEmpty = tickets.length === 0;
-
   return (
     <main id="main" className="min-h-dvh pb-16">
       {/* The bar is icon-only and the Kitchen badge carries the surface's
@@ -228,15 +188,6 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
         }
         actions={
           <>
-            {/* E2b — the shift's own expiry, decoded from the bearer token.
-                An 8-hour token expiring mid-service used to mean every one-tap
-                action silently 401ing; now the line can see it coming. */}
-            {shift ? (
-              <Badge tone="neutral" size="md" title={`Signed in as ${shift.role}`}>
-                Shift ends {formatIstTime(shift.expires_at)}
-              </Badge>
-            ) : null}
-
             {/* Icon carries the state: a crossed speaker while the board is
                 silent, ember until it is armed. The label explains it. */}
             <IconButton
@@ -250,6 +201,18 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
               ) : (
                 <VolumeX className="size-4" aria-hidden />
               )}
+            </IconButton>
+
+            {/* Backup refresh: the board normally updates itself over
+                Realtime, but a manual re-read is there when a socket silently
+                dies on a wall tablet. */}
+            <IconButton
+              label="Refresh board"
+              tone="ghost"
+              size="md"
+              onClick={() => void refresh()}
+            >
+              <RefreshCw className="size-4" aria-hidden />
             </IconButton>
 
             <IconButton
@@ -346,7 +309,6 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
                     <h2 className="font-display text-subheading leading-none text-ink">
                       {column.title}
                     </h2>
-                    <span className="text-xs text-ink-subtle">{column.hint}</span>
                   </div>
 
                   <span
@@ -383,15 +345,7 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
                   <EmptyState
                     icon={column.Icon}
                     title={column.emptyTitle}
-                    description={column.emptyBody}
                     className="flex-1 py-8"
-                    action={
-                      boardEmpty ? (
-                        <Button variant="outline" size="sm" onClick={() => void refresh()}>
-                          Check again
-                        </Button>
-                      ) : undefined
-                    }
                   />
                 ) : (
                   /* ---- State matrix: success — interactive grid ---------- */

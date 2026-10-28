@@ -233,7 +233,7 @@ export function KdsCard({
           }}
           rightIcon={busy ? undefined : <ArrowRight className="size-5" aria-hidden />}
         >
-          {busy ? "Working…" : action.label}
+          {busy ? "Updating…" : action.label}
         </Button>
       </div>
     </motion.li>

@@ -4,11 +4,15 @@
 
 export type OrderStatus = "pending" | "preparing" | "ready" | "served";
 
+export type BillStatus = "unrequested" | "requested" | "paid";
+
 export interface RestaurantTable {
   id: string;
   /** Random, unguessable code used in the QR link: /table/{code} */
   code: string;
   name: string;
+  /** Live bill state from E17. Absent on seeded/demo rows. */
+  bill_status?: BillStatus;
 }
 
 export interface MenuItem {
@@ -82,4 +86,10 @@ export interface FloorTableSummary {
   table: RestaurantTable;
   active_order: Order | null;
   cart_line_count: number;
+  /** Devices with a fresh heartbeat; absent on older/demo payloads. */
+  active_devices?: number;
+  /** Active session with no device, no open order and no bill request. */
+  needs_attention?: boolean;
+  /** Set when a staff clear was refused for an unpaid bill. */
+  clear_requested_at?: string | null;
 }

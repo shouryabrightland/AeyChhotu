@@ -7,6 +7,7 @@ import type { BillScope } from "@/components/diner/bill-drawer";
 import { Container } from "@/components/ui/container";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { LiveTableValue } from "@/hooks/use-live-table";
+import { getStoredDisplayName } from "@/lib/api/session";
 import { formatPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +39,21 @@ export function DinerNavBar({
 }: DinerNavBarProps) {
   const { menuIndex, orders, cart, activeOrder } = live;
   const headerRef = useRef<HTMLElement>(null);
+
+  /* The band always starts on "Guest" and only then adopts the stored name.
+     A name read during render would be present on the client and absent in
+     the server HTML, which is exactly the mismatch React reports. */
+  const [hydratedName, setHydratedName] = useState("Guest");
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setHydratedName(getStoredDisplayName()), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  /* "Guest" is the server's value, so while the prop still holds it the
+     locally hydrated name is the better answer; the moment the parent syncs
+     (or the guest edits), the prop wins. */
+  const name = displayName === "Guest" && hydratedName ? hydratedName : displayName;
 
   /* Matches the landing page's navbar exactly: transparent and lineless at
      the top of the scroll, then a blurred canvas wash once content passes
@@ -83,12 +99,12 @@ export function DinerNavBar({
     (sum, order) =>
       sum +
       order.items
-        .filter((item) => item.added_by === displayName)
+        .filter((item) => item.added_by === name)
         .reduce((line, item) => line + item.price * item.quantity, 0),
     0,
   );
   const stagedMine = cart
-    .filter((line) => line.added_by === displayName)
+    .filter((line) => line.added_by === name)
     .reduce((sum, line) => sum + (menuIndex.get(line.menu_item_id)?.price ?? 0) * line.quantity, 0);
   const myBill = firedMine + stagedMine;
 
@@ -107,11 +123,11 @@ export function DinerNavBar({
           band that had just changed height. The name truncates instead. */}
       <Container className="flex flex-nowrap items-center gap-2 py-2.5">
         <div className="min-w-0 flex-1">
-          <DinerIdentity displayName={displayName} onChange={onDisplayNameChange} />
+          <DinerIdentity displayName={name} onChange={onDisplayNameChange} />
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
-          <Tooltip label="Would you like to open live tracker?" side="bottom">
+          <Tooltip label="Live tracker" side="bottom">
             <Link
               href={`/table/${tableToken}/tracker`}
               aria-label="Open live tracker"
@@ -127,11 +143,11 @@ export function DinerNavBar({
             </Link>
           </Tooltip>
 
-          <Tooltip label={`Total bill · ${formatPrice(totalBill)}`} side="bottom">
+          <Tooltip label="Total bill" side="bottom">
             <button
               type="button"
               onClick={() => onOpenBill("total")}
-              aria-label={`Open the total bill breakdown: ${formatPrice(totalBill)}`}
+              aria-label="Total bill"
               className={actionClass}
             >
               <Receipt className="size-5" aria-hidden />
@@ -150,7 +166,7 @@ export function DinerNavBar({
           </Tooltip>
 
           {onOpenPass ? (
-            <Tooltip label="Show this table's PIN and QR pass" side="bottom">
+            <Tooltip label="Table pass" side="bottom">
               <button
                 type="button"
                 onClick={onOpenPass}

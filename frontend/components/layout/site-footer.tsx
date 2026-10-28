@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Logo, LogoWatermark } from "@/components/brand/logo";
 import { Container } from "@/components/ui/container";
-import { marketingNav, productLinks } from "@/lib/site";
+import { customerLinks, marketingNav } from "@/lib/site";
 
 /* The footer used to be a flat charcoal block with grey links — the one place
    on the page with no colour at all. It is now the floor of the page's closing
@@ -30,8 +30,8 @@ export function SiteFooter() {
           <div className="flex flex-col gap-5">
             <Logo tone="inverse" />
             <p className="max-w-sm text-sm leading-relaxed text-on-ember/85">
-              A zero-download, real-time operational bridge that groups individual table requests
-              into one unified cart and streams live status between diners and the kitchen.
+              Scan the QR on your table, order together in one shared cart, and watch the kitchen
+              cook it — live, with no app to download and no account to create.
             </p>
             <div className="flex flex-wrap gap-2">
               {pills.map((pill) => (
@@ -63,9 +63,9 @@ export function SiteFooter() {
             ))}
           </nav>
 
-          <nav aria-label="Live screens" className="flex flex-col gap-3">
-            <p className="text-label text-on-ember/80 uppercase">Live screens</p>
-            {productLinks.map((link) => (
+          <nav aria-label="More" className="flex flex-col gap-3">
+            <p className="text-label text-on-ember/80 uppercase">More</p>
+            {customerLinks.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}

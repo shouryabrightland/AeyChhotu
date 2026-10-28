@@ -10,6 +10,7 @@
 export * from "./types";
 export { ApiError, isApiError } from "./errors";
 export { getKdsToken, storeKdsToken, clearKdsToken } from "./token";
+export { getAdminToken, storeAdminToken, clearAdminToken } from "./admin-token";
 export {
   getBaseUrl,
   apiRequest,
@@ -27,6 +28,9 @@ export {
   loginKDS,
   getMe,
   checkActiveOrder,
+  requestTableBill,
+  sendHeartbeat,
+  removeHeartbeat,
   getMenu,
   getCartItems,
   upsertCartItem,
@@ -41,10 +45,26 @@ export {
   getLiveOrderStatus,
   getOrders,
   getFloorTables,
+  settleTableBill,
+  clearFloorTable,
+  loginAdmin,
+  getAdminTables,
+  createAdminTable,
+  renameAdminTable,
+  regenerateAdminTableToken,
+  clearAdminTable,
+  deleteAdminTable,
+  getAdminMenu,
+  createAdminMenuItem,
+  updateAdminMenuItem,
+  deleteAdminMenuItem,
+  getAdminAnalytics,
 } from "./endpoints";
 export {
   getSupabase,
   subscribeTableCart,
+  subscribeMenuUpdates,
+  subscribeTableUpdates,
   subscribeKdsOrders,
   subscribeOrdersFeed,
   subscribeOrderTracker,
@@ -58,9 +78,6 @@ export {
 } from "./realtime";
 export {
   isOfflineError,
-  demoFallbackEnabled,
-  shouldUseDemoFallback,
-  apiErrorFromServiceFailure,
   toTable,
   toMenuItem,
   toCartLine,

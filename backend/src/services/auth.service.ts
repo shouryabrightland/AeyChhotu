@@ -82,7 +82,7 @@ export async function authenticateShift(pin: string): Promise<ShiftLoginResult> 
     role: claims.role,
     terminal_id: claims.terminal_id,
     realtime_token: realtimeToken,
-    message: "Shift successfully armed. Tap screen to authorize chimes.",
+    message: "Shift active · Audio armed.",
   };
 }
 

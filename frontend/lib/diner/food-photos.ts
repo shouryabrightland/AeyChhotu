@@ -6,37 +6,39 @@
    then a category-level photo, then a designed palette tile. Nothing in this
    file invents menu data — it only decides what a dish looks like.
 
-   Every URL below was fetched once and confirmed to return 200, so a new dish
-   reuses an existing picture rather than introducing an unverified one. To
-   swap a dish's photo, edit the one entry for it; to add a dish the backend
-   grows later, add a keyword line and it inherits the right picture. */
+   The photos are DOWNLOADED INTO THE APP (public/food) rather than hot-linked:
+   a dish render must never depend on a third-party host being reachable, on
+   its CDN allowing the Next optimiser, or on the same URL still existing next
+   month. `npm run build` therefore ships them, and the optimiser only ever
+   reads from disk. To swap a dish's photo, replace the file in public/food/;
+   to add a dish the backend grows later, add a keyword line and it inherits
+   the right picture. */
 
 import type { MenuItem } from "@/lib/api/types";
 
-/** Only this host is allowed through next/image (see next.config.ts). */
-export const FOOD_PHOTO_HOST = "images.unsplash.com";
+/** Photos live in the app bundle, so a router push or an offline table never
+    turns into a broken frame. */
+const photo = (name: string) => `/food/${name}.jpg`;
 
-const photo = (path: string) => `https://${FOOD_PHOTO_HOST}/${path}`;
+/* Plate photos, named once and reused across the dish map below. */
+const DOSA = photo("dosa");
+const PANEER = photo("paneer");
+const NOODLES = photo("noodles");
+const BIRYANI = photo("biryani");
+const TACO = photo("taco");
+const BURGER = photo("burger");
+const PAKORA = photo("pakora");
+const NAAN = photo("naan");
+const ROTI = photo("roti");
+const LASSI = photo("lassi");
+const CHAI = photo("chai");
+const KULFI = photo("kulfi");
 
-/* Verified plate photos, named once and reused across the dish map below. */
-const DOSA = photo("photo-1668236543090-82eba5ee5976");
-const PANEER = photo("photo-1742599361574-6fb156181466");
-const NOODLES = photo("photo-1789990662414-f607ba6405f3");
-const BIRYANI = photo("photo-1631515243349-e0cb75fb8d3a");
-const TACO = photo("photo-1545093149-618ce3bcf49d");
-const BURGER = photo("photo-1520072959219-c595dc870360");
-const PAKORA = photo("photo-1765360024331-25b63e85272e");
-const NAAN = photo("photo-1756821752957-00bfcadc3748");
-const ROTI = photo("photo-1780907084884-ded9fddbb474");
-const LASSI = photo("photo-1623065422902-30a2d299bbe4");
-const CHAI = photo("photo-1619581073186-5b4ae1b0caad");
-const KULFI = photo("photo-1772004839638-fcad4bcc2b89");
-
-const BREAD_CAT = photo("photo-1680359939304-7e27ee183e7a");
-const DRINK_CAT = photo("photo-1636920272028-c27f1ae474c3");
-const DESSERT_CAT = photo("photo-1695568181363-af5c78f4d059");
-const STARTER_CAT = photo("photo-1775717430472-bac0b07e90e3");
-const MAIN_CAT = photo("photo-1767114915936-745dd372f1d8");
+const BREAD_CAT = photo("bread");
+const DRINK_CAT = photo("drink");
+const DESSERT_CAT = photo("dessert");
+const STARTER_CAT = photo("starter");
+const MAIN_CAT = photo("main");
 
 /* One photo per signature dish. Keys are matched as substrings against the
    dish's lowercased name + description + category, longest key first, so

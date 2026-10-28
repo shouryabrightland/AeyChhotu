@@ -1,4 +1,5 @@
 import { randomInt } from "node:crypto";
+import type { PoolClient } from "pg";
 import { pool } from "../db/pool.js";
 import { env } from "../config/env.js";
 import { AppError } from "../errors/app-error.js";
@@ -46,6 +47,8 @@ export const SESSION_SECRET_LENGTH = 20;
    round trip, a URL query string and a manual read-aloud. */
 const SECRET_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
+export type BillStatus = "unrequested" | "requested" | "paid";
+
 export interface SessionRow {
   id: string;
   code: string;
@@ -55,10 +58,11 @@ export interface SessionRow {
   session_secret: string | null;
   failed_pin_attempts: number;
   session_started_at: Date | null;
+  bill_status: BillStatus;
 }
 
 const SESSION_COLUMNS =
-  "id, code, name, status, session_pin, session_secret, failed_pin_attempts, session_started_at";
+  "id, code, name, status, session_pin, session_secret, failed_pin_attempts, session_started_at, bill_status";
 
 /** A random '00'–'99'. Leading zeros matter, so this stays a string. */
 export function generateSessionPin(): string {
@@ -75,10 +79,12 @@ export function generateSessionSecret(length: number = SESSION_SECRET_LENGTH): s
   return secret;
 }
 
-/** Resolves a table_token (restaurant_tables.code) or throws 404. */
+/** Resolves a table_token (restaurant_tables.code) or throws 404.
+    An archived table (006 edit: deleted_at) is not merely hidden — its code
+    must stop being a capability, so it is treated as if it never existed. */
 export async function requireTable(tableToken: string): Promise<TableRecord> {
   const res = await pool.query<TableRecord>(
-    "SELECT id, code, name, status FROM restaurant_tables WHERE code = $1",
+    "SELECT id, code, name, status FROM restaurant_tables WHERE code = $1 AND deleted_at IS NULL",
     [tableToken],
   );
   const row = res.rows[0];
@@ -119,6 +125,7 @@ export interface GrantedSession {
   session_pin: string;
   session_secret: string;
   session_started_at: string | null;
+  bill_status: BillStatus;
   realtime_token: string | null;
 }
 
@@ -153,6 +160,7 @@ function grantedSession(row: SessionRow): GrantedSession {
     session_pin: row.session_pin,
     session_secret: row.session_secret,
     session_started_at: row.session_started_at ? iso(row.session_started_at) : null,
+    bill_status: row.bill_status,
     realtime_token: issueTableReadToken(row),
   };
 }
@@ -185,7 +193,10 @@ export async function initializeSession(tableToken: string): Promise<InitializeR
     await client.query("BEGIN");
 
     const found = await client.query<SessionRow>(
-      `SELECT ${SESSION_COLUMNS} FROM restaurant_tables WHERE code = $1 FOR UPDATE`,
+      `SELECT ${SESSION_COLUMNS}
+         FROM restaurant_tables
+        WHERE code = $1 AND deleted_at IS NULL
+          FOR UPDATE`,
       [tableToken],
     );
     const table = found.rows[0];
@@ -250,6 +261,7 @@ export async function joinWithPin(input: { table_token: string; pin: string }): 
     `UPDATE restaurant_tables
         SET failed_pin_attempts = 0
       WHERE code = $1
+        AND deleted_at IS NULL
         AND status = 'active'
         AND session_pin = $2
         AND failed_pin_attempts < $3
@@ -264,6 +276,7 @@ export async function joinWithPin(input: { table_token: string; pin: string }): 
     `UPDATE restaurant_tables
         SET failed_pin_attempts = failed_pin_attempts + 1
       WHERE code = $1
+        AND deleted_at IS NULL
         AND status = 'active'
         AND session_pin IS NOT NULL
         AND session_pin IS DISTINCT FROM $2
@@ -319,6 +332,7 @@ export async function joinWithPass(input: {
     `UPDATE restaurant_tables
         SET failed_pin_attempts = 0
       WHERE code = $1
+        AND deleted_at IS NULL
         AND status = 'active'
         AND session_secret = $2
       RETURNING ${SESSION_COLUMNS}`,
@@ -365,7 +379,9 @@ export async function reconnectSession(input: {
 
 async function requireSessionRow(tableToken: string): Promise<SessionRow> {
   const res = await pool.query<SessionRow>(
-    `SELECT ${SESSION_COLUMNS} FROM restaurant_tables WHERE code = $1`,
+    `SELECT ${SESSION_COLUMNS}
+       FROM restaurant_tables
+      WHERE code = $1 AND deleted_at IS NULL`,
     [tableToken],
   );
   const row = res.rows[0];
@@ -378,6 +394,346 @@ async function requireSessionRow(tableToken: string): Promise<SessionRow> {
 export type ActiveCheckResult =
   | { has_active_order: true; order_id: string; status: string; message: string }
   | { has_active_order: false; message: string };
+
+/* ---------------------------------------------------------------------
+   Bill settlement & automatic table release (sql/007)
+   ---------------------------------------------------------------------
+   A table is released for the next party only when ALL three independent
+   facts agree:
+
+     1. the bill is PAID,
+     2. no ticket is still pending / preparing / ready, and
+     3. no diner device has sent a heartbeat in the last 45 seconds.
+
+   Condition 3 is what stops a settle from clearing the table while a guest
+   is still sitting at it reading the receipt. The 45s window sits just
+   inside the frontend's 15s heartbeat, so one missed beat is tolerated and
+   two are not.
+
+   All three are read inside ONE transaction that holds a FOR UPDATE lock on
+   the table row, so a settle, a new fire and a last-device disconnect that
+   land together cannot each decide the table is releasable. */
+
+export const RELEASE_PRESENCE_WINDOW_SECONDS = 45;
+
+export interface AutoReleaseResult {
+  released: boolean;
+}
+
+interface ReleaseCandidate {
+  id: string;
+  bill_status: BillStatus;
+  active_orders: number;
+  active_devices: number;
+}
+
+export async function checkAndAutoReleaseTable(tableId: string): Promise<AutoReleaseResult> {
+  const client = await pool.connect();
+  let committed = false;
+
+  try {
+    await client.query("BEGIN");
+
+    const locked = await client.query<{ id: string }>(
+      `SELECT id
+         FROM restaurant_tables
+        WHERE id = $1 AND deleted_at IS NULL
+          FOR UPDATE`,
+      [tableId],
+    );
+    if (!locked.rows[0]) {
+      // Archived or already gone: nothing to release.
+      await client.query("COMMIT");
+      committed = true;
+      return { released: false };
+    }
+
+    const candidate = await client.query<ReleaseCandidate>(
+      `SELECT t.id,
+              t.bill_status,
+              (SELECT count(*)::int
+                 FROM orders o
+                WHERE o.table_id = t.id
+                  AND o.status IN ('pending', 'preparing', 'ready')) AS active_orders,
+              (SELECT count(*)::int
+                 FROM table_device_presence p
+                WHERE p.table_id = t.id
+                  AND p.last_seen > now() - ($2 || ' seconds')::interval) AS active_devices
+         FROM restaurant_tables t
+        WHERE t.id = $1`,
+      [tableId, RELEASE_PRESENCE_WINDOW_SECONDS],
+    );
+
+    const row = candidate.rows[0];
+    if (!row || row.bill_status !== "paid" || row.active_orders > 0 || row.active_devices > 0) {
+      await client.query("COMMIT");
+      committed = true;
+      return { released: false };
+    }
+
+    await clearTableRows(client, tableId);
+
+    await client.query("COMMIT");
+    committed = true;
+    return { released: true };
+  } catch (err) {
+    if (!committed) {
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/* Shared cleanup for every path that hands a table to its next party:
+   auto-release, a staff clear, and an admin override. Orders are history and
+   are never deleted; the session credentials, cart and presence all die. */
+async function clearTableRows(client: PoolClient, tableId: string): Promise<void> {
+  await client.query(
+    `UPDATE restaurant_tables
+        SET status              = 'empty',
+            session_pin         = NULL,
+            session_secret      = NULL,
+            failed_pin_attempts = 0,
+            session_started_at  = NULL,
+            bill_status         = 'unrequested',
+            bill_requested_at   = NULL,
+            bill_paid_at        = NULL,
+            clear_requested_at  = NULL
+      WHERE id = $1`,
+    [tableId],
+  );
+
+  await client.query("DELETE FROM cart_items WHERE table_id = $1", [tableId]);
+  await client.query("DELETE FROM table_device_presence WHERE table_id = $1", [tableId]);
+}
+
+export type ClearTableOutcome = "cleared" | "not_found" | "active_orders" | "unpaid";
+
+export interface ClearTableResult {
+  outcome: ClearTableOutcome;
+  bill_status: BillStatus | null;
+  active_orders: number;
+  order_count: number;
+}
+
+/* Explicit clear, used by the floor (staff) and the admin console.
+
+   Rules, in order:
+     1. an open ticket always blocks — never yank a table out from under the
+        kitchen (a flagged table has none, but the endpoint is reachable);
+     2. money owed blocks a STAFF clear: bill_status <> 'paid' with at least
+        one order on record. A table with no orders has nothing to charge;
+     3. `allowUnpaid` is the manager override — only the admin route sets it.
+
+   Works inside one transaction with a row lock, so a clear cannot race a
+   fire or a settle. */
+export async function clearTableSession(
+  tableId: string,
+  options: { allowUnpaid: boolean },
+): Promise<ClearTableResult> {
+  const client = await pool.connect();
+  let committed = false;
+
+  try {
+    await client.query("BEGIN");
+
+    const locked = await client.query<{
+      id: string;
+      bill_status: BillStatus;
+      session_started_at: Date | null;
+    }>(
+      `SELECT id, bill_status, session_started_at
+         FROM restaurant_tables
+        WHERE id = $1 AND deleted_at IS NULL
+          FOR UPDATE`,
+      [tableId],
+    );
+    const table = locked.rows[0];
+    if (!table) {
+      await client.query("COMMIT");
+      committed = true;
+      return { outcome: "not_found", bill_status: null, active_orders: 0, order_count: 0 };
+    }
+
+    /* Money owed is scoped to the CURRENT session. Orders are never deleted
+       (history is immutable), so counting every order on the table would
+       make one past bill block staff clears forever. Only tickets fired
+       after this session started can belong to this party. */
+    const counts = await client.query<{
+      order_count: number;
+      session_order_count: number;
+      active_orders: number;
+    }>(
+      `SELECT count(*)::int AS order_count,
+              count(*) FILTER (
+                WHERE created_at >= $2
+              )::int AS session_order_count,
+              count(*) FILTER (
+                WHERE status IN ('pending', 'preparing', 'ready')
+              )::int AS active_orders
+         FROM orders
+        WHERE table_id = $1`,
+      [tableId, table.session_started_at],
+    );
+    const orderCount = counts.rows[0]?.order_count ?? 0;
+    const sessionOrderCount = counts.rows[0]?.session_order_count ?? 0;
+    const activeOrders = counts.rows[0]?.active_orders ?? 0;
+
+    if (activeOrders > 0) {
+      await client.query("COMMIT");
+      committed = true;
+      return {
+        outcome: "active_orders",
+        bill_status: table.bill_status,
+        active_orders: activeOrders,
+        order_count: orderCount,
+      };
+    }
+
+    const unpaid = table.bill_status !== "paid" && sessionOrderCount > 0;
+    if (unpaid && !options.allowUnpaid) {
+      await client.query("COMMIT");
+      committed = true;
+      return {
+        outcome: "unpaid",
+        bill_status: table.bill_status,
+        active_orders: 0,
+        order_count: orderCount,
+      };
+    }
+
+    await clearTableRows(client, tableId);
+    await client.query("COMMIT");
+    committed = true;
+
+    return {
+      outcome: "cleared",
+      bill_status: table.bill_status,
+      active_orders: 0,
+      order_count: orderCount,
+    };
+  } catch (err) {
+    if (!committed) {
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export interface BillRequestResult {
+  table_id: string;
+  bill_status: BillStatus;
+  bill_requested_at: string | null;
+}
+
+/* POST /api/v1/sessions/:table_token/bill-request.
+   Idempotent: asking twice keeps the first request timestamp (a second tap
+   must not restart the server's clock), and a settled table is never
+   downgraded from 'paid' back to 'requested'. */
+export async function requestTableBill(tableToken: string): Promise<BillRequestResult> {
+  const table = await requireTable(tableToken);
+
+  const updated = await pool.query<{
+    id: string;
+    bill_status: BillStatus;
+    bill_requested_at: Date | null;
+  }>(
+    `UPDATE restaurant_tables
+        SET bill_status       = 'requested',
+            bill_requested_at = now()
+      WHERE id = $1
+        AND deleted_at IS NULL
+        AND bill_status = 'unrequested'
+      RETURNING id, bill_status, bill_requested_at`,
+    [table.id],
+  );
+
+  const row = updated.rows[0];
+  if (row) {
+    return {
+      table_id: row.id,
+      bill_status: row.bill_status,
+      bill_requested_at: row.bill_requested_at ? iso(row.bill_requested_at) : null,
+    };
+  }
+
+  const existing = await pool.query<{
+    id: string;
+    bill_status: BillStatus;
+    bill_requested_at: Date | null;
+  }>(
+    `SELECT id, bill_status, bill_requested_at
+       FROM restaurant_tables
+      WHERE id = $1 AND deleted_at IS NULL`,
+    [table.id],
+  );
+
+  const current = existing.rows[0];
+  if (!current) {
+    throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table token parsed.");
+  }
+
+  return {
+    table_id: current.id,
+    bill_status: current.bill_status,
+    bill_requested_at: current.bill_requested_at ? iso(current.bill_requested_at) : null,
+  };
+}
+
+export interface HeartbeatResult {
+  table_id: string;
+  device_id: string;
+  last_seen: string;
+}
+
+/* POST /api/v1/sessions/:table_token/heartbeat.
+   The upsert is the whole protocol: a device that reconnects keeps ONE row
+   per table, so a flapping phone cannot fill the registry. */
+export async function recordHeartbeat(
+  tableToken: string,
+  deviceId: string,
+): Promise<HeartbeatResult> {
+  const table = await requireTable(tableToken);
+
+  const res = await pool.query<{ device_id: string; last_seen: Date }>(
+    `INSERT INTO table_device_presence (table_id, device_id, last_seen)
+          VALUES ($1, $2, now())
+     ON CONFLICT (table_id, device_id)
+       DO UPDATE SET last_seen = now()
+     RETURNING device_id, last_seen`,
+    [table.id, deviceId],
+  );
+
+  const row = res.rows[0];
+  if (!row) {
+    throw new AppError(500, "INTERNAL_ERROR", "The device heartbeat could not be recorded.");
+  }
+
+  return { table_id: table.id, device_id: row.device_id, last_seen: iso(row.last_seen) };
+}
+
+/* DELETE /api/v1/sessions/:table_token/heartbeat.
+   Removing the row is a release trigger, not just bookkeeping: the last
+   guest closing the tab after paying is precisely the moment the table can
+   be cleared. */
+export async function removeHeartbeat(
+  tableToken: string,
+  deviceId: string,
+): Promise<{ table_id: string; device_id: string; released: boolean }> {
+  const table = await requireTable(tableToken);
+
+  await pool.query("DELETE FROM table_device_presence WHERE table_id = $1 AND device_id = $2", [
+    table.id,
+    deviceId,
+  ]);
+
+  const { released } = await checkAndAutoReleaseTable(table.id);
+  return { table_id: table.id, device_id: deviceId, released };
+}
 
 /* E9 — GET /api/v1/sessions/:table_token/active-check.
    Read-only guardrail: never 409s, just reports the processing block. */

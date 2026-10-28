@@ -35,9 +35,7 @@ export function AllergyInput({ id, value, onChange, className }: AllergyInputPro
           className={cn(controlStyles(), "resize-y border-alert/40 py-3")}
         />
       </FieldShell>
-      <p className="mt-2 text-xs text-alert">
-        Stays on its own line and renders bold red on the kitchen screen.
-      </p>
+      <p className="mt-2 text-xs text-alert">Alerts kitchen line directly.</p>
     </div>
   );
 }

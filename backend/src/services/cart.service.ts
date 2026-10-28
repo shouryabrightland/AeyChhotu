@@ -79,7 +79,7 @@ export async function addCartItem(input: CartAddInput): Promise<CartLineWithTota
   const table = await requireTable(input.table_token);
 
   const menuRes = await pool.query<{ id: string; name: string; is_available: boolean }>(
-    "SELECT id, name, is_available FROM menu_items WHERE id = $1",
+    "SELECT id, name, is_available FROM menu_items WHERE id = $1 AND deleted_at IS NULL",
     [input.menu_item_id],
   );
   const menuItem = menuRes.rows[0];

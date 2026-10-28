@@ -7,7 +7,9 @@
  *
  *   1. SCHEMA      tables exist, RLS is switched on, all 24 policies present
  *   2. INDEXES     the 7 access-path indexes + the one-active-order constraint
- *   3. REPLICATION the Realtime publication + REPLICA IDENTITY FULL
+ *   3. REPLICATION the Realtime publication + REPLICA IDENTITY FULL,
+ *                  including the menu_items / restaurant_tables expansion
+ *                  added by 008_realtime_expansion.sql
  *   4. SECURITY    claim-scoped RLS actually returns 0 rows with no token,
  *                  1 row for a diner token, the whole floor for a staff
  *                  token, and anon writes are denied
@@ -17,6 +19,8 @@
  *   6. SESSIONS    the PIN/pass columns, their shape constraints, and the
  *                  column privileges that keep both out of every browser
  *                  role (005_table_session_security.sql)
+ *   7. BILLING     the bill columns + device-presence registry that drive
+ *                  automatic table release (007_bill_and_auto_release.sql)
  *
  * Usage (from backend/):
  *   npm run db:verify
@@ -163,11 +167,18 @@ try {
       published.includes("orders") && published.includes("cart_items"),
       published.join(", ") || "publication empty",
     );
+    // 008: the admin console and floor board watch these two.
+    report(
+      "menu_items + restaurant_tables streamed (008)",
+      published.includes("menu_items") && published.includes("restaurant_tables"),
+      published.join(", ") || "publication empty",
+    );
   }
 
   const { rows: identRows } = await q(
     `SELECT relname, relreplident FROM pg_class
-      WHERE oid IN ('public.orders'::regclass, 'public.cart_items'::regclass)`,
+      WHERE oid IN ('public.orders'::regclass, 'public.cart_items'::regclass,
+                    'public.menu_items'::regclass, 'public.restaurant_tables'::regclass)`,
   );
   for (const row of identRows) {
     // relreplident: 'f' = FULL (needed so DELETE carries table_id for filters)
@@ -214,14 +225,20 @@ try {
     `read ${noToken} of the floor`,
   );
 
-  const dinerToken = await readAsAnon({ table_token: "k7x2p" }, "restaurant_tables");
+  // Read the live token instead of assuming the seed's original code: an
+  // admin can regenerate a table's QR, which changes `code` by design.
+  const { rows: tokenRows } = await q(
+    "SELECT code FROM restaurant_tables WHERE deleted_at IS NULL ORDER BY code LIMIT 1",
+  );
+  const dinerCode = tokenRows[0]?.code;
+  const dinerToken = await readAsAnon({ table_token: dinerCode }, "restaurant_tables");
   report(
     "diner token ⇒ only its own table",
     dinerToken === 1,
-    `read ${dinerToken} row(s)`,
+    `read ${dinerToken} row(s) for ${dinerCode}`,
   );
 
-  const dinerLeak = await readAsAnon({ table_token: "k7x2p" }, "cart_items");
+  const dinerLeak = await readAsAnon({ table_token: dinerCode }, "cart_items");
   report(
     "diner token scoped on cart_items",
     typeof dinerLeak === "number",
@@ -520,8 +537,128 @@ try {
   }
   report("anon SELECT session_secret is denied outright", secretReadDenied, secretReadError);
 
-  // ------------------------------------------------------------------- 7. seed
-  section("7. Seed data");
+  /* ------------------------------- 7. bill settlement & auto-release (007)
+     The release engine reads three facts: bill_status, open orders and fresh
+     device presence. The schema has to make each of them reliable: a guarded
+     status column, a paid timestamp that cannot contradict it, and a presence
+     table with one row per device. */
+  section("7. Bill settlement & auto-release (007 + 009)");
+
+  const { rows: billCols } = await q(
+    `SELECT column_name, data_type, is_nullable, column_default
+       FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'restaurant_tables'
+        AND column_name IN ('bill_status', 'bill_requested_at', 'bill_paid_at')`,
+  );
+  const billCol = new Map(billCols.map((row) => [row.column_name, row]));
+
+  report(
+    "column bill_status text NOT NULL DEFAULT 'unrequested'",
+    billCol.get("bill_status")?.data_type === "text" &&
+      billCol.get("bill_status")?.is_nullable === "NO" &&
+      /unrequested/.test(billCol.get("bill_status")?.column_default ?? ""),
+    JSON.stringify(billCol.get("bill_status") ?? "missing"),
+  );
+  report(
+    "column bill_requested_at timestamptz nullable",
+    billCol.get("bill_requested_at")?.data_type === "timestamp with time zone" &&
+      billCol.get("bill_requested_at")?.is_nullable === "YES",
+    JSON.stringify(billCol.get("bill_requested_at") ?? "missing"),
+  );
+  report(
+    "column bill_paid_at timestamptz nullable",
+    billCol.get("bill_paid_at")?.data_type === "timestamp with time zone" &&
+      billCol.get("bill_paid_at")?.is_nullable === "YES",
+    JSON.stringify(billCol.get("bill_paid_at") ?? "missing"),
+  );
+  report(
+    "constraint restaurant_tables_bill_status_check",
+    checkNames.has("restaurant_tables_bill_status_check"),
+  );
+  report(
+    "constraint restaurant_tables_bill_paid_consistency",
+    checkNames.has("restaurant_tables_bill_paid_consistency"),
+  );
+
+  const { rows: presenceRows } = await q(
+    `SELECT c.relname, c.relrowsecurity
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relname = 'table_device_presence'`,
+  );
+  report("table table_device_presence", presenceRows.length === 1);
+
+  const { rows: presenceIndexes } = await q(
+    "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'table_device_presence'",
+  );
+  report(
+    "index table_device_presence_table_idx",
+    presenceIndexes.some((row) => row.indexname === "table_device_presence_table_idx"),
+  );
+
+  const { rows: presenceFk } = await q(
+    `SELECT confdeltype FROM pg_constraint
+      WHERE conname = 'table_device_presence_table_id_fkey'
+        AND conrelid = to_regclass('public.table_device_presence')`,
+  );
+  report(
+    "presence cascades on table delete",
+    presenceFk[0]?.confdeltype === "c",
+    `confdeltype=${presenceFk[0]?.confdeltype ?? "missing"}`,
+  );
+
+  // The three bill columns are readable by browser roles; the credentials
+  // above remain the only withheld ones. Guarded so an un-migrated database
+  // reports the failure instead of aborting the whole run on a missing column.
+  if (billCol.size === 3) {
+    const { rows: billPrivRows } = await q(
+      `SELECT
+         has_column_privilege('anon', 'public.restaurant_tables', 'bill_status', 'SELECT')           AS anon_bill,
+         has_column_privilege('authenticated', 'public.restaurant_tables', 'bill_paid_at', 'SELECT') AS auth_paid`,
+    );
+    report("anon can read bill_status", billPrivRows[0].anon_bill === true);
+    report("authenticated can read bill_paid_at", billPrivRows[0].auth_paid === true);
+  } else {
+    report("anon can read bill_status", false, "columns missing");
+    report("authenticated can read bill_paid_at", false, "columns missing");
+  }
+
+  // The status guard rejects a value the engine could never write.
+  let billShapeRejected = false;
+  try {
+    await q("BEGIN");
+    await q(
+      "UPDATE restaurant_tables SET bill_status = 'settled' WHERE code = (SELECT code FROM restaurant_tables LIMIT 1)",
+    );
+    await q("ROLLBACK");
+  } catch (err) {
+    await q("ROLLBACK").catch(() => {});
+    billShapeRejected = /check constraint|violates check/i.test(err.message);
+  }
+  report("bill_status rejects an unknown state", billShapeRejected);
+
+  // 009 — the staff clear request that alerts the manager console.
+  const { rows: clearCols } = await q(
+    `SELECT column_name, data_type, is_nullable
+       FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'restaurant_tables'
+        AND column_name = 'clear_requested_at'`,
+  );
+  report(
+    "column clear_requested_at timestamptz nullable",
+    clearCols[0]?.data_type === "timestamp with time zone" &&
+      clearCols[0]?.is_nullable === "YES",
+    JSON.stringify(clearCols[0] ?? "missing"),
+  );
+
+  const { rows: clearIdx } = await q(
+    "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'restaurant_tables_clear_requested_idx'",
+  );
+  report("index restaurant_tables_clear_requested_idx", clearIdx.length === 1);
+
+  // ------------------------------------------------------------------- 8. seed
+  section("8. Seed data");
 
   const { rows: seedRows } = await q(`
     SELECT

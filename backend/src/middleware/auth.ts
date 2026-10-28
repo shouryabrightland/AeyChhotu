@@ -10,10 +10,17 @@ declare module "express-serve-static-core" {
   }
 }
 
-const UNAUTHORIZED_MESSAGE = "Missing or invalid kitchen shift token.";
+const UNAUTHORIZED_MESSAGE = "Missing or invalid shift or admin session token.";
 
-/* Accepts `Authorization: Bearer <jwt>` first, then the httpOnly
-   `kds_token` cookie set by kds-login (same-origin browser terminals). */
+/* Cookie names this API issues. Both are httpOnly and same-site.
+     kds_token    — E2 kitchen/floor shift
+     admin_token  — the executive console's owner session
+   They are distinct names so a shift token can never be silently promoted to
+   admin access, and signing out of one never touches the other. */
+const COOKIE_NAMES = ["kds_token", "admin_token"] as const;
+
+/* Accepts `Authorization: Bearer <jwt>` first, then either httpOnly cookie
+   (same-origin browser terminals). */
 function extractToken(req: Request): { token: string; source: "header" | "cookie" } | null {
   const header = req.headers.authorization;
   if (header?.startsWith("Bearer ")) {
@@ -25,7 +32,7 @@ function extractToken(req: Request): { token: string; source: "header" | "cookie
   if (cookieHeader) {
     for (const part of cookieHeader.split(";")) {
       const [name, ...rest] = part.trim().split("=");
-      if (name === "kds_token") {
+      if (name && (COOKIE_NAMES as readonly string[]).includes(name)) {
         const token = decodeURIComponent(rest.join("="));
         if (token) return { token, source: "cookie" };
       }

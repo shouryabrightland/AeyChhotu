@@ -74,7 +74,7 @@ export function TableCart({
         <div className="mt-5 rounded-lg border border-dashed border-line-strong bg-canvas px-5 py-9 text-center">
           <p className="font-display text-subheading text-ink">Your table is waiting.</p>
           <p className="mt-2 text-sm leading-relaxed text-ink-muted">
-            Swipe right on something delicious — it lands here for everyone at the table.
+            Cart is empty. Add dishes to begin.
           </p>
         </div>
       ) : (

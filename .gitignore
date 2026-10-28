@@ -45,3 +45,6 @@ Thumbs.db
 .vscode/
 .freebuff/
 *.pem
+
+repomix-output*
+.nvmrc

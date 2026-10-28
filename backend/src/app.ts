@@ -15,6 +15,7 @@ import { cartRouter } from "./routes/cart.js";
 import { ordersRouter } from "./routes/orders.js";
 import { kdsRouter } from "./routes/kds.js";
 import { floorRouter } from "./routes/floor.js";
+import { adminRouter } from "./routes/admin.js";
 
 /* Express app factory: security headers → request ids → CORS (CLIENT_URL
    only) → rate limits → routes → 404 → central error handler (registration
@@ -78,6 +79,7 @@ export function createApp() {
      to kds-login (the general limiter would otherwise count successes too,
      punishing a busy kitchen). */
   app.use("/api/v1/auth/kds-login", loginLimiter);
+  app.use("/api/v1/auth/admin-login", loginLimiter);
   app.use("/api/v1", apiLimiter);
 
   // Routes (docs/7-api-contract.md E1–E17; health/ready stay public).
@@ -90,6 +92,7 @@ export function createApp() {
   app.use("/api/v1/orders", ordersRouter);
   app.use("/api/v1/kds", kdsRouter);
   app.use("/api/v1/floor", floorRouter);
+  app.use("/api/v1/admin", adminRouter);
 
   // Terminal 404, then the central error handler (must stay last).
   app.use(notFoundHandler);

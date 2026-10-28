@@ -8,7 +8,16 @@
  *     001_init.sql      tables, indexes, RLS, fire_order()
  *     002_review_fixes.sql  FK RESTRICT, one-active-order index, scoped RLS
  *     003_realtime.sql  Realtime publication + REPLICA IDENTITY
+ *     004_hardening.sql  audit timestamps, price snapshot, status guard
+ *     005_table_session_security.sql  PIN/pass columns + column privileges
+ *     006_admin_and_soft_deletes.sql  archive columns + partial indexes
+ *     007_bill_and_auto_release.sql   bill columns + device presence registry
+ *     008_realtime_expansion.sql      menu_items / restaurant_tables publication
+ *     009_table_clear_alerts.sql      staff clear-request flag for the admin
  *     seed.sql          1 terminal / 5 tables / 20 dishes (idempotent)
+ *
+ * The list above is documentation only: the runner reads the directory, so a
+ * new migration is picked up by its filename and never needs a code change.
  *
  * Usage (from backend/):
  *   npm run db:setup            # everything

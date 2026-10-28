@@ -42,7 +42,11 @@ export async function listMenu(params: MenuListParams): Promise<{
     args.push(`%${params.q}%`);
     where.push(`name ILIKE $${args.length}`);
   }
-  const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+  /* An archived dish is gone from the diner's world (006). The filter is
+     written into the WHERE list rather than added afterwards so the count and
+     the page can never disagree about what "the menu" contains. */
+  where.push("deleted_at IS NULL");
+  const whereSql = `WHERE ${where.join(" AND ")}`;
 
   const countRes = await pool.query<{ total: number }>(
     `SELECT count(*)::int AS total FROM menu_items ${whereSql}`,
@@ -75,7 +79,7 @@ export async function listMenu(params: MenuListParams): Promise<{
 /* E14 — PATCH /api/v1/menu/items/:menu_item_id/availability (86ing). */
 export async function setAvailability(menuItemId: string, isAvailable: boolean) {
   const res = await pool.query<{ id: string; is_available: boolean }>(
-    "UPDATE menu_items SET is_available = $2 WHERE id = $1 RETURNING id, is_available",
+    "UPDATE menu_items SET is_available = $2 WHERE id = $1 AND deleted_at IS NULL RETURNING id, is_available",
     [menuItemId, isAvailable],
   );
 

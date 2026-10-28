@@ -1,560 +1,370 @@
-import {
-  BellRing,
-  ChefHat,
-  Columns3,
-  Flame,
-  Hand,
-  KeyRound,
-  QrCode,
-  ShieldAlert,
-  ShoppingBasket,
-  Timer,
-  Utensils,
-  Users,
-  type LucideIcon,
-} from "lucide-react";
-import Image from "next/image";
+"use client";
+
+import { ArrowRight, BellRing, QrCode, ShieldAlert, ShoppingBasket, Sparkles } from "lucide-react";
 import Link from "next/link";
-import { LogoWatermark } from "@/components/brand/logo";
-import { ExpandableCard } from "@/components/marketing/expandable-card";
-import { FlipCard } from "@/components/marketing/flip-card";
-import { HeroPointerShadow } from "@/components/marketing/hero-pointer-shadow";
-import { HeroVisual } from "@/components/marketing/hero-visual";
-import { InnovationDeck } from "@/components/marketing/innovation-deck";
-import { TiltSurface } from "@/components/marketing/tilt-surface";
-import { WorkflowTimeline } from "@/components/marketing/workflow-timeline";
-import { Reveal } from "@/components/motion/reveal";
-import { Badge, type BadgeTone } from "@/components/ui/badge";
-import { Container } from "@/components/ui/container";
-import { Section } from "@/components/ui/section";
-import { SectionHeader } from "@/components/ui/section-header";
-import { Text } from "@/components/ui/text";
-import { productLinks } from "@/lib/site";
+import { useRouter } from "next/navigation";
+import { useEffect, useState, useSyncExternalStore, type FormEvent } from "react";
+import { Logo } from "@/components/brand/logo";
+import { HomeQrAnimation } from "@/components/diner/home-qr-animation";
+import { InAppQrScanner } from "@/components/diner/in-app-qr-scanner";
+import { InstallPrompt } from "@/components/pwa/install-prompt";
+import { Button } from "@/components/ui/button";
+import { FieldShell, controlStyles, useFieldControl } from "@/components/ui/field";
+import { Modal } from "@/components/ui/modal";
+import { useToast } from "@/components/ui/toast";
+import { cn } from "@/lib/utils";
 
-interface Gap {
-  title: string;
-  friction: string;
-  complaint: string;
-}
+/* The diner's front door.
+ *
+ * This is NOT the product pitch any more (that lives at /about) and it is not
+ * the hackathon showcase (that lives at /presentation). It is the screen a
+ * guest sees before they scan: one promise, one action, and the two ways in
+ * (camera or typed code). Everything here is client-side; the only network
+ * call happens after a table token is resolved, on /table/<token>. */
 
-const gaps: Gap[] = [
-  {
-    title: "Mixed up ticket timing",
-    friction:
-      "Orders hit the kitchen the moment a guest taps submit. Eight people ordering separately become eight separate tickets.",
-    complaint: "Kitchens get overwhelmed — they cannot group or pause orders for the same table.",
-  },
-  {
-    title: "Bad allergy formats, slow inventory sync",
-    friction:
-      "Rigid check-boxes hide serious allergy warnings, and an ingredient running out does not reach the guest's menu instantly.",
-    complaint: "Chefs miss critical allergy notes and guests order food that no longer exists.",
-  },
-  {
-    title: "One-way kitchen screens",
-    friction:
-      "The screen only shows done or not done. Nothing travels back to the server or the guest while food is being cooked.",
-    complaint: "Servers walk to the pass to ask, and guests stare at a frozen screen.",
-  },
+const TABLE_TOKEN_RE = /^[a-z0-9]{4,16}$/;
+
+/** The hooks the copy rotates through — the real sentences a Indian table
+    shouts across a restaurant, which is the whole product insight. */
+const SHOUTS = [
+  "Ek cutting chai aur do butter naan!",
+  "Chutney khatam ho gayi!",
+  "Bill lana!",
+  "Ek plate biryani, extra raita!",
 ];
 
-const steps = [
-  {
-    title: "Scan the table QR",
-    body: "A randomised link like /table/k7x2p opens the menu and binds the session to the physical table. No login, no download.",
-  },
-  {
-    title: "Everyone adds to one cart",
-    body: "Every phone at the table edits the same shared cart and sees the others' lines appear live.",
-  },
-  {
-    title: "Review & fire",
-    body: "One button checks live inventory, empties the cart and sends the table's order to the kitchen as a single ticket.",
-  },
-  {
-    title: "The kitchen taps tags",
-    body: "One tap moves a ticket Pending → Preparing → Ready → Served on a three-column board.",
-  },
-  {
-    title: "Everyone sees it live",
-    body: "The diner's screen turns grey, amber, then flashes green. The floor view tracks every table without a walk to the pass.",
-  },
-];
+const TYPE_MS = 55;
+const DELETE_MS = 28;
+const HOLD_MS = 1900;
 
-interface Feature {
-  title: string;
-  teaser: string;
-  body: string;
-  icon: LucideIcon;
-}
-
-/* Nine cards, three by three: the grid stays symmetric on every
-   breakpoint, and each teaser names the win while the back carries the how. */
-const features: Feature[] = [
-  {
-    title: "QR table link",
-    teaser: "Scan, sit, order.",
-    body: "Unguessable table tokens instead of numbered tables, opening the menu instantly — no app store between the guest and the food.",
-    icon: QrCode,
-  },
-  {
-    title: "Shared table cart",
-    teaser: "One bucket per table.",
-    body: "One cart for the whole table, synced across every phone at it, so eight people build one order instead of eight.",
-    icon: ShoppingBasket,
-  },
-  {
-    title: "Review & fire",
-    teaser: "One tap sends it all.",
-    body: "A single submission with a live inventory check and a duplicate-order guardrail before anything reaches the kitchen.",
-    icon: Flame,
-  },
-  {
-    title: "Kitchen kanban",
-    teaser: "One card per table.",
-    body: "Pending, Preparing and Ready columns with one card per table, so the line sees the whole rush at a glance.",
-    icon: Columns3,
-  },
-  {
-    title: "One-tap status",
-    teaser: "Cook, ready, served.",
-    body: "The same button changes meaning per column — one tap moves the ticket, and the whole floor sees it move.",
-    icon: Hand,
-  },
-  {
-    title: "Live guest tracker",
-    teaser: "No more “how long?”",
-    body: "A self-updating screen so nobody has to ask where the food is — the table watches its ticket cook.",
-    icon: Timer,
-  },
-  {
-    title: "Red allergy text",
-    teaser: "Impossible to miss.",
-    body: "A dedicated allergy box that renders bold red on the ticket, while normal notes stay normal and quiet.",
-    icon: ShieldAlert,
-  },
-  {
-    title: "Screen flash & sounds",
-    teaser: "You'll know it landed.",
-    body: "A green flash for the diner, a chime for the kitchen the moment a ticket lands — no polling, no staring.",
-    icon: BellRing,
-  },
-  {
-    title: "Quick item hide",
-    teaser: "86 a dish in a tap.",
-    body: "Pull a dish in one tap and it greys out on every active menu — behind a staff PIN, so diners cannot open it.",
-    icon: KeyRound,
-  },
-];
-
-interface Persona {
-  role: string;
-  name: string;
-  interface: string;
-  goal: string;
-  pain: string;
-  metric: string;
-  icon: LucideIcon;
-}
-
-const personas: Persona[] = [
-  {
-    role: "The Diner",
-    name: "Diner mobile web app",
-    interface: "QR scan · zero download",
-    goal: "Order accurately, flag allergies safely and track the wait without anxiety.",
-    pain: "Finding out ten minutes later that the dish is sold out; watching a frozen screen.",
-    metric: "Seconds between ordering and the first live cooking update.",
-    icon: Utensils,
-  },
-  {
-    role: "The Line Chef",
-    name: "Mr. Baawarchi",
-    interface: "Wall-mounted KDS dashboard",
-    goal: "Receive grouped tickets and update prep status without leaving the line.",
-    pain: "Five small tickets from the same table; allergy alerts lost in tiny text.",
-    metric: "Zero split tickets per table and zero missed allergy notes.",
-    icon: ChefHat,
-  },
-  {
-    role: "The Server",
-    name: "Chhotu",
-    interface: "Handheld floor view",
-    goal: "Keep floor pacing, stop walking to the pass, manage out-of-stock dishes.",
-    pain: 'Running into a loud kitchen to ask, "how much longer on Table 4?"',
-    metric: "Fewer physical trips to the kitchen pass.",
-    icon: Users,
-  },
-];
-
-export default function LandingPage() {
-  return (
-    <>
-      {/* ============================ HERO ============================
-          One composition, two zones: the illustration owns the left half
-          (with its own light and its two status pills inside that wrapper —
-          see hero-visual.tsx) and the copy owns the right. Because each is a
-          grid child, the artwork can never reach under the headline, so the
-          cream veil that used to sit behind the text is gone; the warmth
-          moved to where it belongs, behind the server. */}
-      <section className="relative isolate overflow-hidden border-b border-line bg-canvas">
-        <div
-          aria-hidden
-          className="hairline-grid pointer-events-none absolute inset-0 opacity-60 [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,black,transparent)]"
-        />
-        {/* Warmth gathers under the illustration, low and wide; the right half
-            stays comparatively clean so the headline sits on plain cream. */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute -bottom-48 -left-40 size-[44rem] rounded-pill bg-tan/25 blur-3xl"
-        />
-        <div
-          aria-hidden
-          className="pointer-events-none absolute -top-40 -right-40 size-[32rem] rounded-pill bg-ember/6 blur-3xl"
-        />
-        {/* Desktop-only: a shadow that chases the cursor under everything. */}
-        <HeroPointerShadow />
-
-        {/* On desktop the bottom padding is dropped and the grid is aligned to
-            the end, so the server's base sits flush on the hero's closing
-            line instead of floating above it. */}
-        <Container className="relative py-20 lg:pt-28 lg:pb-0">
-          {/* minmax(0, …) keeps the artwork's intrinsic 1672px width from
-              inflating the track past its column (the grid auto-min trap). */}
-          <div className="grid items-center gap-14 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)] lg:items-end lg:gap-20">
-            <div className="lg:order-2 lg:self-center">
-              <Reveal>
-                <Badge tone="accent" size="md">
-                  Zero download · no logins · live updates
-                </Badge>
-              </Reveal>
-
-              <Reveal delay={0.06}>
-                <h1 className="mt-7 text-display font-display font-semibold text-balance text-ink">
-                  Every phone at the table.
-                  <br className="hidden sm:block" />{" "}
-                  <span className="text-ember">One ticket</span> for the kitchen.
-                </h1>
-              </Reveal>
-
-              <Reveal delay={0.12}>
-                <Text variant="lead" tone="muted" className="mt-6 max-w-xl">
-                  AeyChhotu is the real-time bridge between the floor and the line. Individual
-                  table requests merge into a single unified cart, and every prep milestone
-                  streams back to the guest who is waiting for it.
-                </Text>
-              </Reveal>
-
-              {/* One action, not a launcher bar: the live screens are one
-                  scroll away in the closing band and in the navbar, so the
-                  hero gets to stay a product statement. */}
-              <Reveal delay={0.18}>
-                <div className="mt-9">
-                  <a
-                    href="#how-it-works"
-                    className="group inline-flex items-center gap-2 text-sm font-semibold text-ember transition-colors duration-[var(--duration-fast)] hover:text-ember-strong"
-                  >
-                    How it works
-                    <span
-                      aria-hidden
-                      className="transition-transform duration-[var(--duration-base)] ease-organic group-hover:translate-x-1"
-                    >
-                      →
-                    </span>
-                  </a>
-                </div>
-              </Reveal>
-            </div>
-
-            {/* Illustration first on a phone, left half from lg up — see
-                hero-visual.tsx for the crop and the lighting layer. */}
-            <Reveal delay={0.16} className="order-first lg:order-1">
-              <HeroVisual />
-            </Reveal>
-          </div>
-        </Container>
-      </section>
-
-      <Section id="problem" spacing="lg" tone="surface" className="scroll-mt-20">
-        <Container>
-          <SectionHeader align="center" size="heading" title="What gaps are we bridging?" />
-
-          <div className="mt-14 grid gap-5 md:grid-cols-3">
-            {gaps.map((gap, index) => (
-              <Reveal key={gap.title} delay={index * 0.08}>
-                <ExpandableCard
-                  meta={String(index + 1).padStart(2, "0")}
-                  title={gap.title}
-                  teaser="Tap to see what breaks in a rush"
-                >
-                  <p className="text-sm leading-relaxed text-ink-muted">{gap.friction}</p>
-                  <p className="mt-4 border-t border-line pt-4 text-sm leading-relaxed font-medium text-alert">
-                    {gap.complaint}
-                  </p>
-                </ExpandableCard>
-              </Reveal>
-            ))}
-          </div>
-        </Container>
-      </Section>
-
-      <Section id="how-it-works" spacing="lg" className="scroll-mt-20">
-        <Container>
-          <SectionHeader align="center" size="heading" title="How do we work?" />
-
-          <div className="mt-14">
-            <Reveal>
-              <WorkflowTimeline steps={steps} />
-            </Reveal>
-          </div>
-        </Container>
-      </Section>
-
-      {/* The ground is the same ember ramp the closing card uses, so the
-          section and the close read as one material rather than charcoal
-          warming into orange. `tone="ink"` still supplies the cream text. */}
-      <Section
-        id="innovations"
-        spacing="lg"
-        tone="ink"
-        className="scroll-mt-20 bg-gradient-to-br from-ember-strong to-ember-dusk"
-      >
-        <Container>
-          <SectionHeader align="center" size="heading" tone="inverse" title="What makes us different?" />
-
-          {/* The display carries the same weight as the deck beside it, so the
-              row reads as one composition rather than a mock and a card. */}
-          <div className="mt-14 grid items-center gap-14 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)] lg:gap-16">
-            <Reveal>
-              <TiltSurface className="mx-auto w-full max-w-xl lg:max-w-none">
-                <TicketPipeline />
-              </TiltSurface>
-            </Reveal>
-
-            <Reveal delay={0.08}>
-              <InnovationDeck />
-            </Reveal>
-          </div>
-        </Container>
-      </Section>
-
-      <Section id="features" spacing="lg" className="scroll-mt-20">
-        <Container>
-          <SectionHeader align="center" size="heading" title="What do we actually ship?" />
-
-          <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {features.map((feature, index) => (
-              <Reveal key={feature.title} delay={(index % 3) * 0.06}>
-                <FlipCard
-                  icon={<feature.icon className="size-5" aria-hidden />}
-                  title={feature.title}
-                  teaser={feature.teaser}
-                >
-                  <p className="text-sm leading-relaxed">{feature.body}</p>
-                </FlipCard>
-              </Reveal>
-            ))}
-          </div>
-        </Container>
-      </Section>
-
-      <Section id="personas" spacing="lg" tone="surface" className="scroll-mt-20">
-        <Container>
-          <SectionHeader align="center" size="heading" title="Who is this for?" />
-
-          <div className="mt-14 grid gap-5 lg:grid-cols-3">
-            {personas.map((persona, index) => (
-              <Reveal key={persona.role} delay={index * 0.08}>
-                <ExpandableCard
-                  icon={<persona.icon className="size-5" aria-hidden />}
-                  meta={persona.role}
-                  title={persona.name}
-                  teaser={persona.interface}
-                >
-                  <dl className="flex flex-col gap-4">
-                    {[
-                      ["Goal", persona.goal],
-                      ["Biggest pain", persona.pain],
-                      ["Value metric", persona.metric],
-                    ].map(([term, description]) => (
-                      <div key={term}>
-                        <dt className="text-label text-ink-subtle uppercase">{term}</dt>
-                        <dd className="mt-1.5 text-sm leading-relaxed text-ink-muted">
-                          {description}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                </ExpandableCard>
-              </Reveal>
-            ))}
-          </div>
-        </Container>
-      </Section>
-
-      {/* The close. The card keeps its shape but drops from bright ember to a
-          muted ember gradient. No ground tail under it: the cream runs
-          straight into the footer, so there is no gradient seam between the
-          card and the footer. */}
-      <Section spacing="lg" className="scroll-mt-20">
-        <Container className="relative">
-          <Reveal>
-            <div className="relative isolate overflow-hidden rounded-2xl border border-on-ember/15 bg-gradient-to-br from-ember-strong to-ember-dusk px-7 py-14 text-on-ember sm:px-12 sm:py-16">
-              <span
-                aria-hidden
-                className="pointer-events-none absolute inset-0 opacity-15 [background-image:linear-gradient(to_right,currentColor_1px,transparent_1px),linear-gradient(to_bottom,currentColor_1px,transparent_1px)] [background-size:3rem_3rem]"
-              />
-              <span
-                aria-hidden
-                className="pointer-events-none absolute -top-24 -right-16 size-80 rounded-pill bg-on-ember/10 blur-3xl"
-              />
-              <LogoWatermark className="absolute -right-10 -bottom-14 h-64 w-auto opacity-10" />
-
-              <div className="relative max-w-2xl">
-                <h2 className="text-title font-display font-semibold text-balance">Ready to open?</h2>
-                <p className="mt-4 text-lead text-on-ember/85">
-                  Three live surfaces, no signup. Open the diner view, then watch the ticket land on
-                  the kitchen board and the floor.
-                </p>
-              </div>
-
-              <div className="relative mt-10 grid gap-3 sm:grid-cols-3">
-                {productLinks.map((link) => (
-                  <Link
-                    key={link.href}
-                    href={link.href}
-                    className="group flex items-center justify-between gap-3 rounded-lg border border-on-ember/25 bg-on-ember/10 px-5 py-4 transition-[transform,background-color,border-color] duration-[var(--duration-base)] ease-organic hover:-translate-y-0.5 hover:border-on-ember/50 hover:bg-on-ember/20"
-                  >
-                    <span className="font-display text-base font-semibold">{link.label}</span>
-                    <span aria-hidden className="transition-transform duration-[var(--duration-fast)] group-hover:translate-x-1">
-                      →
-                    </span>
-                  </Link>
-                ))}
-              </div>
-            </div>
-          </Reveal>
-        </Container>
-      </Section>
-    </>
+/** Reads the OS motion preference without writing state in an effect: the
+    browser is the store, so React subscribes and re-renders on change. */
+function usePrefersReducedMotion(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+      media.addEventListener("change", onChange);
+      return () => media.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    () => false,
   );
 }
 
-/* ---------------------------------------------------------------
-   TicketPipeline: the kitchen board, rendered from the same status tokens
-   the real board uses. Because it is built from tokens rather than a
-   screenshot, it can never drift away from the product.
-   --------------------------------------------------------------- */
+/** Types a phrase, holds it, deletes it, moves on — forever. Reduced motion
+    skips the per-character animation and just rotates whole sentences. */
+function useTypewriter(phrases: string[]) {
+  const [index, setIndex] = useState(0);
+  const [text, setText] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const reduced = usePrefersReducedMotion();
 
-interface MiniTicketProps {
-  table: string;
-  elapsed: string;
-  status: string;
-  tone: BadgeTone;
-  rail: string;
-  lines: string[];
-  allergy?: string;
-  action: string;
-  actionClass: string;
+  useEffect(() => {
+    const phrase = phrases[index] ?? "";
+
+    if (reduced) {
+      // No characters to animate: only the phrase index advances.
+      const hold = window.setTimeout(
+        () => setIndex((current) => (current + 1) % phrases.length),
+        HOLD_MS + 1200,
+      );
+      return () => window.clearTimeout(hold);
+    }
+
+    let timer: number;
+
+    if (!deleting && text === phrase) {
+      timer = window.setTimeout(() => setDeleting(true), HOLD_MS);
+    } else if (deleting && text === "") {
+      // Advance on an empty string, never mid-character: the next phrase is
+      // then typed from zero instead of visibly swapping.
+      timer = window.setTimeout(() => {
+        setDeleting(false);
+        setIndex((current) => (current + 1) % phrases.length);
+      }, 180);
+    } else {
+      const next = deleting ? phrase.slice(0, text.length - 1) : phrase.slice(0, text.length + 1);
+      timer = window.setTimeout(() => setText(next), deleting ? DELETE_MS : TYPE_MS);
+    }
+
+    return () => window.clearTimeout(timer);
+  }, [text, deleting, index, phrases, reduced]);
+
+  return reduced ? (phrases[index] ?? "") : text;
 }
 
-const miniTickets: MiniTicketProps[] = [
-  {
-    table: "Table 04",
-    elapsed: "0:42",
-    status: "Pending",
-    tone: "pending",
-    rail: "bg-pending",
-    lines: ["2× Masala Dosa", "1× Filter Coffee"],
-    action: "Cook",
-    actionClass: "bg-ember text-on-ember",
-  },
-  {
-    table: "Table 07",
-    elapsed: "4:15",
-    status: "Preparing",
-    tone: "preparing",
-    rail: "bg-preparing",
-    lines: ["1× Paneer Butter Masala", "2× Butter Naan"],
-    allergy: "NO PEANUTS",
-    action: "Ready",
-    actionClass: "bg-ink text-ink-inverse",
-  },
-  {
-    table: "Table 02",
-    elapsed: "6:03",
-    status: "Ready",
-    tone: "ready",
-    rail: "bg-ready",
-    lines: ["3× Veg Noodles"],
-    action: "Mark served",
-    actionClass: "border border-line-strong text-ink",
-  },
-];
+/** A scanned table QR is normally a URL (`…/table/k7x2p`), but the same
+    scanner may hand us a bare code; both are accepted, anything else is not. */
+function parseTableToken(raw: string): string | null {
+  const value = raw.trim();
+  if (!value) return null;
+  if (TABLE_TOKEN_RE.test(value)) return value;
 
-function TicketPipeline() {
+  try {
+    const url = new URL(value, "https://table.invalid");
+    const match = /\/table\/([^/]+)\/?$/.exec(url.pathname);
+    const token = match?.[1];
+    return token && TABLE_TOKEN_RE.test(token) ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+export default function HomePage() {
+  const router = useRouter();
+  const { toast } = useToast();
+
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [codeOpen, setCodeOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [codeError, setCodeError] = useState<string | undefined>();
+  const [entering, setEntering] = useState(false);
+
+  const shouted = useTypewriter(SHOUTS);
+  const { fieldId, describedBy, invalid } = useFieldControl({ error: codeError });
+
+  function openTable(token: string) {
+    setScannerOpen(false);
+    setCodeOpen(false);
+    setEntering(true);
+    router.push(`/table/${token}`);
+  }
+
+  function handleScanned(raw: string) {
+    const token = parseTableToken(raw);
+    if (!token) {
+      setScannerOpen(false);
+      toast({
+        title: "That is not a table code",
+        description: "Point the camera at the QR stand on your table, then try again.",
+        tone: "error",
+      });
+      return;
+    }
+    openTable(token);
+  }
+
+  function submitCode(event: FormEvent) {
+    event.preventDefault();
+    const token = code.trim().toLowerCase();
+
+    if (!TABLE_TOKEN_RE.test(token)) {
+      setCodeError("A table code is 5 letters or digits, like k7x2p.");
+      return;
+    }
+
+    setCodeError(undefined);
+    openTable(token);
+  }
+
   return (
-    <div className="relative w-full">
-      {/* A panel, not a phone: it fills the column, and the width it gains is
-          spent on padding rather than on stretching the tickets inside it. */}
-      <div className="relative overflow-hidden rounded-2xl border border-line-strong bg-surface shadow-lg [transform-style:preserve-3d]">
-        <div className="flex items-center gap-2.5 border-b border-line bg-surface-sunken/70 px-4 py-3 sm:px-5 lg:px-6">
-          <span className="flex gap-1.5" aria-hidden>
-            <span className="size-2.5 rounded-pill bg-line-strong" />
-            <span className="size-2.5 rounded-pill bg-line-strong" />
-            <span className="size-2.5 rounded-pill bg-line-strong" />
-          </span>
-          <span className="ml-2 text-[0.6875rem] font-semibold tracking-[0.14em] text-ink-subtle uppercase">
-            Kitchen display
-          </span>
-          <span className="ml-auto inline-flex items-center gap-1.5 rounded-pill bg-ready-surface px-3 py-1 text-[0.6875rem] font-semibold tracking-wide text-ready uppercase">
-            <span aria-hidden className="size-1.5 rounded-pill bg-ready" />
-            Live
-          </span>
-        </div>
+    <main id="main" className="relative isolate flex min-h-dvh flex-col bg-canvas">
+      <InstallPrompt />
 
-        <div className="flex flex-col gap-3 bg-canvas p-4 sm:gap-3.5 sm:p-5 lg:p-6">
-          {miniTickets.map((ticket) => (
-            <div
-              key={ticket.table}
-              className="relative overflow-hidden rounded-xl border border-line bg-paper p-4 shadow-sm sm:p-5"
+      {/* Ambient warmth. Two low-opacity fields, no hard shapes, so the page
+          reads as one lit room instead of a poster. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_70%_55%_at_50%_-10%,var(--color-ember-soft),transparent_70%)]"
+      />
+      <div
+        aria-hidden
+        className="hairline-grid pointer-events-none absolute inset-0 -z-10 opacity-40 [mask-image:radial-gradient(ellipse_60%_45%_at_50%_0%,black,transparent)]"
+      />
+
+      {/* ---- Top bar: brand + the two other rooms --------------------- */}
+      <header className="mx-auto flex w-full max-w-page items-center justify-between gap-4 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-2 sm:px-6">
+        <Link href="/" aria-label="AeyChhotu — home" className="shrink-0">
+          <Logo />
+        </Link>
+
+        <nav aria-label="More" className="flex items-center gap-1 text-sm">
+          <Link
+            href="/about"
+            className="rounded-md px-3 py-2 font-medium text-ink-muted transition-colors duration-[var(--duration-fast)] hover:text-ink"
+          >
+            Our story
+          </Link>
+          <Link
+            href="/presentation"
+            className="hidden rounded-md px-3 py-2 font-medium text-ink-muted transition-colors duration-[var(--duration-fast)] hover:text-ink sm:inline-flex"
+          >
+            Showcase
+          </Link>
+        </nav>
+      </header>
+
+      {/* ---- Hero ------------------------------------------------------ */}
+      <section className="mx-auto grid w-full max-w-page flex-1 items-center gap-10 px-4 py-8 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)] lg:gap-14 lg:py-12">
+        <div className="flex flex-col items-start">
+          <span className="inline-flex items-center gap-2 rounded-pill border border-ember/25 bg-ember-soft px-3 py-1.5 text-label text-ember uppercase">
+            <Sparkles className="size-3.5" aria-hidden />
+            No app · no login · one shared cart
+          </span>
+
+          {/* The hook. The first line is the brand shout; the second is the
+              rotating sentence a real table would actually say. */}
+          <h1 className="mt-6 font-display text-display font-semibold tracking-[-0.03em] text-ink text-balance">
+            Aey Chhotuuuu!
+          </h1>
+
+          <p
+            aria-live="polite"
+            className="mt-2 min-h-[2.2em] font-display text-[clamp(1.15rem,4.6vw,1.75rem)] leading-snug font-semibold text-ember"
+          >
+            {shouted}
+            <span
+              aria-hidden
+              className="ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[0.15em] animate-pulse-soft bg-ember align-middle"
+            />
+          </p>
+
+          <p className="mt-6 max-w-xl text-lead text-ink-muted">
+            Ab Chhotu ko aawaz lagane ki zaroorat nahi. Table ka QR scan karo, pura table ek cart
+            mein order karo!
+          </p>
+
+          {/* ---- Primary action ---- */}
+          <div className="mt-8 flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={() => setScannerOpen(true)}
+              className={cn(
+                "group inline-flex h-14 w-full items-center justify-center gap-2.5 rounded-lg bg-ember px-7 text-base font-semibold text-on-ember",
+                "shadow-[0_0_0_0_rgba(158,62,20,0.45)] transition-[background-color,box-shadow,transform] duration-[var(--duration-fast)]",
+                "hover:bg-ember-strong hover:shadow-[0_0_34px_6px_rgba(158,62,20,0.28)] active:translate-y-px sm:w-auto",
+                "animate-pulse-soft",
+              )}
             >
-              <span aria-hidden className={`absolute inset-y-0 left-0 w-1.5 ${ticket.rail}`} />
+              <QrCode className="size-5" aria-hidden />
+              Scan Table QR Code
+            </button>
 
-              {/* The action now rides the title row instead of owning a line
-                  of its own, which is where most of the mock's lost height
-                  comes from — the tickets keep every word they had. */}
-              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 pl-2">
-                <span className="font-display text-base font-semibold text-ink">{ticket.table}</span>
-                <span className="flex flex-wrap items-center gap-2.5">
-                  <span className="font-mono text-xs text-ink-subtle">{ticket.elapsed}</span>
-                  <Badge tone={ticket.tone}>{ticket.status}</Badge>
-                  <span
-                    className={`inline-flex h-9 items-center justify-center rounded-lg px-3.5 text-xs font-semibold ${ticket.actionClass}`}
-                  >
-                    {ticket.action}
-                  </span>
-                </span>
-              </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              className="h-14 w-full sm:w-auto"
+              onClick={() => setCodeOpen(true)}
+              rightIcon={<ArrowRight className="size-4" aria-hidden />}
+            >
+              Enter Table Code Manually
+            </Button>
+          </div>
 
-              <ul className="mt-2.5 flex flex-col gap-1 pl-2">
-                {ticket.lines.map((line) => (
-                  <li key={line} className="text-sm leading-snug text-ink-muted">
-                    {line}
-                  </li>
-                ))}
-              </ul>
-
-              {ticket.allergy ? (
-                <p className="mt-3 ml-2 flex w-fit items-center gap-2 rounded-lg border border-alert/40 bg-alert-surface px-3 py-1.5 text-xs font-bold tracking-wide text-alert uppercase">
-                  <ShieldAlert className="size-3.5 shrink-0" aria-hidden />
-                  {ticket.allergy}
-                </p>
-              ) : null}
-            </div>
-          ))}
+          {/* ---- Three promises, three glyphs --------------------------- */}
+          <ul className="mt-9 grid w-full gap-3 sm:grid-cols-3">
+            {[
+              { icon: ShoppingBasket, label: "One shared cart", copy: "The whole table, not eight tickets." },
+              { icon: ShieldAlert, label: "Allergy safe", copy: "Medical notes reach the kitchen in red." },
+              { icon: BellRing, label: "Live tracker", copy: "Cooking, ready, served — as it happens." },
+            ].map((item) => (
+              <li key={item.label} className="rounded-lg border border-line bg-surface/80 p-3">
+                <item.icon className="size-4 text-ember" aria-hidden />
+                <p className="mt-2 text-sm font-semibold text-ink">{item.label}</p>
+                <p className="mt-0.5 text-xs leading-snug text-ink-muted">{item.copy}</p>
+              </li>
+            ))}
+          </ul>
         </div>
-      </div>
-    </div>
+
+        <div className="order-first w-full lg:order-none">
+          <HomeQrAnimation />
+        </div>
+      </section>
+
+      {/* ---- Footer navigation ---------------------------------------- */}
+      <footer className="border-t border-line bg-surface/60">
+        <div className="mx-auto flex w-full max-w-page flex-col gap-3 px-4 py-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          <p className="text-xs text-ink-subtle">
+            Scan, order together, watch it cook. AeyChhotu! — one table, one order.
+          </p>
+
+          <nav aria-label="Footer" className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+            <Link
+              href="/about"
+              className="group inline-flex items-center gap-1.5 font-medium text-ink-muted transition-colors duration-[var(--duration-fast)] hover:text-ember"
+            >
+              Customer story
+              <ArrowRight
+                aria-hidden
+                className="size-3.5 transition-transform duration-[var(--duration-fast)] group-hover:translate-x-0.5"
+              />
+            </Link>
+            <Link
+              href="/presentation"
+              className="group inline-flex items-center gap-1.5 font-medium text-ink-muted transition-colors duration-[var(--duration-fast)] hover:text-ember"
+            >
+              Hackathon showcase
+              <ArrowRight
+                aria-hidden
+                className="size-3.5 transition-transform duration-[var(--duration-fast)] group-hover:translate-x-0.5"
+              />
+            </Link>
+          </nav>
+        </div>
+      </footer>
+
+      {/* ---- The camera, full viewport -------------------------------- */}
+      <InAppQrScanner
+        open={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onDecode={handleScanned}
+      />
+
+      {/* ---- Manual code ---------------------------------------------- */}
+      <Modal
+        open={codeOpen}
+        onClose={() => setCodeOpen(false)}
+        title="Enter your table code"
+        description="It is printed under the QR stand on your table — five letters or digits."
+        size="sm"
+        footer={
+          <>
+            <Button variant="soft" size="lg" onClick={() => setCodeOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="ember"
+              size="lg"
+              type="submit"
+              form="table-code-form"
+              loading={entering}
+            >
+              Open table
+            </Button>
+          </>
+        }
+      >
+        <form id="table-code-form" onSubmit={submitCode} noValidate className="flex flex-col gap-5">
+          <FieldShell id={fieldId} label="Table code" hint="Example: k7x2p" error={codeError}>
+            <input
+              id={fieldId}
+              value={code}
+              onChange={(event) => {
+                setCodeError(undefined);
+                setCode(event.target.value.replace(/\s/g, "").toLowerCase().slice(0, 16));
+              }}
+              aria-describedby={describedBy}
+              aria-invalid={invalid || undefined}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              inputMode="text"
+              placeholder="k7x2p"
+              className={cn(
+                controlStyles({ invalid }),
+                "h-16 text-center font-display text-3xl font-semibold tracking-[0.28em] text-ink uppercase",
+              )}
+            />
+          </FieldShell>
+
+          <p className="text-xs leading-relaxed text-ink-subtle">
+            The code is the table&apos;s identity. Ask a tablemate to show their Table Pass if you
+            cannot read the stand.
+          </p>
+        </form>
+      </Modal>
+    </main>
   );
 }

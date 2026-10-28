@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 /* Unit tests for the diner's presentation layer — the menu atlas that turns
    the API's flat category strings into cuisines, and the dish photo resolver.
@@ -12,7 +15,6 @@ import { seedMenu } from "../lib/api/seed.ts";
 import { buildMenuAtlas, searchMenu } from "../lib/diner/menu-atlas.ts";
 import {
   DISH_PHOTOS,
-  FOOD_PHOTO_HOST,
   dishFallbackWash,
   resolveDishPhoto,
 } from "../lib/diner/food-photos.ts";
@@ -173,10 +175,16 @@ describe("resolveDishPhoto", () => {
     );
   });
 
-  it("only ever points at the host next.config allows", () => {
+  it("only ever points at a photo shipped in public/food", () => {
     for (const url of Object.values(DISH_PHOTOS)) {
-      assert.equal(new URL(url).hostname, FOOD_PHOTO_HOST);
-      assert.match(url, /^https:\/\//);
+      assert.match(url, /^\/food\/[a-z]+\.jpg$/);
+    }
+  });
+
+  it("every referenced photo file actually exists in public/food", () => {
+    const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "public", "food");
+    for (const url of new Set(Object.values(DISH_PHOTOS))) {
+      assert.ok(existsSync(join(dir, basename(url))), `missing photo file for ${url}`);
     }
   });
 });

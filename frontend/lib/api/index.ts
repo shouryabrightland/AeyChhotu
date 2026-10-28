@@ -391,32 +391,6 @@ export async function fetchFloorSummaries(): Promise<ServiceResult<FloorTableSum
   return { ok: true, data: getFloorSummaries() };
 }
 
-export interface KdsLoginResult {
-  ok: boolean;
-  message?: string;
-}
-
-export async function checkKdsLogin(pin: string): Promise<KdsLoginResult> {
-  const response = await fetch("/api/v1/auth/kds-login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pin }),
-  });
-
-  const payload = (await response.json().catch(() => null)) as
-    | { success?: boolean; error?: { message?: string }; message?: string }
-    | null;
-
-  if (response.ok && payload?.success === true) return { ok: true };
-
-  // Contract envelope first (docs/7 §1.1); the bare `message` shape is kept
-  // so an older deployment of this route still renders a sensible error.
-  return {
-    ok: false,
-    message: payload?.error?.message ?? payload?.message ?? "Incorrect PIN.",
-  };
-}
-
 export function getDeviceIdentity() {
   return { device_id: getDeviceId() };
 }

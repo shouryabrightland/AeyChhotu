@@ -29,7 +29,7 @@ import { usePresence } from "@/hooks/use-presence";
 import { useLiveTable } from "@/hooks/use-live-table";
 import { clearStoredSession } from "@/lib/api/table-session";
 import type { Order, OrderStatus } from "@/lib/api/types";
-import { ACTIVITY_LINES, FOODIE_JOKES, estimateArrival } from "@/lib/diner/tracker";
+import { ACTIVITY_LINES, estimateArrival } from "@/lib/diner/tracker";
 import { formatElapsed, formatIstTime } from "@/lib/format";
 import { transitionBase } from "@/lib/motion";
 import { cn } from "@/lib/utils";
@@ -244,8 +244,7 @@ export function LiveTracker({ tableToken }: LiveTrackerProps) {
         {cart.length > 0 && order.status !== "served" ? (
           <p className="flex items-center gap-2 text-xs text-ink-subtle">
             <ShoppingBasket className="size-3.5 shrink-0" aria-hidden />
-            {totals.itemCount} {totals.itemCount === 1 ? "item" : "items"} staged for the next
-            round — a second fire unlocks once this one leaves the table.
+            {totals.itemCount} {totals.itemCount === 1 ? "item" : "items"} staged for next round.
           </p>
         ) : null}
 
@@ -259,8 +258,6 @@ export function LiveTracker({ tableToken }: LiveTrackerProps) {
             Start a new round
           </Link>
         ) : null}
-
-        <JokeLine />
       </Container>
     </main>
   );
@@ -398,11 +395,7 @@ function ArrivalEstimateModule({
       )}
 
       <span className="text-xs text-ink-subtle">
-        {arriving
-          ? "Waiting for a runner."
-          : `Based on ${estimate.tickets} active kitchen ${
-              estimate.tickets === 1 ? "ticket" : "tickets"
-            }`}
+        {arriving ? "Waiting for a runner." : "Est. arrival"}
       </span>
     </div>
   );
@@ -500,38 +493,6 @@ function ActivityLine({ status }: { status: OrderStatus }) {
         </motion.span>
       </AnimatePresence>
     </span>
-  );
-}
-
-/* The easter egg: understated, italic, and never part of the status story. */
-function JokeLine() {
-  const [index, setIndex] = useState(0);
-  const reduceMotion = useReducedMotion();
-
-  useEffect(() => {
-    const timer = window.setInterval(
-      () => setIndex((current) => (current + 1) % FOODIE_JOKES.length),
-      7000,
-    );
-    return () => window.clearInterval(timer);
-  }, []);
-
-  return (
-    <div className="flex w-full max-w-xl flex-col items-center gap-2 text-center">
-      <span className="text-label text-ink-subtle uppercase">Kitchen wisdom</span>
-      <AnimatePresence mode="wait" initial={false}>
-        <motion.p
-          key={index}
-          initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
-          transition={transitionBase}
-          className="text-sm text-ink-subtle italic"
-        >
-          {FOODIE_JOKES[index]}
-        </motion.p>
-      </AnimatePresence>
-    </div>
   );
 }
 

@@ -33,7 +33,10 @@ process.env.KDS_TOKEN_SECRET ??= "test-only-secret-not-used-anywhere-else";
 const { AppError } = await import("../src/errors/app-error.js");
 const sessions = await import("../src/services/sessions.service.js");
 const { pruneTicket, listTickets } = await import("../src/services/kds.service.js");
-const { listFloorTables } = await import("../src/services/floor.service.js");
+const { listFloorTables, settleTableBill, clearFloorTable } = await import(
+  "../src/services/floor.service.js"
+);
+const { clearTableAsAdmin } = await import("../src/services/admin.service.js");
 const { pool } = await import("../src/db/pool.js");
 
 const PIN_RE = /^\d{2}$/;
@@ -80,14 +83,28 @@ async function readRow() {
     session_secret: string | null;
     failed_pin_attempts: number;
     session_started_at: Date | null;
+    bill_status: string;
+    bill_paid_at: Date | null;
+    clear_requested_at: Date | null;
   }>(
-    `SELECT status, session_pin, session_secret, failed_pin_attempts, session_started_at
+    `SELECT status, session_pin, session_secret, failed_pin_attempts, session_started_at,
+            bill_status, bill_paid_at, clear_requested_at
        FROM restaurant_tables WHERE code = $1`,
     [TEST_CODE],
   );
   const row = res.rows[0];
   assert.ok(row, "the test table should exist");
   return row;
+}
+
+async function testTableId(): Promise<string> {
+  const res = await pool.query<{ id: string }>(
+    "SELECT id FROM restaurant_tables WHERE code = $1",
+    [TEST_CODE],
+  );
+  const id = res.rows[0]?.id;
+  assert.ok(id, "the test table should exist");
+  return id;
 }
 
 async function resetTable() {
@@ -97,9 +114,21 @@ async function resetTable() {
     [TEST_CODE],
   );
   await pool.query(
+    `DELETE FROM table_device_presence
+      WHERE table_id = (SELECT id FROM restaurant_tables WHERE code = $1)`,
+    [TEST_CODE],
+  );
+  await pool.query(
+    `DELETE FROM cart_items
+      WHERE table_id = (SELECT id FROM restaurant_tables WHERE code = $1)`,
+    [TEST_CODE],
+  );
+  await pool.query(
     `UPDATE restaurant_tables
         SET status = 'empty', session_pin = NULL, session_secret = NULL,
-            failed_pin_attempts = 0, session_started_at = NULL
+            failed_pin_attempts = 0, session_started_at = NULL,
+            bill_status = 'unrequested', bill_requested_at = NULL, bill_paid_at = NULL,
+            clear_requested_at = NULL
       WHERE code = $1`,
     [TEST_CODE],
   );
@@ -313,16 +342,10 @@ describe("table session lifecycle", { skip: hasDatabase ? false : "DATABASE_URL 
     );
   });
 
-  it("wipes PIN, pass and counter when the table is settled", async () => {
+  it("keeps the session alive when the last ticket is served before payment", async () => {
     await resetTable();
     const granted = await claim();
-
-    const tableIdRes = await pool.query<{ id: string }>(
-      "SELECT id FROM restaurant_tables WHERE code = $1",
-      [TEST_CODE],
-    );
-    const tableId = tableIdRes.rows[0]?.id;
-    assert.ok(tableId);
+    const tableId = await testTableId();
 
     const orderRes = await pool.query<{ id: string }>(
       "INSERT INTO orders (table_id, status) VALUES ($1, 'ready') RETURNING id",
@@ -331,8 +354,81 @@ describe("table session lifecycle", { skip: hasDatabase ? false : "DATABASE_URL 
     const orderId = orderRes.rows[0]?.id;
     assert.ok(orderId);
 
+    // Serving the ticket must NOT clear the table: the guests are still
+    // sitting there and the bill is still unpaid.
     const pruned = await pruneTicket(orderId);
-    assert.equal(pruned.table_cleared, true);
+    assert.equal(pruned.table_cleared, false);
+
+    const row = await readRow();
+    assert.equal(row.status, "active");
+    assert.equal(row.session_pin, granted.session_pin);
+    assert.equal(row.session_secret, granted.session_secret);
+    assert.equal(row.bill_status, "unrequested");
+
+    const live = await sessions.reconnectSession({
+      table_token: TEST_CODE,
+      secret: granted.session_secret,
+    });
+    assert.equal(live.status, "active");
+  });
+
+  it("does not release a paid table while an order is still active", async () => {
+    await resetTable();
+    const granted = await claim();
+    const tableId = await testTableId();
+
+    await pool.query("INSERT INTO orders (table_id, status) VALUES ($1, 'preparing')", [tableId]);
+
+    const settled = await settleTableBill(tableId);
+    assert.equal(settled.bill_status, "paid");
+    assert.equal(settled.released, false, "a live ticket must block the release");
+
+    const row = await readRow();
+    assert.equal(row.status, "active");
+    assert.equal(row.session_pin, granted.session_pin);
+    assert.equal(row.session_secret, granted.session_secret);
+    assert.equal(row.bill_status, "paid");
+    assert.ok(row.bill_paid_at instanceof Date, "bill_paid_at must be stamped");
+
+    // A later sweep sees the same live ticket and still refuses.
+    const swept = await sessions.checkAndAutoReleaseTable(tableId);
+    assert.equal(swept.released, false);
+  });
+
+  it("does not release a paid, empty table while a device heartbeat is fresh", async () => {
+    await resetTable();
+    const granted = await claim();
+    const tableId = await testTableId();
+
+    await sessions.recordHeartbeat(TEST_CODE, "device-alpha");
+
+    const settled = await settleTableBill(tableId);
+    assert.equal(settled.bill_status, "paid");
+    assert.equal(settled.released, false, "a connected device must block the release");
+
+    const row = await readRow();
+    assert.equal(row.status, "active");
+    assert.equal(row.session_pin, granted.session_pin);
+    assert.equal(row.session_secret, granted.session_secret);
+
+    const swept = await sessions.checkAndAutoReleaseTable(tableId);
+    assert.equal(swept.released, false);
+  });
+
+  it("auto-releases a paid table when orders are 0 and presence drops to 0", async () => {
+    await resetTable();
+    const granted = await claim();
+    const tableId = await testTableId();
+
+    await sessions.recordHeartbeat(TEST_CODE, "device-alpha");
+    const settled = await settleTableBill(tableId);
+    assert.equal(settled.bill_status, "paid");
+    assert.equal(settled.released, false);
+
+    // The last device closes its tab: removing the heartbeat runs the same
+    // three-condition check and this time all three agree.
+    const dropped = await sessions.removeHeartbeat(TEST_CODE, "device-alpha");
+    assert.equal(dropped.released, true);
 
     const row = await readRow();
     assert.equal(row.status, "empty");
@@ -340,6 +436,8 @@ describe("table session lifecycle", { skip: hasDatabase ? false : "DATABASE_URL 
     assert.equal(row.session_secret, null);
     assert.equal(row.failed_pin_attempts, 0);
     assert.equal(row.session_started_at, null);
+    assert.equal(row.bill_status, "unrequested");
+    assert.equal(row.bill_paid_at, null);
 
     // The old device's stored pass is now worthless — and says so plainly.
     await expectAppError(
@@ -350,6 +448,68 @@ describe("table session lifecycle", { skip: hasDatabase ? false : "DATABASE_URL 
     // The next party starts from a genuinely fresh pair.
     const fresh = await claim();
     assert.notEqual(fresh.session_secret, granted.session_secret);
+  });
+
+  it("lets staff clear a flagged table that has nothing owed", async () => {
+    await resetTable();
+    await claim();
+    const tableId = await testTableId();
+
+    const result = await clearFloorTable(tableId);
+    assert.equal(result.cleared, true);
+
+    const row = await readRow();
+    assert.equal(row.status, "empty");
+    assert.equal(row.session_pin, null);
+    assert.equal(row.session_secret, null);
+    assert.equal(row.clear_requested_at, null);
+  });
+
+  it("does not let a previous party's ticket block the next clear", async () => {
+    await resetTable();
+    const tableId = await testTableId();
+
+    // Orders are history and are never deleted; a cleared table therefore
+    // keeps the last party's served ticket forever. It must not read as money
+    // owed by the brand-new session.
+    await pool.query(
+      `INSERT INTO orders (table_id, status, total, created_at)
+            VALUES ($1, 'served', 250, now() - interval '1 hour')`,
+      [tableId],
+    );
+
+    await claim(); // fresh session, no ticket of its own yet
+    const result = await clearFloorTable(tableId);
+    assert.equal(result.cleared, true);
+  });
+
+  it("refuses a staff clear on an unpaid bill and raises the admin alert", async () => {
+    await resetTable();
+    await claim();
+    const tableId = await testTableId();
+
+    // A ticket from THIS session exists and the bill was never settled: money
+    // is owed. It is deliberately `served`, so no open ticket masks the rule.
+    await pool.query(
+      "INSERT INTO orders (table_id, status, total) VALUES ($1, 'served', 250)",
+      [tableId],
+    );
+
+    await expectAppError(clearFloorTable(tableId), "BILL_UNPAID");
+
+    const refused = await readRow();
+    assert.equal(refused.status, "active");
+    assert.equal(refused.session_pin !== null, true);
+    assert.ok(refused.clear_requested_at instanceof Date, "the admin alert must be stamped");
+
+    // The manager override is the only clear that succeeds here.
+    const cleared = await clearTableAsAdmin(tableId);
+    assert.equal(cleared.cleared, true);
+
+    const row = await readRow();
+    assert.equal(row.status, "empty");
+    assert.equal(row.session_pin, null);
+    assert.equal(row.clear_requested_at, null);
   });
 
   it("never leaks either credential through the staff read models", async () => {

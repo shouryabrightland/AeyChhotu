@@ -7,8 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Container } from "@/components/ui/container";
 import { FieldShell, controlStyles, useFieldControl } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
-import { checkKdsLogin } from "@/lib/api";
-import { ApiError, loginKDS, shouldUseDemoFallback } from "@/lib/api-client";
+import { ApiError, loginKDS } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
 const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
@@ -42,22 +41,15 @@ export function KitchenPinWall({ onSuccess, surface = "kitchen" }: KitchenPinWal
     setBusy(true);
     setError(null);
 
-    // Live first: E2 issues the shift JWT and stores it for every
-    // authenticated KDS call (and the 401 redirect guard).
+    // E2 issues the shift JWT and stores it for every authenticated KDS call
+    // (and the 401 redirect guard). There is no offline substitute: an
+    // unauthenticated board is not a safer board, it is a fictional one.
     try {
       await loginKDS(value);
       onSuccess();
       return;
     } catch (err) {
-      if (shouldUseDemoFallback(err)) {
-        // API unreachable / not configured — fall back to the demo guard.
-        const result = await checkKdsLogin(value);
-        if (result.ok) {
-          onSuccess();
-          return;
-        }
-        setError(result.message ?? "That PIN does not match.");
-      } else if (err instanceof ApiError) {
+      if (err instanceof ApiError) {
         setError(err.message || "That PIN does not match.");
       } else {
         setError("Could not reach the kitchen service. Try again.");

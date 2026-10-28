@@ -114,6 +114,51 @@ export function subscribeTableCart(
   };
 }
 
+// ---- Catalog & floor updates (admin console / floor board) ------------
+
+/** menu_items INSERT/UPDATE/DELETE — 86s, edits and new dishes. */
+export function subscribeMenuUpdates(onUpdate: () => void): Detach {
+  const client = getSupabase();
+  if (!client) return NOOP_DETACH;
+
+  const channel = client
+    .channel("menu_updates")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "menu_items" },
+      () => {
+        onUpdate();
+      },
+    )
+    .subscribe();
+
+  return () => {
+    void client.removeChannel(channel);
+  };
+}
+
+/** restaurant_tables INSERT/UPDATE/DELETE — bill requests, settles and new
+    tables. REPLICA IDENTITY FULL (sql/008) keeps DELETE payloads useful. */
+export function subscribeTableUpdates(onUpdate: () => void): Detach {
+  const client = getSupabase();
+  if (!client) return NOOP_DETACH;
+
+  const channel = client
+    .channel("table_updates")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "restaurant_tables" },
+      () => {
+        onUpdate();
+      },
+    )
+    .subscribe();
+
+  return () => {
+    void client.removeChannel(channel);
+  };
+}
+
 // ---- B. KDS order intake ----------------------------------------------
 
 export interface KdsIntakeEvent {

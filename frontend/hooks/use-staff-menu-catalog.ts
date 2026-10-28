@@ -4,17 +4,19 @@
    and the floor view.
 
    THE PROBLEM: E14 (86 an item) needs a `menu_item_id`, which means the drawer
-   must render the catalog. The only catalog endpoint is E3, and E3 requires a
-   valid `table_token` — the trigger for the diner's QR session. Staff screens
-   have a bearer token, not a table token, so historically they rendered the
-   drawer from the offline demo store and the live menu could not be 86'd from
-   the UI at all.
+   must render the catalog. The only diner catalog endpoint is E3, and E3
+   requires a valid `table_token` — the trigger for the diner's QR session.
+   Staff screens have a bearer token, not a table token.
 
    THE FIX, with no contract change: discover a real table code from E17 (the
    staff floor list — every staff screen may call it) and ask E3 with that.
    The catalog itself is global, so any valid table works. Callers that already
    fetched table codes (the floor view) pass one in via `tokenHint` and skip
-   the extra request entirely. */
+   the extra request entirely.
+
+   There is no demo fallback: the drawer must list the dishes the kitchen
+   actually has, or "86" would toggle ids that do not exist. A failure leaves
+   the panel empty and the next open retries. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -22,21 +24,17 @@ import {
   fetchAllPages,
   getFloorTables as apiGetFloorTables,
   getMenu as apiGetMenu,
-  shouldUseDemoFallback,
   toMenuItem,
   toggleItemAvailability,
 } from "@/lib/api-client";
 import type { MenuItem } from "@/lib/api/types";
-import * as mock from "@/lib/api";
-import { getSnapshot } from "@/lib/api/store";
 
 const LIST_LIMIT = 100;
 
 export interface StaffMenuCatalog {
   menu: MenuItem[];
-  /** Flips true once the first load settles (live, demo, or empty). */
+  /** Flips true once the first load settles (live or empty). */
   ready: boolean;
-  source: "live" | "demo";
   refresh: () => Promise<void>;
   setAvailability: (
     menuItemId: string,
@@ -47,7 +45,6 @@ export interface StaffMenuCatalog {
 export function useStaffMenuCatalog(tokenHint?: string | null): StaffMenuCatalog {
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [ready, setReady] = useState(false);
-  const [source, setSource] = useState<"live" | "demo">("live");
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -57,59 +54,48 @@ export function useStaffMenuCatalog(tokenHint?: string | null): StaffMenuCatalog
     };
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<MenuItem[]> => {
     let token = tokenHint ?? null;
 
     if (!token) {
+      // `noUncheckedIndexedAccess`: the first row may genuinely be absent.
       const rows = await fetchAllPages((page) => apiGetFloorTables({ page, limit: LIST_LIMIT }));
-      token = rows[0]?.code ?? null;
+      token = rows.at(0)?.code ?? null;
     }
 
     // No tables at all ⇒ no token to ask with, and nothing to 86 anyway.
-    if (!token) return { catalog: [] as MenuItem[], source: "live" as const };
+    if (!token) return [];
 
     const rows = await fetchAllPages((page) => apiGetMenu(token, { page, limit: LIST_LIMIT }));
-    return { catalog: rows.map(toMenuItem), source: "live" as const };
+    return rows.map(toMenuItem);
   }, [tokenHint]);
 
   const refresh = useCallback(async () => {
     try {
-      const { catalog, source: nextSource } = await load();
-      if (!mountedRef.current) return;
-      setSource(nextSource);
-      setMenu(catalog);
-    } catch (err) {
-      if (shouldUseDemoFallback(err)) {
-        if (!mountedRef.current) return;
-        setSource("demo");
-        setMenu(getSnapshot().menu);
-      }
-      /* Otherwise stay quiet: the catalog is a secondary panel, and blanking
-         the board because the drawer's list failed would be worse. The toggle
-         itself reports its own failure through the toast layer. */
+      const catalog = await load();
+      if (mountedRef.current) setMenu(catalog);
+    } catch {
+      /* Stay quiet: the catalog is a secondary panel, and blanking the board
+         because the drawer's list failed would be worse. The toggle itself
+         reports its own failure through the toast layer. */
     } finally {
       if (mountedRef.current) setReady(true);
     }
   }, [load]);
 
   /* Loaded via an async IIFE rather than by calling refresh() directly: the
-     effect body must not setState synchronously (react-hooks/
-     set-state-in-effect), and every setState here happens after an await. */
+     effect body must not setState synchronously (react-hooks/set-state-in-
+     effect), and every setState here happens after an await. */
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       try {
-        const { catalog, source: nextSource } = await load();
+        const catalog = await load();
         if (cancelled) return;
-        setSource(nextSource);
         setMenu(catalog);
-      } catch (err) {
-        if (cancelled) return;
-        if (shouldUseDemoFallback(err)) {
-          setSource("demo");
-          setMenu(getSnapshot().menu);
-        }
+      } catch {
+        /* see refresh() */
       } finally {
         if (!cancelled) setReady(true);
       }
@@ -132,14 +118,6 @@ export function useStaffMenuCatalog(tokenHint?: string | null): StaffMenuCatalog
       }
       return { ok: true };
     } catch (err) {
-      if (shouldUseDemoFallback(err)) {
-        const result = await mock.setMenuItemAvailability(menuItemId, isAvailable);
-        if (mountedRef.current) {
-          setSource("demo");
-          setMenu(getSnapshot().menu);
-        }
-        return result.ok ? { ok: true } : { ok: false, message: result.message };
-      }
       return {
         ok: false,
         message: err instanceof ApiError ? err.message : "Could not update availability.",
@@ -147,5 +125,5 @@ export function useStaffMenuCatalog(tokenHint?: string | null): StaffMenuCatalog
     }
   }, []);
 
-  return { menu, ready, source, refresh, setAvailability };
+  return { menu, ready, refresh, setAvailability };
 }

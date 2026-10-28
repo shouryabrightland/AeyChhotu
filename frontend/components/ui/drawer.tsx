@@ -53,7 +53,11 @@ export function Drawer({
         onClose={onClose}
       />
       {children ? (
-        <div className="flex-1 overflow-y-auto px-6 py-5">{children}</div>
+        /* Same rigid column as Modal: without min-h-0 the body refused to
+           shrink and the footer fell off the bottom of the sheet on a phone. */
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5">
+          {children}
+        </div>
       ) : null}
       {footer ? <OverlayFooter>{footer}</OverlayFooter> : null}
     </Overlay>

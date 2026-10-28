@@ -3,20 +3,22 @@ export interface NavLink {
   href: string;
 }
 
-/** Section anchors on the landing page. */
+/** Section anchors on the customer story (/about). The kitchen, floor and
+    admin consoles are operator surfaces: a diner-facing page never links to
+    them, and they are not in this list. */
 export const marketingNav: NavLink[] = [
-  { label: "The problem", href: "#problem" },
+  { label: "Why we built it", href: "#why" },
   { label: "How it works", href: "#how-it-works" },
-  { label: "Innovations", href: "#innovations" },
-  { label: "MVP features", href: "#features" },
-  { label: "Who it's for", href: "#personas" },
+  { label: "Food safety", href: "#safety" },
+  { label: "Your table", href: "#your-table" },
 ];
 
-/** The three documented surfaces. `k7x2p` is the example QR token from the spec. */
-export const productLinks: NavLink[] = [
-  { label: "Diner menu & cart", href: "/table/k7x2p" },
-  { label: "Kitchen board", href: "/kitchen" },
-  { label: "Floor view", href: "/floor" },
+/** The customer-facing rooms of the product. */
+export const customerLinks: NavLink[] = [
+  { label: "Our story", href: "/about" },
+  { label: "Hackathon showcase", href: "/presentation" },
+  { label: "Scan a table", href: "/" },
 ];
 
+/** The example token printed in the docs and on the demo QR stand. */
 export const demoTableToken = "k7x2p";

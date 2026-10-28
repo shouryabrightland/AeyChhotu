@@ -14,7 +14,6 @@ import {
   joinTableWithPass,
   joinTableWithPin,
   reconnectTableSession,
-  shouldUseDemoFallback,
   startTableSession,
   type TableSessionGrant,
 } from "@/lib/api-client";
@@ -101,11 +100,6 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
         } catch (err) {
           if (cancelled) return;
 
-          if (shouldUseDemoFallback(err)) {
-            setPhase("ready");
-            return;
-          }
-
           // A settled table (or a rotated secret) simply means "not in": drop
           // the dead credentials and let the scan below decide what is next.
           if (err instanceof ApiError && err.error === "SESSION_ENDED") {
@@ -141,11 +135,6 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
       } catch (err) {
         if (cancelled) return;
 
-        if (shouldUseDemoFallback(err)) {
-          setPhase("ready");
-          return;
-        }
-
         if (err instanceof ApiError) {
           if (err.error === "TABLE_NOT_FOUND" || err.error === "SESSION_ENDED") {
             setPhase("ended");
@@ -168,11 +157,6 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
 
   /** Turns a join failure into the next gate state (server owns the count). */
   function applyJoinFailure(err: unknown) {
-    if (shouldUseDemoFallback(err)) {
-      setPhase("ready");
-      return;
-    }
-
     if (!(err instanceof ApiError)) {
       setNotice("We could not reach the table. Check your connection and try again.");
       return;

@@ -118,7 +118,9 @@ BEGIN
     FROM information_schema.columns
    WHERE table_schema = 'public'
      AND table_name   = 'restaurant_tables'
-     AND column_name NOT IN ('session_pin', 'session_secret');
+     -- `clear_requested_at` (009) is staff/admin coordination state; it is
+     -- deliberately excluded so a re-run cannot widen browser access to it.
+     AND column_name NOT IN ('session_pin', 'session_secret', 'clear_requested_at');
 
   IF v_cols IS NULL THEN
     RAISE EXCEPTION 'restaurant_tables has no readable columns — refusing to revoke SELECT';

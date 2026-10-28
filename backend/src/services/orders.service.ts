@@ -31,6 +31,11 @@ export interface FiredOrder {
    in ONE transaction. Business outcomes come back as jsonb codes so that
    the INVENTORY_FAILURE cart purge still commits. */
 export async function fireOrder(tableToken: string): Promise<FiredOrder> {
+  /* The RPC was written before archived tables existed (006). Resolving the
+     token through requireTable FIRST is the one place that owns the
+     `deleted_at IS NULL` rule, so an archived table's URL can never fire. */
+  await requireTable(tableToken);
+
   const res = await pool.query<{ result: FireResult }>("SELECT fire_order($1) AS result", [
     tableToken,
   ]);
@@ -126,7 +131,7 @@ export async function listOrders(params: {
   limit: number;
 }): Promise<{ data: OrderListItem[]; meta: PageMeta }> {
   const tableRes = await pool.query<{ id: string }>(
-    "SELECT id FROM restaurant_tables WHERE code = $1",
+    "SELECT id FROM restaurant_tables WHERE code = $1 AND deleted_at IS NULL",
     [params.table_token],
   );
   const table = tableRes.rows[0];

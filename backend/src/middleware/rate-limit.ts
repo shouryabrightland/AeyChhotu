@@ -4,7 +4,7 @@ import { AppError } from "../errors/app-error.js";
 import { logEvent } from "../observability/logger.js";
 
 /* Rate limiting per docs/7 §1.8. Two tiers:
-     loginLimiter  — kds-login only. The PIN is a 4-6 digit code guarded by a
+     loginLimiter  — both login doors (kds-login and admin-login). A PIN is a
                      single shared secret, so brute force is the realistic
                      attack; this limiter is deliberately harsh (10 tries / 10
                      min) and counts ONLY failures, so a busy kitchen tapping
@@ -19,7 +19,10 @@ const HANDLER = (req: Request, res: Response, next: NextFunction, options: { sta
   const retry = res.getHeader("Retry-After");
   logEvent("warn", "rate_limited", {
     request_id: (req as Request & { requestLog?: { requestId: string } }).requestLog?.requestId,
-    scope: req.originalUrl.startsWith("/api/v1/auth/kds-login") ? "login" : "api",
+    scope: req.originalUrl.startsWith("/api/v1/auth/kds-login") ||
+      req.originalUrl.startsWith("/api/v1/auth/admin-login")
+      ? "login"
+      : "api",
     path: req.originalUrl.split("?")[0],
     ip: req.ip,
   });

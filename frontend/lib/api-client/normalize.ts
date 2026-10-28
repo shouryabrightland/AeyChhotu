@@ -1,7 +1,10 @@
 /* Normalizers — map contract (docs/7 v2) payloads onto the UI domain types
    in lib/api/types.ts so screen components keep their existing markup and
-   Tailwind classes untouched. Also the shared offline detector used by the
-   live-with-mock-fallback data hooks. */
+   Tailwind classes untouched.
+
+   There is deliberately NO demo-fallback predicate here any more. The app is
+   a real product: an unreachable backend is an error state a guest can retry,
+   not an invitation to render seeded dishes as if they were the menu. */
 
 import { ApiError } from "./errors";
 import type {
@@ -23,56 +26,11 @@ import type {
 } from "../api/types";
 import type { MenuItem as ApiMenuItem } from "./types";
 
-/** True when the request never reached the backend (down / timeout / unconfigured). */
+/** True when the request never reached the backend (down / timeout / unconfigured).
+    Used for COPY only ("the serving line is starting up") — never to decide
+    whether stale demo data may stand in for the live API. */
 export function isOfflineError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 0;
-}
-
-/**
- * May the offline demo store stand in for the live API?
- *
- * Default: ON in development, OFF in a production build. A production
- * deployment must never quietly serve seeded demo data because
- * NEXT_PUBLIC_API_URL points somewhere unreachable — that failure looks
- * exactly like a working restaurant and is invisible from the outside.
- *
- * Set NEXT_PUBLIC_ENABLE_DEMO_FALLBACK=true to opt back in deliberately
- * (e.g. a public demo deployment that intentionally has no backend).
- */
-export function demoFallbackEnabled(): boolean {
-  const raw = process.env.NEXT_PUBLIC_ENABLE_DEMO_FALLBACK?.trim().toLowerCase();
-  if (raw === "true" || raw === "1") return true;
-  if (raw === "false" || raw === "0") return false;
-  return process.env.NODE_ENV !== "production";
-}
-
-/**
- * The single predicate every demo/mock path goes through: the request never
- * reached the backend AND the demo store is permitted here. Keeping both
- * conditions in one export means a newly added fallback path cannot forget
- * the production gate.
- */
-export function shouldUseDemoFallback(error: unknown): boolean {
-  return isOfflineError(error) && demoFallbackEnabled();
-}
-
-/** ServiceResult-shaped failure from the mock layer → ApiError for one code path. */
-export function apiErrorFromServiceFailure(failure: {
-  code: string;
-  message: string;
-  sold_out?: string[];
-}): ApiError {
-  const status =
-    failure.code === "table_not_found" || failure.code === "invalid_pin"
-      ? failure.code === "table_not_found"
-        ? 404
-        : 401
-      : failure.code === "unauthorized"
-        ? 401
-        : 409;
-  return new ApiError(status, failure.code.toUpperCase(), failure.message, {
-    sold_out: failure.sold_out ?? [],
-  });
 }
 
 export function toTable(session: TableSession): RestaurantTable {
@@ -140,7 +98,12 @@ export function toOrder(
     and allergies, never money. */
 export function toFloorSummary(row: FloorTableResponse): FloorTableSummary {
   return {
-    table: { id: row.table_id, code: row.code, name: row.name },
+    table: {
+      id: row.table_id,
+      code: row.code,
+      name: row.name,
+      bill_status: row.bill_status,
+    },
     active_order: row.active_order
       ? {
           id: row.active_order.order_id,
@@ -153,6 +116,9 @@ export function toFloorSummary(row: FloorTableResponse): FloorTableSummary {
         }
       : null,
     cart_line_count: row.cart_line_count,
+    active_devices: row.active_devices,
+    needs_attention: row.needs_attention,
+    clear_requested_at: row.clear_requested_at,
   };
 }
 

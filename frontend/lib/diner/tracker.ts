@@ -1,49 +1,20 @@
-/* Tracker delight — the presentational layer of the live order tracker.
+/* Tracker copy — the presentational layer of the live order tracker.
 
    None of this talks to the backend and none of it changes the order's real
    status, which always comes from the kitchen. The arrival estimate is a
    demo-only guess built from data the screen already holds (this table's open
-   tickets and the lines on them), and the activity line and the foodie joke
-   rotate on a timer purely so a live demo feels alive. Everything here is
-   read-only copy. */
+   tickets and the lines on them). Everything here is read-only, minimal
+   copy. */
 
 import type { Order, OrderStatus } from "@/lib/api/types";
-
-/* Eight clean, family-friendly lines. Kept short so the joke never competes
-   with the status above it. */
-export const FOODIE_JOKES: string[] = [
-  "Why did the dosa cross the table? Because it wanted to get to the other side.",
-  "Our chef doesn't believe in fast food. Only fast disappearing food.",
-  "Calories don't count when someone else ordered dessert.",
-  "The biryani said it was layered. We believed it.",
-  "We asked the naan to relax. It said it was already well-buttered.",
-  "Good food takes time. Great food takes slightly longer.",
-  "Your order is coming. Your hunger has been notified.",
-  "The only thing being served faster than your food is this joke.",
-];
 
 /* Quiet micro-status lines, one pool per real status so the copy can never
    contradict the kitchen. Rotated by the tracker every few seconds. */
 export const ACTIVITY_LINES: Record<OrderStatus, string[]> = {
-  pending: [
-    "Your ticket is in the queue at the pass.",
-    "The kitchen is working through the tickets ahead of you.",
-    "The line has your order and is starting it next.",
-  ],
-  preparing: [
-    "Chef is on your order right now.",
-    "The line is finishing the final item.",
-    "Your dishes are being plated at the pass.",
-  ],
-  ready: [
-    "Your order has left the pass.",
-    "Everything is plated and heading to the table.",
-    "A runner has picked up your ticket.",
-  ],
-  served: [
-    "Enjoy — that round is on the table.",
-    "Served. Fire another round whenever you like.",
-  ],
+  pending: ["Queued at the pass", "Waiting for the line", "Next at the pass"],
+  preparing: ["Cooking on the line", "Plating at the pass", "Final items on the line"],
+  ready: ["Ready at the pass", "Runner inbound", "Leaving the pass"],
+  served: ["Served", "Round complete"],
 };
 
 export interface ArrivalEstimate {

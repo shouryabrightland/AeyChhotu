@@ -101,7 +101,10 @@
   --text-title--letter-spacing: -0.03em;
   --text-title--font-weight: 600;
 
-  --text-heading: clamp(1.5rem, 2.6vw, 2.125rem);
+  /* The floor of this clamp is what keeps a heading from being clipped at
+     320px: 1.35rem still fits a long word on one line with the page gutter,
+     and text-balance does the wrapping. */
+  --text-heading: clamp(1.35rem, 4.2vw, 2rem);
   --text-heading--line-height: 1.15;
   --text-heading--letter-spacing: -0.025em;
   --text-heading--font-weight: 600;
@@ -237,6 +240,44 @@
   --duration-slower: 900ms;
 }
 
+/* ------------------------------------------------------------
+   SCROLLBARS — hidden globally.
+
+   This app is a hand-held surface, not a document: a permanent 15px scroll
+   gutter on Windows/Chrome shifts every centered layout and reads as browser
+   chrome bleeding into the design. Scrolling itself is untouched (wheel,
+   touch, keyboard, scrollbar-width only hides the indicator). Both the
+   standard and the WebKit properties are set because no single one is
+   honoured everywhere, and `!important` is deliberate: a stray
+   `overflow-y: auto` on a nested panel must not reintroduce a bar.
+   ------------------------------------------------------------ */
+* {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+*::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+/* HTML/BODY LOCKDOWN.
+   The document is the app frame: it is exactly one dynamic viewport tall, it
+   never scrolls sideways, and it never rubber-bands into a refresh gesture.
+   100dvh tracks the browser bar collapsing; 100svh is the max so the shell
+   cannot grow taller than the smallest viewport a phone reports. `overflow-y`
+   stays visible on purpose — long pages (the story, the showcase) still
+   scroll; only the horizontal axis and the bounce are removed. */
+html,
+body {
+  height: 100dvh;
+  max-height: 100svh;
+  overflow-x: hidden;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
 @layer base {
   *,
   *::before,
@@ -247,16 +288,6 @@
   html {
     -webkit-text-size-adjust: 100%;
     scroll-behavior: smooth;
-    /* No rubber-banding, no pull-to-refresh: this is an app, not a page.
-       Both properties are on html AND body because iOS Safari and Chrome
-       disagree about which one owns the overscroll. */
-    overscroll-behavior: none;
-    /* Kill the blue/grey flash on every tap. */
-    -webkit-tap-highlight-color: transparent;
-    /* `clip`, not `hidden`: it forbids horizontal overflow (the hero's wide
-       canvas is deliberately offset inside a narrower wrapper) WITHOUT
-       creating a scroll container, which would break every `sticky` bar. */
-    overflow-x: clip;
   }
 
   body {
@@ -265,8 +296,6 @@
     font-family: var(--font-sans);
     font-synthesis-weight: none;
     text-rendering: optimizeLegibility;
-    overscroll-behavior: none;
-    -webkit-tap-highlight-color: transparent;
   }
 
   /* ---- Native-feel lockdown ------------------------------------------
@@ -324,7 +353,10 @@
   h3,
   h4 {
     font-family: var(--font-display);
+    /* `balance` wraps long headings instead of letting a fixed-width
+       container clip them, at every size — including the 320px floor. */
     text-wrap: balance;
+    overflow-wrap: break-word;
   }
 
   p {
@@ -345,6 +377,35 @@
       transition-duration: 0.001ms !important;
       scroll-behavior: auto !important;
     }
+  }
+}
+
+/* Print: only the explicitly marked block survives. Used by the admin
+   console's QR sheet, where everything except the code is noise on paper. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .admin-print-area,
+  .admin-print-area * {
+    visibility: visible;
+  }
+
+  .admin-print-area {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    background: #fff;
+  }
+
+  .admin-print-area svg {
+    width: 18rem;
+    height: 18rem;
   }
 }
 

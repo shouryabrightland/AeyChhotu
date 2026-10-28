@@ -53,8 +53,27 @@ export const kdsLoginSchema = z.object({
   pin: z.string().regex(/^\d{4,6}$/, "PIN must be 4 to 6 digits."),
 });
 
+/** POST /api/v1/auth/admin-login — the owner/manager PIN (ADMIN_PIN).
+    Same shape as the staff PIN, different secret and different role claim. */
+export const adminLoginSchema = z.object({
+  pin: z.string().regex(/^\d{4,6}$/, "PIN must be 4 to 6 digits."),
+});
+
 /** E9 GET /api/v1/sessions/:table_token/active-check */
 export const activeCheckParamsSchema = z.object({ table_token: tableToken });
+
+/** POST /api/v1/sessions/:table_token/bill-request
+    DELETE /api/v1/sessions/:table_token/heartbeat — same table-token scope. */
+export const sessionTableParamsSchema = z.object({ table_token: tableToken });
+
+/** POST/DELETE /api/v1/sessions/:table_token/heartbeat body. */
+export const heartbeatSchema = z.object({
+  device_id: z
+    .string()
+    .trim()
+    .min(1, "device_id is required.")
+    .max(64, "device_id must be 64 characters or fewer."),
+});
 
 // ---- Module 2: Menu & Cart ------------------------------------------
 
@@ -158,6 +177,84 @@ export const orderStatusQuerySchema = z.object({ table_token: tableToken });
 
 /** E17 GET /api/v1/floor/tables */
 export const floorQuerySchema = z.object({ ...pagination });
+
+/** PATCH /api/v1/floor/tables/:table_id/settle */
+export const floorTableParamsSchema = z.object({ table_id: uuid("table_id") });
+
+// ---- Module 5: Executive admin console --------------------------------
+
+/** POST /api/v1/admin/tables */
+export const adminCreateTableSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1, "Give the table a name.")
+    .max(60, "Table names must be 60 characters or fewer."),
+});
+
+/** PATCH /api/v1/admin/tables/:table_id */
+export const adminUpdateTableSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1, "The table name cannot be empty.")
+    .max(60, "Table names must be 60 characters or fewer.")
+    .optional(),
+});
+
+/** Shared path params for the admin table sub-routes. */
+export const adminTableParamsSchema = z.object({ table_id: uuid("table_id") });
+
+const adminDishName = z
+  .string()
+  .trim()
+  .min(1, "Give the dish a name.")
+  .max(120, "Dish names must be 120 characters or fewer.");
+
+const adminDishPrice = z.coerce
+  .number()
+  .finite("Price must be a number.")
+  .min(0, "Price cannot be negative.")
+  .max(1_000_000, "Price is unrealistically high.");
+
+const adminDishCategory = z
+  .string()
+  .trim()
+  .min(1, "Pick a category.")
+  .max(80, "Categories must be 80 characters or fewer.");
+
+const adminDishDescription = z
+  .string()
+  .trim()
+  .max(500, "Descriptions must be 500 characters or fewer.");
+
+/** POST /api/v1/admin/menu */
+export const adminCreateMenuItemSchema = z.object({
+  name: adminDishName,
+  price: adminDishPrice,
+  category: adminDishCategory,
+  description: adminDishDescription.default(""),
+  vegetarian: z.boolean().default(true),
+  is_available: z.boolean().default(true),
+});
+
+/* PATCH /api/v1/admin/menu/:menu_item_id — all fields optional, but at least
+   one must be present: an empty PATCH is a client bug, not a no-op. */
+export const adminUpdateMenuItemSchema = z
+  .object({
+    name: adminDishName.optional(),
+    price: adminDishPrice.optional(),
+    category: adminDishCategory.optional(),
+    description: adminDishDescription.optional(),
+    vegetarian: z.boolean().optional(),
+    is_available: z.boolean().optional(),
+  })
+  .refine((body) => Object.values(body).some((value) => value !== undefined), {
+    message: "Provide at least one field to update.",
+  });
+
+/** Path params for the admin menu item routes. */
+export const adminMenuItemParamsSchema = z.object({ menu_item_id: uuid("menu_item_id") });
 
 /* Validates a request slice and converts failures into the contract's
    400 VALIDATION_ERROR envelope with per-field messages (docs/7 §1.1). */

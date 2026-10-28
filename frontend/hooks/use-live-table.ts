@@ -2,18 +2,16 @@
 
 /* useLiveTable — the Diner side data runtime.
 
-   Strategy: LIVE WITH MOCK FALLBACK.
+   Strategy: LIVE ONLY.
    1. Every read/write goes through the api-client to the Express backend
-      first (20 s timeout, ApiError envelope parsing).
-   2. When a request never reaches the backend (status 0: down / timeout /
-      unconfigured), the hook falls back to the seeded offline demo store
-      (lib/api) so the prototype still runs without a server. That fallback
-      is GATED: development only, or an explicit
-      NEXT_PUBLIC_ENABLE_DEMO_FALLBACK=true — production never silently
-      renders seeded data. See shouldUseDemoFallback().
-   3. Realtime: `table_carts` channel streams cart mutations, and
-      `order_tracker` (via watchOrderStatus) streams status flips — with
-      REST polling underneath as the WebSocket safety net.
+      (20 s timeout, ApiError envelope parsing).
+   2. When the backend is unreachable (status 0) or answers with an error, the
+      hook moves to its real `error` phase. The screen shows the API's own
+      message and a Retry button. Nothing is ever served from a seeded local
+      store: a guest looking at a menu must be looking at the kitchen's menu.
+   3. Realtime: `table_carts` streams cart mutations and `order_tracker` (via
+      watchOrderStatus) streams status flips, with REST polling underneath as
+      the WebSocket safety net.
 
    One instance powers the menu screen, the cart modal and the tracker, so
    every view at a table observes exactly the same snapshot. */
@@ -29,8 +27,8 @@ import {
   getOrders as apiGetOrders,
   checkActiveOrder,
   removeCartItem as apiRemoveCartItem,
-  shouldUseDemoFallback,
   subscribeTableCart,
+  subscribeTableUpdates,
   toCartLine,
   toMenuItem,
   toOrder,
@@ -41,11 +39,8 @@ import {
 } from "@/lib/api-client";
 import { getGrantedSession } from "@/lib/api/table-session";
 import type { CartLine, MenuItem, Order, RestaurantTable } from "@/lib/api/types";
-import * as mock from "@/lib/api";
-import { getSnapshot, subscribe as subscribeMockStore } from "@/lib/api/store";
 
 export type LivePhase = "loading" | "error" | "success";
-export type LiveSource = "live" | "demo";
 
 /** Normalized failure the cart modal renders (contract envelope aware). */
 export interface FireFailure {
@@ -68,7 +63,6 @@ export interface LiveTableValue {
   phase: LivePhase;
   /** Non-null only in the error phase (real backend/contract failure). */
   error: ApiError | null;
-  source: LiveSource;
   retry: () => void;
   refresh: () => Promise<void>;
 
@@ -102,7 +96,6 @@ export interface LiveTableValue {
 export function useLiveTable(tableToken: string): LiveTableValue {
   const [phase, setPhase] = useState<LivePhase>("loading");
   const [error, setError] = useState<ApiError | null>(null);
-  const [source, setSource] = useState<LiveSource>("live");
   const [table, setTable] = useState<RestaurantTable | null>(null);
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -110,14 +103,12 @@ export function useLiveTable(tableToken: string): LiveTableValue {
   const [itemErrors, setItemErrors] = useState<Record<string, string>>({});
   const [reloadKey, setReloadKey] = useState(0);
 
-  const sourceRef = useRef<LiveSource>("live");
-  const tableIdRef = useRef<string | null>(null);
   const tableCodeRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
 
-  /* A server settling this table's bill erases the session. The shared demo
-     store is cleared by settleTable(); on the live API — which has no such
-     endpoint — this local frame is what makes the diner's screen come back
+  /* A server settling this table's bill erases the session. The settle signal
+     is shared across the table's tabs; the live API has no settle endpoint of
+     its own, so this local frame is what makes the diner's screen come back
      empty instead of showing a table that was just settled. Depend on the
      timestamp alone so a request on ANOTHER table never wipes this cart. */
   const settledAt = useBills()[tableToken]?.settled_at ?? null;
@@ -147,18 +138,13 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     setMenu(snapshot.menu);
     setCart(snapshot.cart);
     setOrders(snapshot.orders);
-    tableIdRef.current = snapshot.table.id;
   }, []);
 
   /* This hook does NOT authenticate. The session gate has already claimed or
      joined the table and left the granted credentials in the client store;
      reading them here is what makes "is this guest in?" a single decision in
      a single place, instead of a second initialize() call that would answer
-     `locked` on every reload and wipe the screen.
-
-     `status: 0` is the honest classification for "no session in this frame":
-     the request never reached the backend, which is also the one case where
-     the demo store is allowed to stand in (development / explicit opt-in). */
+     `locked` on every reload and wipe the screen. */
   async function loadLive(): Promise<Snapshot> {
     const session = getGrantedSession(tableToken);
     if (!session) {
@@ -186,47 +172,29 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     };
   }
 
-  async function loadDemo(): Promise<Snapshot> {
-    const session = await mock.initializeSession(tableToken);
-    if (!session.ok) {
-      throw new ApiError(404, "TABLE_NOT_FOUND", session.message);
-    }
-    const menu = await mock.fetchMenu(tableToken);
-    if (!menu.ok) {
-      throw new ApiError(404, "TABLE_NOT_FOUND", menu.message);
-    }
-    return {
-      table: session.data,
-      menu: menu.data,
-      cart: mock.getCart(tableToken),
-      orders: mock.getOrdersForTable(tableToken),
-    };
-  }
+  /** Fails the screen honestly: real message, real Retry button. */
+  const fail = useCallback((err: unknown) => {
+    if (!mountedRef.current) return;
+    setError(
+      err instanceof ApiError
+        ? err
+        : new ApiError(0, "INTERNAL_ERROR", "Something went wrong loading this table."),
+    );
+    setPhase("error");
+  }, []);
 
   const reloadCart = useCallback(async () => {
-    if (sourceRef.current === "demo") {
-      if (mountedRef.current) setCart(mock.getCart(tableToken));
-      return;
-    }
     try {
       const rows = await fetchAllPages((page) =>
         apiGetCartItems(tableToken, { page, limit: LIST_LIMIT }),
       );
       if (mountedRef.current) setCart(rows.map(toCartLine));
     } catch (err) {
-      if (shouldUseDemoFallback(err)) {
-        sourceRef.current = "demo";
-        setSource("demo");
-        if (mountedRef.current) setCart(mock.getCart(tableToken));
-      }
+      fail(err);
     }
-  }, [tableToken]);
+  }, [tableToken, fail]);
 
   const reloadOrders = useCallback(async () => {
-    if (sourceRef.current === "demo") {
-      if (mountedRef.current) setOrders(mock.getOrdersForTable(tableToken));
-      return;
-    }
     try {
       // Newest-first: page 1 always holds the active order. History beyond
       // 100 rows is archival, so it is deliberately not walked (see loadLive).
@@ -235,13 +203,9 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         setOrders(page.data.map((row) => toOrder(row, tableCodeRef.current ?? tableToken)));
       }
     } catch (err) {
-      if (shouldUseDemoFallback(err)) {
-        sourceRef.current = "demo";
-        setSource("demo");
-        if (mountedRef.current) setOrders(mock.getOrdersForTable(tableToken));
-      }
+      fail(err);
     }
-  }, [tableToken]);
+  }, [tableToken, fail]);
 
   // ---- Initial load + every retry --------------------------------------
   useEffect(() => {
@@ -253,20 +217,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
       setItemErrors({});
 
       try {
-        let snapshot: Snapshot;
-        try {
-          snapshot = await loadLive();
-          sourceRef.current = "live";
-          setSource("live");
-        } catch (err) {
-          if (shouldUseDemoFallback(err)) {
-            snapshot = await loadDemo();
-            sourceRef.current = "demo";
-            setSource("demo");
-          } else {
-            throw err;
-          }
-        }
+        const snapshot = await loadLive();
         if (cancelled) return;
         tableCodeRef.current = snapshot.table.code;
         applySnapshot(snapshot);
@@ -289,25 +240,28 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tableToken, reloadKey]);
 
-  // ---- Realtime A: table_carts (live) / mock store (demo) --------------
+  // ---- Realtime A: table_carts ----------------------------------------
   useEffect(() => {
     if (phase !== "success" || !table) return;
 
-    if (sourceRef.current === "live") {
-      return subscribeTableCart(table.id, tableToken, () => {
-        void reloadCart();
-      });
-    }
-
-    return subscribeMockStore(() => {
-      if (!mountedRef.current) return;
-      setCart(mock.getCart(tableToken));
-      setOrders(mock.getOrdersForTable(tableToken));
-      setMenu(getSnapshot().menu);
+    return subscribeTableCart(table.id, tableToken, () => {
+      void reloadCart();
     });
   }, [phase, table, tableToken, reloadCart]);
 
-  // ---- Realtime C: order_tracker for the active order (live only) ------
+  // ---- Realtime D2: restaurant_tables (bill requests, settles, release) --
+  // A settle can purge the shared cart and end the session. Reloading both
+  // reads on the table channel keeps this screen honest without a refresh.
+  useEffect(() => {
+    if (phase !== "success" || !table) return;
+
+    return subscribeTableUpdates(() => {
+      void reloadCart();
+      void reloadOrders();
+    });
+  }, [phase, table, reloadCart, reloadOrders]);
+
+  // ---- Realtime C: order_tracker for the active order ------------------
   const activeOrder = useMemo(() => {
     return (
       [...orders]
@@ -321,7 +275,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
   const activeOrderStatus = activeOrder?.status ?? null;
 
   useEffect(() => {
-    if (phase !== "success" || sourceRef.current !== "live" || !activeOrderId) return;
+    if (phase !== "success" || !activeOrderId) return;
 
     return watchOrderStatus(activeOrderId, tableToken, (statusUpdate) => {
       if (!mountedRef.current) return;
@@ -363,17 +317,14 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     [cart, menuIndex],
   );
 
-  const retry = useCallback(() => setReloadKey((key) => key + 1), []);
+  const retry = useCallback(() => {
+    setPhase("loading");
+    setError(null);
+    setReloadKey((key) => key + 1);
+  }, []);
   const refresh = useCallback(async () => {
     setReloadKey((key) => key + 1);
   }, []);
-
-  const syncFromMock = useCallback(() => {
-    if (!mountedRef.current) return;
-    setCart(mock.getCart(tableToken));
-    setOrders(mock.getOrdersForTable(tableToken));
-    setMenu(getSnapshot().menu);
-  }, [tableToken]);
 
   // ---- Mutations --------------------------------------------------------
 
@@ -396,22 +347,6 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         await reloadCart();
         return { ok: true };
       } catch (err) {
-        if (shouldUseDemoFallback(err)) {
-          const result = await mock.addCartLine({
-            table_token: tableToken,
-            menu_item_id: item.id,
-            added_by: addedBy,
-          });
-          sourceRef.current = "demo";
-          setSource("demo");
-          syncFromMock();
-          if (!result.ok) {
-            setItemErrors((current) => ({ ...current, [item.id]: result.message }));
-            return { ok: false, message: result.message };
-          }
-          return { ok: true };
-        }
-
         if (err instanceof ApiError) {
           setItemErrors((current) => ({ ...current, [item.id]: err.message }));
           if (err.error === "ITEM_UNAVAILABLE" || err.error === "MENU_ITEM_NOT_FOUND") {
@@ -427,10 +362,11 @@ export function useLiveTable(tableToken: string): LiveTableValue {
           }
           return { ok: false, message: err.message };
         }
-        throw err;
+        fail(err);
+        return { ok: false, message: "The dish could not be added." };
       }
     },
-    [tableToken, reloadCart, syncFromMock],
+    [tableToken, reloadCart, fail],
   );
 
   const updateLine = useCallback(
@@ -447,32 +383,16 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         await apiUpdateCartItem(cartItemId, { table_token: tableToken, ...patch });
         await reloadCart();
       } catch (err) {
-        if (shouldUseDemoFallback(err)) {
-          sourceRef.current = "demo";
-          setSource("demo");
-          // The demo store has no server-side atomics: resolve the delta
-          // against the local line, then store an absolute value.
-          const { quantity_delta: delta, ...rest } = patch;
-          const localLine = mock.getCart(tableToken).find((line) => line.id === cartItemId);
-          await mock.updateCartLine({
-            cart_item_id: cartItemId,
-            ...rest,
-            ...(delta !== undefined && localLine
-              ? { quantity: Math.min(99, Math.max(1, localLine.quantity + delta)) }
-              : {}),
-          });
-          syncFromMock();
-          return;
-        }
-        if (err instanceof ApiError) {
-          // Inline validation vector: surface under the cart line via toast layer.
+        if (err instanceof ApiError && err.status !== 0) {
+          // Inline validation vector: the line keeps its old value and the
+          // operator sees why in the console-level warning.
           console.warn("updateLine failed:", err.error, err.message);
           return;
         }
-        throw err;
+        fail(err);
       }
     },
-    [tableToken, reloadCart, syncFromMock],
+    [tableToken, reloadCart, fail],
   );
 
   const removeLine = useCallback(
@@ -481,18 +401,11 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         await apiRemoveCartItem({ table_token: tableToken, cart_item_id: cartItemId });
         await reloadCart();
       } catch (err) {
-        if (shouldUseDemoFallback(err)) {
-          sourceRef.current = "demo";
-          setSource("demo");
-          await mock.removeCartLine({ cart_item_id: cartItemId });
-          syncFromMock();
-          return;
-        }
-        if (err instanceof ApiError) return;
-        throw err;
+        if (err instanceof ApiError && err.status !== 0) return;
+        fail(err);
       }
     },
-    [tableToken, reloadCart, syncFromMock],
+    [tableToken, reloadCart, fail],
   );
 
   const fire = useCallback(async (): Promise<{ ok: true } | { ok: false; failure: FireFailure }> => {
@@ -521,23 +434,6 @@ export function useLiveTable(tableToken: string): LiveTableValue {
       await Promise.all([reloadCart(), reloadOrders()]);
       return { ok: true };
     } catch (err) {
-      if (shouldUseDemoFallback(err)) {
-        sourceRef.current = "demo";
-        setSource("demo");
-        const result = await mock.fireOrder(tableToken);
-        syncFromMock();
-        if (result.ok) return { ok: true };
-        return {
-          ok: false,
-          failure: {
-            code: result.code,
-            message: result.message,
-            soldOut: result.sold_out ?? [],
-            fields: {},
-          },
-        };
-      }
-
       if (err instanceof ApiError) {
         // Server truth: sold-out lines were purged inside the fire RPC —
         // refresh cart + menu so the UI matches what the diner is told.
@@ -564,14 +460,22 @@ export function useLiveTable(tableToken: string): LiveTableValue {
           },
         };
       }
-      throw err;
+      fail(err);
+      return {
+        ok: false,
+        failure: {
+          code: "INTERNAL_ERROR",
+          message: "The order could not be fired.",
+          soldOut: [],
+          fields: {},
+        },
+      };
     }
-  }, [tableToken, reloadCart, reloadOrders, syncFromMock]);
+  }, [tableToken, reloadCart, reloadOrders, fail]);
 
   return {
     phase,
     error,
-    source,
     retry,
     refresh,
     table,

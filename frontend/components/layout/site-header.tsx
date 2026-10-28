@@ -1,6 +1,6 @@
 "use client";
 
-import { ChefHat, Menu, QrCode } from "lucide-react";
+import { Menu, QrCode, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Logo } from "@/components/brand/logo";
@@ -9,7 +9,7 @@ import { Container } from "@/components/ui/container";
 import { Drawer } from "@/components/ui/drawer";
 import { IconButton } from "@/components/ui/icon-button";
 import { Tooltip } from "@/components/ui/tooltip";
-import { marketingNav, productLinks } from "@/lib/site";
+import { customerLinks, marketingNav } from "@/lib/site";
 import { cn } from "@/lib/utils";
 
 export function SiteHeader() {
@@ -54,19 +54,19 @@ export function SiteHeader() {
             as words and crowded the bar, so each action is now its glyph with
             the name carried by the tooltip and the accessible label. */}
         <div className="hidden items-center gap-2 lg:flex">
-          <Tooltip label="Kitchen board" side="bottom">
+          <Tooltip label="Hackathon showcase" side="bottom">
             <Link
-              href="/kitchen"
-              aria-label="Kitchen board"
+              href="/presentation"
+              aria-label="Hackathon showcase"
               className={cn(buttonStyles({ variant: "ghost", size: "sm" }), "aspect-square px-0")}
             >
-              <ChefHat className="size-4" aria-hidden />
+              <Sparkles className="size-4" aria-hidden />
             </Link>
           </Tooltip>
-          <Tooltip label="Open a table" side="bottom">
+          <Tooltip label="Scan a table" side="bottom">
             <Link
-              href="/table/k7x2p"
-              aria-label="Open a table"
+              href="/"
+              aria-label="Scan a table"
               className={cn(buttonStyles({ variant: "ember", size: "sm" }), "aspect-square px-0")}
             >
               <QrCode className="size-4" aria-hidden />
@@ -106,8 +106,8 @@ export function SiteHeader() {
           </ul>
 
           <div className="flex flex-col gap-3 border-t border-line pt-6">
-            <p className="text-label text-ember uppercase">Live screens</p>
-            {productLinks.map((link) => (
+            <p className="text-label text-ember uppercase">More</p>
+            {customerLinks.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}

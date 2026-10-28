@@ -126,17 +126,19 @@ export function MenuBrowser({
           the navbar's ResizeObserver, so the two bands dock together instead
           of the search sliding under the header.
 
-          ONE row, not two: on a 320px phone a labelled search above a
-          bordered filter strip measured ~124px of permanently-stuck chrome.
-          Search + chips side by side is 60px, which keeps the sticky band
-          under the 90px budget and gives the menu the screen back. */}
+          TWO rows on a phone, ONE row from `sm` up. Side by side seemed
+          compact, but at 320–380px the diet strip squeezed the search input
+          down to a stub ("Ready to or…") that could not show a query. On a
+          phone the input now owns line 1 at full width and the chips own
+          line 2, scrolling sideways inside their own strip so the sticky band
+          never grows past two rows. From `sm` the two share a line again. */}
       <div
         className={cn(
           "sticky z-20 -mx-1 rounded-lg bg-canvas/90 px-1 py-1.5 backdrop-blur-md",
           stickyTopClass,
         )}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
           <Input
             // The label is the placeholder here: a visible label row on a
             // phone costs 20px of permanently-stuck height. The accessible
@@ -146,7 +148,7 @@ export function MenuBrowser({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             leadingIcon={<Search className="size-4" aria-hidden />}
-            containerClassName="min-w-0 flex-1"
+            containerClassName="w-full sm:min-w-0 sm:flex-1"
           />
 
           {/* Diet is the only axis worth a persistent control here: it maps
@@ -155,7 +157,7 @@ export function MenuBrowser({
           <div
             role="group"
             aria-label="Filter dishes by diet"
-            className="hide-scrollbar flex h-12 shrink-0 items-center gap-1 overflow-x-auto rounded-md border border-line-strong bg-surface p-1"
+            className="hide-scrollbar flex h-12 w-full shrink-0 items-center gap-1 overflow-x-auto rounded-md border border-line-strong bg-surface p-1 sm:w-auto"
           >
             {DIET_FILTERS.map((option) => (
               <button
@@ -417,8 +419,11 @@ export function MenuBrowser({
 
 function StageHeading({ title, description }: { title: string; description?: string }) {
   return (
-    <div className="relative flex flex-col gap-2 border-b border-line pb-4">
-      <h2 className="font-display text-heading text-ink">{title}</h2>
+    <div className="relative flex w-full flex-col gap-2 border-b border-line pb-4">
+      {/* No max-width here: a long cuisine name ("Indo-Chinese · Street Food")
+          was clipped rather than wrapped on a narrow phone. The heading takes
+          the full column and balances its lines. */}
+      <h2 className="font-display text-heading text-balance text-ink">{title}</h2>
       {description ? <p className="text-sm text-ink-muted">{description}</p> : null}
       <span aria-hidden className="absolute -bottom-px left-0 h-0.5 w-12 bg-ember" />
     </div>

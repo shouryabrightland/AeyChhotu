@@ -19,11 +19,11 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   /* Dish photography is resolved in the frontend (lib/diner/food-photos)
-     because the menu contract has no image column. Only that host is allowed
-     through the optimiser; anything else stays a plain remote URL. */
-  images: {
-    remotePatterns: [{ protocol: "https", hostname: "images.unsplash.com" }],
-  },
+     because the menu contract has no image column, and every photo ships in
+     public/food — so the optimiser only ever reads from disk and no remote
+     pattern is needed. Hot-linking a third-party host made every plate depend
+     on that CDN answering the optimiser, which is exactly how `/_next/image`
+     started returning 500 for dishes whose photo would not fetch. */
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },

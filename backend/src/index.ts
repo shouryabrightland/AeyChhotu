@@ -2,6 +2,7 @@ import { createApp } from "./app.js";
 import { env } from "./config/env.js";
 import { pool } from "./db/pool.js";
 import { logEvent } from "./observability/logger.js";
+import { checkAndAutoReleaseTable } from "./services/sessions.service.js";
 
 /* App entry. Importing config/env.js validates required env vars and exits
    loudly if any are missing; importing db/pool.js wires the Postgres pool. */
@@ -15,6 +16,41 @@ const server = app.listen(env.port, () => {
     cors_origins: env.clientUrls,
   });
 });
+
+/* Auto-release sweeper (sql/007_bill_and_auto_release.sql).
+
+   Both event paths — the floor settling a bill and the last device
+   disconnecting — already ask the engine directly. This is the safety net
+   for the cases neither can see: a device dies without firing pagehide, a
+   process restarts between the two events, or the last ticket is pruned
+   after everyone has gone. Every 20 s it re-examines the only rows that can
+   possibly be eligible (bill paid), and each check re-validates all three
+   conditions under a row lock. */
+const AUTO_RELEASE_SWEEP_MS = 20_000;
+
+async function sweepPaidTables(): Promise<void> {
+  try {
+    const res = await pool.query<{ id: string }>(
+      "SELECT id FROM restaurant_tables WHERE bill_status = 'paid' AND deleted_at IS NULL",
+    );
+
+    for (const row of res.rows) {
+      await checkAndAutoReleaseTable(row.id).catch((err: unknown) => {
+        logEvent("error", "auto_release_failed", {
+          table_id: row.id,
+          error_message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+  } catch (err) {
+    logEvent("error", "auto_release_sweep_failed", {
+      error_message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+const sweepTimer = setInterval(() => void sweepPaidTables(), AUTO_RELEASE_SWEEP_MS);
+sweepTimer.unref();
 
 /* Graceful shutdown. Render/Fly/Kubernetes kill with SIGTERM and expect the
    process to finish in-flight requests before exiting; a hard kill mid-order
@@ -30,6 +66,8 @@ function shutdown(signal: "SIGTERM" | "SIGINT"): void {
   if (shuttingDown) return;
   shuttingDown = true;
   logEvent("info", "shutdown_begin", { signal });
+
+  clearInterval(sweepTimer);
 
   server.close(async () => {
     try {

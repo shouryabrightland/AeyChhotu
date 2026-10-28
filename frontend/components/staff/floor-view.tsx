@@ -1,8 +1,17 @@
 "use client";
 
-import { Check, ChevronRight, Clock, EyeOff, HandCoins, Lock, ShieldAlert, Users } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  Clock,
+  EyeOff,
+  HandCoins,
+  Lock,
+  ShieldAlert,
+  WifiOff,
+} from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { OpsBar } from "@/components/staff/ops-bar";
 import { MenuAvailabilityDrawer } from "@/components/staff/menu-availability-drawer";
 import { Badge } from "@/components/ui/badge";
@@ -12,16 +21,10 @@ import { EmptyState, ErrorState } from "@/components/ui/empty-state";
 import { IconButton } from "@/components/ui/icon-button";
 import { Skeleton } from "@/components/ui/loading-state";
 import { useToast } from "@/components/ui/toast";
-import { useDb } from "@/hooks/use-db";
 import { useLiveFloor } from "@/hooks/use-live-floor";
 import { useNow } from "@/hooks/use-now";
-import { usePresence } from "@/hooks/use-presence";
 import { useStaffMenuCatalog } from "@/hooks/use-staff-menu-catalog";
-import { useBills } from "@/hooks/use-bills";
-import { settleBill } from "@/lib/api/bill";
-import { settleTable } from "@/lib/api";
-import { countActiveDiners } from "@/lib/api/store";
-import type { BillEvent } from "@/lib/api/bill";
+import { ApiError, clearFloorTable, settleTableBill } from "@/lib/api-client";
 import type { FloorTableSummary, OrderStatus } from "@/lib/api/types";
 import { formatElapsed } from "@/lib/format";
 import { transitionBase } from "@/lib/motion";
@@ -66,8 +69,10 @@ const urgencyRank: Record<OrderStatus, number> = {
   ready: 4,
 };
 
-/** Ready tables need a runner first, then cooking, then queued, then staged carts. */
+/** Abandoned sessions come first, then ready tables, cooking, queued, staged. */
 function urgency(summary: FloorTableSummary) {
+  if (summary.needs_attention) return 5;
+
   const order = summary.active_order;
   if (!order) return summary.cart_line_count > 0 ? 1 : 0;
 
@@ -91,7 +96,7 @@ export interface FloorViewProps {
 type FloorTab = "all" | "ready" | "cooking" | "bill";
 
 export function FloorView({ onLock }: FloorViewProps) {
-  const { phase, error, source, tables, retry } = useLiveFloor();
+  const { phase, error, tables, retry, refresh } = useLiveFloor();
   const now = useNow(1000);
   const { toast } = useToast();
   const [availabilityOpen, setAvailabilityOpen] = useState(false);
@@ -114,30 +119,11 @@ export function FloorView({ onLock }: FloorViewProps) {
      persisted anywhere — no backend write happens on "I'll serve this". */
   const [claimed, setClaimed] = useState<Record<string, boolean>>({});
 
-  /* Diners' "get bill now" requests, keyed by table code. */
-  const bills = useBills();
-
   /* The catalog is global but E3 needs a table token; the floor already knows
      every table code, so hand one over instead of making the hook re-fetch
      the floor list. */
   const catalogToken = tables[0]?.table.code ?? null;
   const catalog = useStaffMenuCatalog(catalogToken);
-
-  // Demo-only: the seeded presence heartbeats keep the phone count alive while
-  // the board is offline. Live presence is per-table (channel D) and the floor
-  // board spans every table, so it shows cart pressure instead of a count.
-  usePresence(null, source === "demo");
-
-  const offlineToastShown = useRef(false);
-  useEffect(() => {
-    if (phase !== "success" || source !== "demo" || offlineToastShown.current) return;
-    offlineToastShown.current = true;
-    toast({
-      title: "Offline demo floor",
-      description: "The backend is unreachable — showing seeded demo tables.",
-      tone: "info",
-    });
-  }, [phase, source, toast]);
 
   const ordered = useMemo(
     () =>
@@ -152,15 +138,16 @@ export function FloorView({ onLock }: FloorViewProps) {
     [tables],
   );
   const needAttention = useMemo(
-    () => tables.filter((summary) => summary.active_order?.status === "ready").length,
+    () =>
+      tables.filter(
+        (summary) => summary.needs_attention || summary.active_order?.status === "ready",
+      ).length,
     [tables],
   );
   const ordersToday = DEMO_ORDERS_TODAY_BASE + activeTables;
 
-  const wantsBill = (summary: FloorTableSummary) => {
-    const bill = bills[summary.table.code];
-    return Boolean(bill && !bill.settled_at);
-  };
+  const wantsBill = (summary: FloorTableSummary) =>
+    summary.table.bill_status === "requested";
 
   const tabCounts: Record<FloorTab, number> = {
     all: ordered.length,
@@ -200,18 +187,56 @@ export function FloorView({ onLock }: FloorViewProps) {
     });
   }
 
-  /* Payment taken: drop the signal for every open tab and erase the table's
-     session — staged cart and every ticket on it — so the next guests to sit
-     down start from nothing. The live API has no equivalent endpoint yet, so
-     the erasure only lands on the shared demo store (see settleTable). */
-  function settle(summary: FloorTableSummary) {
-    settleBill(summary.table.code);
-    settleTable(summary.table.code);
-    toast({
-      title: `${summary.table.name} settled`,
-      description: "Bill paid — the table's session is cleared.",
-      tone: "success",
-    });
+  /* Payment taken: the server records 'paid' and runs the three-condition
+     release check itself. A table whose bill is the only remaining blocker
+     is cleaned on the spot; one whose guests are still connected stays put
+     and is released when the last heartbeat disappears. */
+  /* Clearing a flagged table. If money is owed the server refuses AND raises
+     the manager alert; this surface must not pretend otherwise. */
+  async function clearTable(summary: FloorTableSummary) {
+    try {
+      await clearFloorTable(summary.table.id);
+      toast({
+        title: `${summary.table.name} cleared`,
+        description: "Session ended. The table is ready for its next guests.",
+        tone: "success",
+      });
+      await refresh();
+    } catch (err) {
+      if (err instanceof ApiError && err.error === "BILL_UNPAID") {
+        toast({
+          title: "Bill unpaid — admin alerted",
+          description: "Only a manager can clear this table now.",
+          tone: "error",
+        });
+        await refresh();
+        return;
+      }
+
+      toast({
+        title: err instanceof ApiError ? err.message : "Could not clear that table.",
+        tone: "error",
+      });
+    }
+  }
+
+  async function settle(summary: FloorTableSummary) {
+    try {
+      const result = await settleTableBill(summary.table.id);
+      toast({
+        title: `${summary.table.name} settled`,
+        description: result.released
+          ? "Bill paid. The table is clear for its next guests."
+          : "Bill paid. The table clears once its last device disconnects.",
+        tone: "success",
+      });
+      await refresh();
+    } catch (err) {
+      toast({
+        title: err instanceof ApiError ? err.message : "Could not settle that table.",
+        tone: "error",
+      });
+    }
   }
 
   return (
@@ -320,11 +345,6 @@ export function FloorView({ onLock }: FloorViewProps) {
             <EmptyState
               title="No tables are configured"
               description="Add tables in the database and they appear here the moment a diner scans one."
-              action={
-                <Button variant="outline" size="md" onClick={retry}>
-                  Refresh
-                </Button>
-              }
             />
           </div>
         ) : (
@@ -349,12 +369,11 @@ export function FloorView({ onLock }: FloorViewProps) {
                 key={summary.table.id}
                 summary={summary}
                 now={now}
-                demo={source === "demo"}
                 claimed={Boolean(claimed[summary.table.id])}
-                bill={bills[summary.table.code] ?? null}
                 onClaim={claim}
                 onRelease={release}
                 onSettle={settle}
+                onClear={clearTable}
               />
             ))}
           </ul>
@@ -398,27 +417,24 @@ function SummaryStat({
 function TableCard({
   summary,
   now,
-  demo,
   claimed,
-  bill,
   onClaim,
   onRelease,
   onSettle,
+  onClear,
 }: {
   summary: FloorTableSummary;
   now: number | null;
-  demo: boolean;
   claimed: boolean;
-  bill: BillEvent | null;
   onClaim: (summary: FloorTableSummary) => void;
   onRelease: (summary: FloorTableSummary) => void;
   onSettle: (summary: FloorTableSummary) => void;
+  onClear: (summary: FloorTableSummary) => void;
 }) {
-  const db = useDb();
   const { table, active_order: order, cart_line_count } = summary;
   const status = order?.status ?? null;
-
-  const diners = now === null ? null : countActiveDiners(db, table.code, now);
+  // Active session, but nobody is connected and nothing is in flight.
+  const stale = Boolean(summary.needs_attention);
 
   /* Allergy lines are the reason this card exists: they come straight from
      E17's `active_order.items`, which is the live join to the ticket. */
@@ -429,38 +445,52 @@ function TableCard({
     ? order.items.reduce((total, item) => total + item.quantity, 0)
     : 0;
 
-  const word = status ? statusWord[status] : cart_line_count > 0 ? "Staged" : "Idle";
-  const wordTone = status
-    ? statusText[status]
-    : cart_line_count > 0
-      ? "text-ink-muted"
-      : "text-ink-subtle";
-  const detail = status
-    ? guidance[status]
-    : cart_line_count > 0
-      ? "Staged in the shared cart, not fired yet."
-      : "Nothing in flight for this table.";
-  const rail = status
-    ? statusRail[status]
-    : cart_line_count > 0
-      ? "bg-line-strong"
-      : "bg-line";
+  const word = stale
+    ? "Check"
+    : status
+      ? statusWord[status]
+      : cart_line_count > 0
+        ? "Staged"
+        : "Idle";
+  const wordTone = stale
+    ? "text-alert"
+    : status
+      ? statusText[status]
+      : cart_line_count > 0
+        ? "text-ink-muted"
+        : "text-ink-subtle";
+  const detail = stale
+    ? summary.clear_requested_at
+      ? "Admin notified · bill unpaid."
+      : "Active session with no device and no open order."
+    : status
+      ? guidance[status]
+      : cart_line_count > 0
+        ? "Staged in the shared cart, not fired yet."
+        : "Nothing in flight for this table.";
+  const rail = stale
+    ? "bg-alert"
+    : status
+      ? statusRail[status]
+      : cart_line_count > 0
+        ? "bg-line-strong"
+        : "bg-line";
 
   /* Only a ready ticket needs a runner, so only a ready ticket gets a CTA.
      Everything else is information the server reads on the way past. */
   const canServe = status === "ready";
 
-  // A settled event is kept briefly so the diner can thank them; it is not a
-  // request any more, so the board must stop asking the server to act.
-  const billRequested = Boolean(bill && !bill.settled_at);
+  // The server's bill state is the only truth here: a settled table stops
+  // asking for payment the instant restaurant_tables updates.
+  const billRequested = table.bill_status === "requested";
 
   return (
     <li className="h-full">
       <article
         className={cn(
           "relative flex h-full flex-col overflow-hidden rounded-lg border bg-surface p-6 transition-[transform,box-shadow,border-color] duration-[var(--duration-base)] ease-organic",
-          canServe ? "border-ready/50 shadow-sm" : "border-line",
-          !canServe && "hover:border-line-strong",
+          stale ? "border-alert/50 shadow-sm" : canServe ? "border-ready/50 shadow-sm" : "border-line",
+          !stale && !canServe && "hover:border-line-strong",
           claimed && "ring-1 ring-ember/25",
         )}
       >
@@ -474,14 +504,24 @@ function TableCard({
             <h2 className="font-display text-subheading text-ink">{table.name}</h2>
           </div>
 
-          {/* The word stays visible, not just the count: an allergy alert is
-              the one thing on this card a server must not have to decode. */}
-          {allergyLines > 0 ? (
-            <span className="flex items-center gap-1.5 rounded-pill bg-alert-surface px-2.5 py-1 text-label text-alert uppercase">
-              <ShieldAlert className="size-3.5 shrink-0" aria-hidden />
-              {allergyLines} {allergyLines === 1 ? "allergy" : "allergies"}
-            </span>
-          ) : null}
+          {/* The word stays visible, not just the count: an allergy alert and
+              an abandoned session are the two things a server must not have
+              to decode from colour alone. */}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {stale ? (
+              <span className="flex items-center gap-1.5 rounded-pill bg-alert-surface px-2.5 py-1 text-label text-alert uppercase">
+                <WifiOff className="size-3.5 shrink-0" aria-hidden />
+                {summary.clear_requested_at ? "Admin notified" : "Check table"}
+              </span>
+            ) : null}
+
+            {allergyLines > 0 ? (
+              <span className="flex items-center gap-1.5 rounded-pill bg-alert-surface px-2.5 py-1 text-label text-alert uppercase">
+                <ShieldAlert className="size-3.5 shrink-0" aria-hidden />
+                {allergyLines} {allergyLines === 1 ? "allergy" : "allergies"}
+              </span>
+            ) : null}
+          </div>
         </header>
 
         <div className="mt-5 flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
@@ -530,19 +570,31 @@ function TableCard({
             </span>
           ) : null}
 
-          {/* Phone count is only meaningful from real presence, which the
-              floor board does not subscribe to per table. Showing a seeded
-              number next to live orders would be worse than showing none. */}
-          {demo && diners !== null ? (
-            <span className="flex items-center gap-1.5">
-              <Users className="size-3.5" aria-hidden />
-              {diners === 1 ? "1 phone" : `${diners} phones`}
-            </span>
-          ) : null}
+          {/* Deliberately NO diner count here. Presence is a per-table
+              Realtime channel and this board spans the whole room; a number
+              this card cannot derive from live data would be a guess dressed
+              as a fact. */}
         </div>
 
         {/* The one thing on this card that is a request rather than a fact:
             the table asked for its bill, and tapping it takes payment. */}
+        {/* A flagged table gets one action: clear it, or escalate when the
+            bill is unpaid (the server decides which, atomically). */}
+        {stale ? (
+          <div className="mt-5 mb-1">
+            <Button
+              variant={summary.clear_requested_at ? "soft" : "outline"}
+              size="sm"
+              fullWidth
+              disabled={Boolean(summary.clear_requested_at)}
+              onClick={() => onClear(summary)}
+              leftIcon={<WifiOff className="size-3.5" aria-hidden />}
+            >
+              {summary.clear_requested_at ? "Admin notified" : "Clear table"}
+            </Button>
+          </div>
+        ) : null}
+
         {billRequested ? (
           <button
             type="button"

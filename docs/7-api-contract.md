@@ -230,7 +230,7 @@ then runs REST-only). Read scope only: every write still requires this API.
     "token_type": "Bearer",
     "expires_in": 28800,
     "realtime_token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI3ZThmOWEwYi0uLi4iLCJyb2xlIjoiYXV0aGVudGljYXRlZCIsInN0YWZmIjoia2l0Y2hlbiIsImlhdCI6MTc5MDU2OCwiZXhwIjoxNzkwNTk2fQ.signature",
-    "message": "Shift successfully armed. Tap screen to authorize chimes."
+    "message": "Shift active · Audio armed."
   }
 }
 ```

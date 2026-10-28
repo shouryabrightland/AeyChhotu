@@ -1,6 +1,7 @@
 import { pool } from "../db/pool.js";
 import { AppError } from "../errors/app-error.js";
 import { buildMeta, iso, type PageMeta } from "../lib/util.js";
+import { checkAndAutoReleaseTable } from "./sessions.service.js";
 
 /* Module 3 — Kitchen Display System (E10 tickets, E11 status machine,
    E12 prune, E13 shift activation). All callers are staff-gated by the
@@ -129,10 +130,16 @@ export async function advanceStatus(orderId: string, target: "preparing" | "read
 }
 
 /* E12 — PATCH /api/v1/kds/tickets/:order_id/prune.
-   One transaction: serve the ticket (only valid from 'ready'), then flag
-   the parent table 'empty' when its last active order is gone. */
+   Serve the ticket (only valid from 'ready'), then ask the auto-release
+   engine whether the table is now free. Serving the last ticket no longer
+   clears the table unconditionally: the guests are usually still sitting
+   there, and their bill has not necessarily been paid. The table is
+   released only when the bill is paid, no tickets remain AND every device
+   has disconnected (sql/007_bill_and_auto_release.sql). */
 export async function pruneTicket(orderId: string) {
   const client = await pool.connect();
+  let committed = false;
+
   try {
     await client.query("BEGIN");
 
@@ -157,34 +164,17 @@ export async function pruneTicket(orderId: string) {
       orderId,
     ]);
 
-    const active = await client.query<{ count: number }>(
-      "SELECT count(*)::int AS count FROM orders WHERE table_id = $1 AND status <> 'served'",
-      [order.table_id],
-    );
-    const tableCleared = (active.rows[0]?.count ?? 0) === 0;
-    if (tableCleared) {
-      /* Settling the table ENDS its session (sql/005_table_session_security.sql).
-         The PIN and the pass are bearer credentials for the guests who were
-         sitting here; if they survived, the next party to scan the same QR
-         would inherit a session somebody else could still reconnect to. The
-         attempt counter goes back to zero with them, so a locked table is
-         also unlocked by settling. */
-      await client.query(
-        `UPDATE restaurant_tables
-            SET status              = 'empty',
-                session_pin         = NULL,
-                session_secret      = NULL,
-                failed_pin_attempts = 0,
-                session_started_at  = NULL
-          WHERE id = $1`,
-        [order.table_id],
-      );
-    }
-
     await client.query("COMMIT");
-    return { order_id: orderId, status: "served", table_cleared: tableCleared };
+    committed = true;
+
+    // Separate transaction: the release engine takes its own FOR UPDATE lock
+    // on the table row, which must not be nested inside the ticket lock.
+    const { released } = await checkAndAutoReleaseTable(order.table_id);
+    return { order_id: orderId, status: "served", table_cleared: released };
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (!committed) {
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
     throw err;
   } finally {
     client.release();

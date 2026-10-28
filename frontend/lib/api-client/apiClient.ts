@@ -6,6 +6,7 @@
      §5  global 401 guard: wipe token, terminate shift, redirect to /kitchen
      §6  strict 20-second timeout on every outbound operation. */
 
+import { clearAdminToken, getAdminToken } from "./admin-token";
 import { ApiError } from "./errors";
 import type { ApiEnvelope, PageMeta } from "./types";
 import { clearKdsToken, getKdsToken } from "./token";
@@ -39,8 +40,17 @@ export interface RequestOptions {
   query?: Record<string, string | number | undefined>;
   /** Inject `Authorization: Bearer <shift token>` (back-of-house routes). */
   auth?: boolean;
+  /** Inject `Authorization: Bearer <admin token>` (executive console routes).
+      Separate from `auth` so a shift token can never be sent to /admin and an
+      admin token can never be sent to /kds. */
+  adminAuth?: boolean;
   timeoutMs?: number;
+  /** Keep the request alive across a page unload (presence disconnect). */
+  keepalive?: boolean;
 }
+
+/** Which credential a request carries — decides where a 401 sends the user. */
+type AuthMode = "staff" | "admin";
 
 export interface ApiResult<T> {
   data: T;
@@ -58,9 +68,18 @@ function buildQueryString(query: RequestOptions["query"]): string {
   return encoded ? `?${encoded}` : "";
 }
 
-/** §5 — global guard: wipe the invalid token and terminate the shift
-    workspace by sending the window back to the PIN checkpoint. */
-function handleUnauthorized(): void {
+/* §5 — global guard.
+   Staff: wipe the shift token and terminate the workspace by sending the
+   window back to the PIN checkpoint.
+   Admin: wipe the console token and STAY on /admin. Its page owns the PIN
+   wall, so redirecting a manager to the kitchen (the staff target) would be
+   both wrong and confusing. */
+function handleUnauthorized(mode: AuthMode): void {
+  if (mode === "admin") {
+    clearAdminToken();
+    return;
+  }
+
   clearKdsToken();
   if (typeof window !== "undefined" && !window.location.pathname.startsWith(KDS_LOGIN_PATH)) {
     // Hard navigation on purpose: spec §5 requires terminating the whole
@@ -110,7 +129,7 @@ function defaultMessageForStatus(status: number): string {
 }
 
 /** §4 — structural error-envelope extraction. Throws ApiError. */
-function throwFromResponse(status: number, body: unknown): never {
+function throwFromResponse(status: number, body: unknown, mode: AuthMode): never {
   const envelope =
     body && typeof body === "object"
       ? (body as { error?: Record<string, unknown> }).error
@@ -127,7 +146,7 @@ function throwFromResponse(status: number, body: unknown): never {
 
   // §5 — only a token problem (not a wrong-PIN 401) triggers the guard.
   if (status === 401 && code === "UNAUTHORIZED") {
-    handleUnauthorized();
+    handleUnauthorized(mode);
   }
 
   throw new ApiError(status, code, message, envelope);
@@ -147,12 +166,20 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
 
-  if (options.auth) {
-    const token = getKdsToken();
+  const authMode: AuthMode = options.adminAuth ? "admin" : "staff";
+
+  if (options.auth || options.adminAuth) {
+    const token = options.adminAuth ? getAdminToken() : getKdsToken();
     if (!token) {
       // Fail fast without a round-trip — same outcome as a server 401.
-      handleUnauthorized();
-      throw new ApiError(401, "UNAUTHORIZED", "Missing or invalid kitchen shift token.");
+      handleUnauthorized(authMode);
+      throw new ApiError(
+        401,
+        "UNAUTHORIZED",
+        options.adminAuth
+          ? "Missing or invalid manager session. Enter the manager PIN."
+          : "Missing or invalid kitchen shift token.",
+      );
     }
     headers["Authorization"] = `Bearer ${token}`;
   }
@@ -169,6 +196,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
       signal: controller.signal,
       cache: "no-store",
+      ...(options.keepalive ? { keepalive: true } : {}),
       // Send/accept the httpOnly kds_token cookie. The default ("same-origin")
       // would silently stop working the moment the API moves to its own
       // host, so the cookie path is exercised in both hosting shapes. The
@@ -196,7 +224,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   }
 
   if (!response.ok) {
-    throwFromResponse(response.status, body);
+    throwFromResponse(response.status, body, authMode);
   }
 
   const envelope = (body ?? {}) as ApiEnvelope<T>;

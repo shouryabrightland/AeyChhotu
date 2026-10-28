@@ -22,6 +22,7 @@ import { useToast } from "@/components/ui/toast";
 import { usePresence } from "@/hooks/use-presence";
 import { useBills } from "@/hooks/use-bills";
 import { useLiveTable } from "@/hooks/use-live-table";
+import { ApiError, requestTableBill } from "@/lib/api-client";
 import { getStoredDisplayName, storeDisplayName, storeTableToken } from "@/lib/api/session";
 import { clearStoredSession, getGrantedSession } from "@/lib/api/table-session";
 import type { MenuItem } from "@/lib/api/types";
@@ -47,9 +48,18 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
   // The Table Pass sheet: this device's PIN plus the QR that carries the
   // session secret to a tablemate's camera.
   const [passOpen, setPassOpen] = useState(false);
-  // The value is only ever rendered inside the cart modal, which opens after
-  // hydration, so reading storage in the initialiser cannot mismatch the SSR HTML.
-  const [displayName, setDisplayName] = useState(() => getStoredDisplayName());
+  /* Hydration-safe identity: the server has no localStorage, so it renders
+     "Guest" and so does the first client paint. The stored name is synced in
+     the effect below, after mount, which is the only point where the two
+     trees can never disagree. */
+  const [displayName, setDisplayName] = useState("Guest");
+
+  useEffect(() => {
+    // Deferred a frame so this never races the first paint (and never
+    // triggers React's "state update during render/hydration" warning).
+    const timer = window.setTimeout(() => setDisplayName(getStoredDisplayName()), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const bills = useBills();
   const settledAt = bills[tableToken]?.settled_at ?? null;
@@ -74,15 +84,27 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
     storeDisplayName(name);
   }
 
-  function handleRequestBill() {
+  async function handleRequestBill() {
     if (bills[tableToken]) return;
-    requestBill(tableToken);
-    // Asking for the bill closes the editor behind it: the table is done.
-    setCartOpen(false);
-    toast({
-      title: "Bill requested",
-      description: "We've asked the server to bring your bill.",
-    });
+
+    try {
+      // The server state is what the floor board reads; the local bill store
+      // mirrors it so this device's own icons update instantly.
+      await requestTableBill(tableToken);
+      requestBill(tableToken);
+      // Asking for the bill closes the editor behind it: the table is done.
+      setCartOpen(false);
+      toast({
+        title: "Bill requested",
+        description: "We've asked the server to bring your bill.",
+      });
+    } catch (err) {
+      setCartOpen(false);
+      toast({
+        title: err instanceof ApiError ? err.message : "Could not request the bill.",
+        tone: "error",
+      });
+    }
   }
 
   async function handleAdd(item: MenuItem) {
@@ -169,12 +191,7 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
           <EmptyState
             titleAs="h2"
             title="The menu is being stocked"
-            description="No dishes are showing right now. Refresh and the kitchen's list appears the moment it lands."
-            action={
-              <Button variant="soft" size="md" onClick={() => void live.refresh()}>
-                Refresh menu
-              </Button>
-            }
+            description="No dishes are showing right now."
           />
         ) : (
           <MenuBrowser
@@ -195,7 +212,7 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
           <TableCart
             live={live}
             onReview={() => setCartOpen(true)}
-            onRequestBill={handleRequestBill}
+            onRequestBill={() => void handleRequestBill()}
             billRequested={Boolean(bills[tableToken])}
           />
         </aside>

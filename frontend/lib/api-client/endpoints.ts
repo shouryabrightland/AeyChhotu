@@ -7,11 +7,23 @@
    `Authorization: Bearer <shift token>` header automatically. */
 
 import { apiRequest } from "./apiClient";
+import { storeAdminToken } from "./admin-token";
 import { setRealtimeAuth } from "./realtime-auth";
 import { storeKdsToken } from "./token";
 import type {
   ActiveCheck,
+  AdminAnalytics,
+  AdminLogin,
+  AdminMenuItem,
+  AdminTable,
+  AdminTableToken,
   AvailabilityResult,
+  CreateAdminMenuItemInput,
+  UpdateAdminMenuItemInput,
+  DeviceHeartbeat,
+  HeartbeatRemoval,
+  BillRequest,
+  BillSettlement,
   CartLine,
   CartLineWithTotal,
   CartRemovalResult,
@@ -30,6 +42,7 @@ import type {
   RemoveCartItemPayload,
   SessionIdentity,
   ShiftActivation,
+  TableClearResult,
   TableScan,
   TableSessionGrant,
   ShiftLogin,
@@ -142,6 +155,42 @@ export async function checkActiveOrder(tableToken: string): Promise<ActiveCheck>
   return data;
 }
 
+/** POST /api/v1/sessions/:table_token/bill-request — the diner asks to pay. */
+export async function requestTableBill(tableToken: string): Promise<BillRequest> {
+  const { data } = await apiRequest<BillRequest>(
+    `${BASE}/sessions/${encodeURIComponent(tableToken)}/bill-request`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+/** POST /api/v1/sessions/:table_token/heartbeat — this device is still here.
+    The 15 s cadence is wired in use-presence. */
+export async function sendHeartbeat(
+  tableToken: string,
+  deviceId: string,
+): Promise<DeviceHeartbeat> {
+  const { data } = await apiRequest<DeviceHeartbeat>(
+    `${BASE}/sessions/${encodeURIComponent(tableToken)}/heartbeat`,
+    { method: "POST", body: { device_id: deviceId } },
+  );
+  return data;
+}
+
+/** DELETE /api/v1/sessions/:table_token/heartbeat — this device left.
+    `keepalive` lets the request outlive a pagehide/close; removing the row
+    is one of the three triggers that can release a paid table. */
+export async function removeHeartbeat(
+  tableToken: string,
+  deviceId: string,
+): Promise<HeartbeatRemoval> {
+  const { data } = await apiRequest<HeartbeatRemoval>(
+    `${BASE}/sessions/${encodeURIComponent(tableToken)}/heartbeat`,
+    { method: "DELETE", body: { device_id: deviceId }, keepalive: true },
+  );
+  return data;
+}
+
 // ---- Module 2: Menu & Collaborative Cart ------------------------------
 
 /** E3 — GET /api/v1/menu?table_token=… (paginated) */
@@ -247,6 +296,27 @@ export async function activateShift(deviceId: string): Promise<ShiftActivation> 
 
 // ---- Module 4: Floor operations ---------------------------------------
 
+/** PATCH /api/v1/floor/tables/:table_id/settle (auth; staff role).
+    Takes payment and asks the engine whether the table can be cleared now. */
+export async function settleTableBill(tableId: string): Promise<BillSettlement> {
+  const { data } = await apiRequest<BillSettlement>(
+    `${BASE}/floor/tables/${encodeURIComponent(tableId)}/settle`,
+    { method: "PATCH", auth: true },
+  );
+  return data;
+}
+
+/** PATCH /api/v1/floor/tables/:table_id/clear (auth; staff role).
+    Clears a flagged table when nothing is owed. Throws 409 BILL_UNPAID when
+    the table has history and an unpaid bill — that call also alerts admin. */
+export async function clearFloorTable(tableId: string): Promise<TableClearResult> {
+  const { data } = await apiRequest<TableClearResult>(
+    `${BASE}/floor/tables/${encodeURIComponent(tableId)}/clear`,
+    { method: "PATCH", auth: true },
+  );
+  return data;
+}
+
 /** E14 — PATCH /api/v1/menu/items/:menu_item_id/availability (auth) */
 export async function toggleItemAvailability(
   itemId: string,
@@ -294,4 +364,121 @@ export async function getFloorTables(
     query: { page: query.page, limit: query.limit },
   });
   return { data, meta: meta! };
+}
+
+// ---- Module 5: Executive admin console -------------------------------
+
+/** POST /api/v1/auth/admin-login — stores the role:"admin" session token. */
+export async function loginAdmin(pin: string): Promise<AdminLogin> {
+  const { data } = await apiRequest<AdminLogin>(`${BASE}/auth/admin-login`, {
+    method: "POST",
+    body: { pin },
+  });
+  storeAdminToken(data.token);
+  return data;
+}
+
+/** GET /api/v1/admin/tables */
+export async function getAdminTables(): Promise<AdminTable[]> {
+  const { data } = await apiRequest<AdminTable[]>(`${BASE}/admin/tables`, { adminAuth: true });
+  return data;
+}
+
+/** POST /api/v1/admin/tables */
+export async function createAdminTable(name: string): Promise<AdminTable> {
+  const { data } = await apiRequest<AdminTable>(`${BASE}/admin/tables`, {
+    method: "POST",
+    adminAuth: true,
+    body: { name },
+  });
+  return data;
+}
+
+/** PATCH /api/v1/admin/tables/:table_id */
+export async function renameAdminTable(
+  tableId: string,
+  name: string,
+): Promise<{ table_id: string; name: string }> {
+  const { data } = await apiRequest<{ table_id: string; name: string }>(
+    `${BASE}/admin/tables/${encodeURIComponent(tableId)}`,
+    { method: "PATCH", adminAuth: true, body: { name } },
+  );
+  return data;
+}
+
+/** POST /api/v1/admin/tables/:table_id/regenerate-token */
+export async function regenerateAdminTableToken(tableId: string): Promise<AdminTableToken> {
+  const { data } = await apiRequest<AdminTableToken>(
+    `${BASE}/admin/tables/${encodeURIComponent(tableId)}/regenerate-token`,
+    { method: "POST", adminAuth: true },
+  );
+  return data;
+}
+
+/** POST /api/v1/admin/tables/:table_id/clear — the manager override for an
+    unpaid table a staff member could not clear. */
+export async function clearAdminTable(tableId: string): Promise<TableClearResult> {
+  const { data } = await apiRequest<TableClearResult>(
+    `${BASE}/admin/tables/${encodeURIComponent(tableId)}/clear`,
+    { method: "POST", adminAuth: true },
+  );
+  return data;
+}
+
+/** DELETE /api/v1/admin/tables/:table_id (archives, never drops history) */
+export async function deleteAdminTable(tableId: string): Promise<{ table_id: string }> {
+  const { data } = await apiRequest<{ table_id: string }>(
+    `${BASE}/admin/tables/${encodeURIComponent(tableId)}`,
+    { method: "DELETE", adminAuth: true },
+  );
+  return data;
+}
+
+/** GET /api/v1/admin/menu */
+export async function getAdminMenu(): Promise<AdminMenuItem[]> {
+  const { data } = await apiRequest<AdminMenuItem[]>(`${BASE}/admin/menu`, { adminAuth: true });
+  return data;
+}
+
+/** POST /api/v1/admin/menu */
+export async function createAdminMenuItem(
+  input: CreateAdminMenuItemInput,
+): Promise<AdminMenuItem> {
+  const { data } = await apiRequest<AdminMenuItem>(`${BASE}/admin/menu`, {
+    method: "POST",
+    adminAuth: true,
+    body: input,
+  });
+  return data;
+}
+
+/** PATCH /api/v1/admin/menu/:menu_item_id */
+export async function updateAdminMenuItem(
+  menuItemId: string,
+  input: UpdateAdminMenuItemInput,
+): Promise<AdminMenuItem> {
+  const { data } = await apiRequest<AdminMenuItem>(
+    `${BASE}/admin/menu/${encodeURIComponent(menuItemId)}`,
+    { method: "PATCH", adminAuth: true, body: input },
+  );
+  return data;
+}
+
+/** DELETE /api/v1/admin/menu/:menu_item_id */
+export async function deleteAdminMenuItem(
+  menuItemId: string,
+): Promise<{ menu_item_id: string }> {
+  const { data } = await apiRequest<{ menu_item_id: string }>(
+    `${BASE}/admin/menu/${encodeURIComponent(menuItemId)}`,
+    { method: "DELETE", adminAuth: true },
+  );
+  return data;
+}
+
+/** GET /api/v1/admin/analytics/top-selling */
+export async function getAdminAnalytics(): Promise<AdminAnalytics> {
+  const { data } = await apiRequest<AdminAnalytics>(`${BASE}/admin/analytics/top-selling`, {
+    adminAuth: true,
+  });
+  return data;
 }

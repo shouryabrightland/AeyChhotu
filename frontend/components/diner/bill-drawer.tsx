@@ -27,6 +27,18 @@ interface BillLine {
   amount: number;
 }
 
+/** An empty `added_by` (possible on older rows) must not render as the
+    sentence "Added by " with nothing after it. */
+function ownerName(addedBy: string | null | undefined): string {
+  const name = addedBy?.trim();
+  return name ? name : "Guest";
+}
+
+/** First letter of a name; "G" when the name is blank. */
+function initial(name: string): string {
+  return (name.trim().slice(0, 1) || "G").toUpperCase();
+}
+
 /* The running bill, opened from the two icons in the nav band. It is one
    drawer with a scope switch: the whole table's tab, or just this guest's.
    Fired rounds are grouped by ticket (so the guest sees which round a dish
@@ -52,7 +64,7 @@ export function BillDrawer({
           key: item.id,
           name: item.name,
           quantity: item.quantity,
-          addedBy: item.added_by,
+          addedBy: ownerName(item.added_by),
           amount: item.price * item.quantity,
         })),
     }))
@@ -66,7 +78,7 @@ export function BillDrawer({
         key: line.id,
         name: item?.name ?? "Removed item",
         quantity: line.quantity,
-        addedBy: line.added_by,
+        addedBy: ownerName(line.added_by),
         amount: (item?.price ?? 0) * line.quantity,
       };
     });
@@ -84,15 +96,14 @@ export function BillDrawer({
   const personTotals = new Map<string, number>();
   for (const order of orders) {
     for (const item of order.items) {
-      personTotals.set(
-        item.added_by,
-        (personTotals.get(item.added_by) ?? 0) + item.price * item.quantity,
-      );
+      const owner = ownerName(item.added_by);
+      personTotals.set(owner, (personTotals.get(owner) ?? 0) + item.price * item.quantity);
     }
   }
   for (const line of cart) {
+    const owner = ownerName(line.added_by);
     const price = menuIndex.get(line.menu_item_id)?.price ?? 0;
-    personTotals.set(line.added_by, (personTotals.get(line.added_by) ?? 0) + price * line.quantity);
+    personTotals.set(owner, (personTotals.get(owner) ?? 0) + price * line.quantity);
   }
   const split = [...personTotals.entries()]
     .map(([name, total]) => ({ name, total }))
@@ -219,7 +230,7 @@ export function BillDrawer({
                               isYou ? "bg-ember-soft text-ember" : "bg-sand text-ink-muted",
                             )}
                           >
-                            {person.name.slice(0, 1).toUpperCase()}
+                            {initial(person.name)}
                           </span>
                           <span className="truncate text-sm font-medium text-ink">
                             {person.name}

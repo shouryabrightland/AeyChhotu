@@ -6,6 +6,8 @@
 export type OrderStatus = "pending" | "preparing" | "ready" | "served";
 export type ActiveOrderStatus = Exclude<OrderStatus, "served">;
 export type TableStatus = "active" | "empty";
+/** Bill lifecycle: a table is only releasable once 'paid'. */
+export type BillStatus = "unrequested" | "requested" | "paid";
 /** Only sequential forward steps are accepted by the KDS status mutator. */
 export type KdsStatusInput = "preparing" | "ready";
 
@@ -80,6 +82,7 @@ export interface TableSessionGrant {
   session_pin: string;
   session_secret: string;
   session_started_at: string | null;
+  bill_status: BillStatus;
   realtime_token: string | null;
 }
 
@@ -231,8 +234,52 @@ export interface FloorTable {
   code: string;
   name: string;
   status: TableStatus;
+  bill_status: BillStatus;
+  /** Set when staff tried to clear the table with an unpaid bill. */
+  clear_requested_at: string | null;
   active_order: FloorActiveOrder | null;
   cart_line_count: number;
+  /** Devices that sent a heartbeat in the stale-detection window. */
+  active_devices: number;
+  /** Active session, no connected device, no open order, no bill request. */
+  needs_attention: boolean;
+}
+
+/** PATCH /api/v1/floor/tables/:table_id/clear and the admin override. */
+export interface TableClearResult {
+  table_id: string;
+  cleared: true;
+  bill_status: BillStatus;
+}
+
+/** PATCH /api/v1/floor/tables/:table_id/settle */
+export interface BillSettlement {
+  table_id: string;
+  bill_status: "paid";
+  bill_paid_at: string;
+  /** True when the paid bill was also the last blocker to clearing the table. */
+  released: boolean;
+}
+
+/** POST /api/v1/sessions/:table_token/bill-request */
+export interface BillRequest {
+  table_id: string;
+  bill_status: BillStatus;
+  bill_requested_at: string | null;
+}
+
+/** POST /api/v1/sessions/:table_token/heartbeat */
+export interface DeviceHeartbeat {
+  table_id: string;
+  device_id: string;
+  last_seen: string;
+}
+
+/** DELETE /api/v1/sessions/:table_token/heartbeat */
+export interface HeartbeatRemoval {
+  table_id: string;
+  device_id: string;
+  released: boolean;
 }
 
 // ---- Request payloads ------------------------------------------------
@@ -278,4 +325,70 @@ export interface MenuQuery extends ListQuery {
 
 export interface KdsTicketsQuery extends ListQuery {
   status?: ActiveOrderStatus;
+}
+
+// ---- Executive admin console -----------------------------------------
+
+/** POST /api/v1/auth/admin-login — the manager session. */
+export interface AdminLogin {
+  token: string;
+  token_type: "Bearer";
+  expires_in: number;
+  role: "admin";
+  message: string;
+}
+
+/** A live table row in the admin grid. `has_session` is whether a PIN/pass is
+    currently issued; `status` is the table's own active/empty state. */
+export interface AdminTable {
+  table_id: string;
+  code: string;
+  name: string;
+  status: TableStatus;
+  bill_status: BillStatus;
+  /** Manager action required: staff clear was refused for an unpaid bill. */
+  clear_requested_at: string | null;
+  active_order_count: number;
+  cart_line_count: number;
+  has_session: boolean;
+  session_started_at: string | null;
+  created_at: string;
+}
+
+/** POST /api/v1/admin/tables/:table_id/regenerate-token */
+export interface AdminTableToken {
+  table_id: string;
+  code: string;
+  name: string;
+}
+
+/** GET /api/v1/admin/menu — includes 86'd dishes, excludes archived ones. */
+export interface AdminMenuItem extends MenuItem {}
+
+export interface CreateAdminMenuItemInput {
+  name: string;
+  price: number;
+  category: string;
+  description: string;
+  vegetarian: boolean;
+  is_available: boolean;
+}
+
+export type UpdateAdminMenuItemInput = Partial<CreateAdminMenuItemInput>;
+
+/** One row of the best-sellers leaderboard. */
+export interface TopSellingItem {
+  menu_item_id: string;
+  name: string;
+  category: string;
+  total_sold: number;
+  total_revenue: number;
+}
+
+/** GET /api/v1/admin/analytics/top-selling */
+export interface AdminAnalytics {
+  items: TopSellingItem[];
+  total_revenue: number;
+  total_orders_served: number;
+  active_tables_count: number;
 }

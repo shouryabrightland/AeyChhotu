@@ -19,12 +19,12 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function requireStaffPin(): string {
-  const pin = process.env.STAFF_PIN?.trim();
+function requirePin(name: string): string {
+  const pin = process.env[name]?.trim();
   if (!pin || !/^\d{4,6}$/.test(pin)) {
     console.error(
       [
-        `[config] FATAL: STAFF_PIN must be a 4-6 digit numeric string — it is missing or invalid.`,
+        `[config] FATAL: ${name} must be a 4-6 digit numeric string — it is missing or invalid.`,
         `[config] Copy backend/.env.example to backend/.env and fill it in.`,
         `[config] Server refusing to start.`,
       ].join("\n"),
@@ -32,6 +32,20 @@ function requireStaffPin(): string {
     process.exit(1);
   }
   return pin;
+}
+
+/* Both PINs are the same shape and both fail the same way. They are kept as
+   two separate calls so the error names the variable that is actually wrong,
+   which is the difference between a one-minute fix and a hunt. */
+function requireStaffPin(): string {
+  return requirePin("STAFF_PIN");
+}
+
+/** Owner/manager console PIN. Deliberately NOT the staff PIN: the admin
+    console can archive tables and rewrite the catalog, so a line cook who
+    knows the kitchen PIN must not be able to open it. */
+function requireAdminPin(): string {
+  return requirePin("ADMIN_PIN");
 }
 
 const portRaw = process.env.PORT ?? "4000";
@@ -103,6 +117,8 @@ export const env = {
   databaseUrl: requireEnv("DATABASE_URL"),
   /** Kitchen shift PIN checked by POST /api/v1/auth/kds-login (E2). */
   staffPin: requireStaffPin(),
+  /** Executive console PIN checked by POST /api/v1/auth/admin-login. */
+  adminPin: requireAdminPin(),
   /** HMAC secret used to sign/verify the KDS bearer tokens issued by E2. */
   kdsTokenSecret: requireEnv("KDS_TOKEN_SECRET"),
   /** Supabase JWT secret (Project Settings → API). Optional: when set, E1/E2
