@@ -14,6 +14,9 @@
  *   5. HARDENING   the audit columns/triggers, the frozen price snapshot and
  *                  the status-transition guard added by 004_hardening.sql —
  *                  including firing a real cart in a rolled-back transaction
+ *   6. SESSIONS    the PIN/pass columns, their shape constraints, and the
+ *                  column privileges that keep both out of every browser
+ *                  role (005_table_session_security.sql)
  *
  * Usage (from backend/):
  *   npm run db:verify
@@ -414,8 +417,111 @@ try {
   }
   report("fire_order snapshots price & freezes total", snapshotOk, snapshotDetail);
 
-  // ------------------------------------------------------------------- 6. seed
-  section("6. Seed data");
+  /* ----------------------------------------- 6. table session security (005)
+     The two-layer table session adds four columns whose SHAPE matters: a
+     2-digit PIN that keeps its leading zero, a fixed-length pass, and a
+     counter the API increments atomically. The column-privilege check is
+     the important half: the pass is a bearer credential for a whole table,
+     so the browser roles must not be able to read it even though they are
+     allowed to read the row. */
+  section("6. Table session security (005_table_session_security.sql)");
+
+  const { rows: sessionCols } = await q(
+    `SELECT column_name, data_type, character_maximum_length, is_nullable, column_default
+       FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'restaurant_tables'
+        AND column_name IN ('session_pin', 'session_secret', 'failed_pin_attempts', 'session_started_at')`,
+  );
+  const sessionCol = new Map(sessionCols.map((row) => [row.column_name, row]));
+
+  report(
+    "column session_pin varchar(2) nullable",
+    sessionCol.get("session_pin")?.data_type === "character varying" &&
+      sessionCol.get("session_pin")?.character_maximum_length === 2 &&
+      sessionCol.get("session_pin")?.is_nullable === "YES",
+    JSON.stringify(sessionCol.get("session_pin") ?? "missing"),
+  );
+  report(
+    "column session_secret varchar(20) nullable",
+    sessionCol.get("session_secret")?.data_type === "character varying" &&
+      sessionCol.get("session_secret")?.character_maximum_length === 20 &&
+      sessionCol.get("session_secret")?.is_nullable === "YES",
+    JSON.stringify(sessionCol.get("session_secret") ?? "missing"),
+  );
+  report(
+    "column failed_pin_attempts integer NOT NULL DEFAULT 0",
+    sessionCol.get("failed_pin_attempts")?.data_type === "integer" &&
+      sessionCol.get("failed_pin_attempts")?.is_nullable === "NO" &&
+      /\b0\b/.test(sessionCol.get("failed_pin_attempts")?.column_default ?? ""),
+    JSON.stringify(sessionCol.get("failed_pin_attempts") ?? "missing"),
+  );
+  report(
+    "column session_started_at timestamptz nullable",
+    sessionCol.get("session_started_at")?.data_type === "timestamp with time zone" &&
+      sessionCol.get("session_started_at")?.is_nullable === "YES",
+    JSON.stringify(sessionCol.get("session_started_at") ?? "missing"),
+  );
+
+  const { rows: sessionChecks } = await q(
+    `SELECT conname FROM pg_constraint
+      WHERE conrelid = 'public.restaurant_tables'::regclass AND contype = 'c'`,
+  );
+  const checkNames = new Set(sessionChecks.map((row) => row.conname));
+  for (const name of [
+    "restaurant_tables_session_pin_format",
+    "restaurant_tables_session_secret_length",
+    "restaurant_tables_failed_pin_attempts_range",
+  ]) {
+    report(`constraint ${name}`, checkNames.has(name));
+  }
+
+  // The PIN column must reject anything the keypad cannot produce.
+  let pinShapeRejected = false;
+  try {
+    await q("BEGIN");
+    await q(
+      "UPDATE restaurant_tables SET session_pin = '7' WHERE code = (SELECT code FROM restaurant_tables LIMIT 1)",
+    );
+    await q("ROLLBACK");
+  } catch (err) {
+    await q("ROLLBACK").catch(() => {});
+    pinShapeRejected = /check constraint|violates check/i.test(err.message);
+  }
+  report("session_pin rejects a 1-digit value", pinShapeRejected);
+
+  // Zero-knowledge: browser roles read the row, never the credentials.
+  const { rows: colPrivRows } = await q(
+    `SELECT
+       has_column_privilege('anon', 'public.restaurant_tables', 'code', 'SELECT')           AS anon_code,
+       has_column_privilege('anon', 'public.restaurant_tables', 'session_pin', 'SELECT')    AS anon_pin,
+       has_column_privilege('anon', 'public.restaurant_tables', 'session_secret', 'SELECT') AS anon_secret,
+       has_column_privilege('authenticated', 'public.restaurant_tables', 'session_secret', 'SELECT') AS auth_secret,
+       has_column_privilege('service_role', 'public.restaurant_tables', 'session_secret', 'SELECT')  AS svc_secret`,
+  );
+  const colPriv = colPrivRows[0];
+  report("anon may still read restaurant_tables.code", colPriv.anon_code === true);
+  report("anon cannot read session_pin", colPriv.anon_pin === false);
+  report("anon cannot read session_secret", colPriv.anon_secret === false);
+  report("authenticated cannot read session_secret", colPriv.auth_secret === false);
+  report("service_role can read session_secret", colPriv.svc_secret === true);
+
+  let secretReadDenied = false;
+  let secretReadError = "no error — SELECT was allowed";
+  try {
+    await q("BEGIN");
+    await q("SET LOCAL ROLE anon");
+    await q("SELECT session_secret FROM restaurant_tables LIMIT 1");
+    await q("ROLLBACK");
+  } catch (err) {
+    await q("ROLLBACK").catch(() => {});
+    secretReadError = err.message;
+    secretReadDenied = /permission denied/i.test(err.message);
+  }
+  report("anon SELECT session_secret is denied outright", secretReadDenied, secretReadError);
+
+  // ------------------------------------------------------------------- 7. seed
+  section("7. Seed data");
 
   const { rows: seedRows } = await q(`
     SELECT

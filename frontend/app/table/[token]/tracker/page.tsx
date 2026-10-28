@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { LiveTracker } from "@/components/diner/live-tracker";
+import { TableSessionGate } from "@/components/diner/table-session-gate";
 
 export const metadata: Metadata = {
   title: "Live order tracker",
@@ -14,5 +15,12 @@ export default async function TrackerPage({
 }) {
   const { token } = await params;
 
-  return <LiveTracker tableToken={token} />;
+  /* Same gate as the menu. The tracker shows what the table ordered and what
+     it owes, so a URL alone must not be enough to read it — a guest who has
+     not joined is sent back through the PIN (or the pass). */
+  return (
+    <TableSessionGate tableToken={token}>
+      <LiveTracker tableToken={token} />
+    </TableSessionGate>
+  );
 }

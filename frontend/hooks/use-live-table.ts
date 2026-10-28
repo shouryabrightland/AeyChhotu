@@ -28,7 +28,6 @@ import {
   getMenu as apiGetMenu,
   getOrders as apiGetOrders,
   checkActiveOrder,
-  initializeSession as apiInitializeSession,
   removeCartItem as apiRemoveCartItem,
   shouldUseDemoFallback,
   subscribeTableCart,
@@ -40,6 +39,7 @@ import {
   upsertCartItem as apiUpsertCartItem,
   watchOrderStatus,
 } from "@/lib/api-client";
+import { getGrantedSession } from "@/lib/api/table-session";
 import type { CartLine, MenuItem, Order, RestaurantTable } from "@/lib/api/types";
 import * as mock from "@/lib/api";
 import { getSnapshot, subscribe as subscribeMockStore } from "@/lib/api/store";
@@ -150,8 +150,21 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     tableIdRef.current = snapshot.table.id;
   }, []);
 
+  /* This hook does NOT authenticate. The session gate has already claimed or
+     joined the table and left the granted credentials in the client store;
+     reading them here is what makes "is this guest in?" a single decision in
+     a single place, instead of a second initialize() call that would answer
+     `locked` on every reload and wipe the screen.
+
+     `status: 0` is the honest classification for "no session in this frame":
+     the request never reached the backend, which is also the one case where
+     the demo store is allowed to stand in (development / explicit opt-in). */
   async function loadLive(): Promise<Snapshot> {
-    const session = await apiInitializeSession(tableToken);
+    const session = getGrantedSession(tableToken);
+    if (!session) {
+      throw new ApiError(0, "SESSION_REQUIRED", "Join this table to see its menu.");
+    }
+
     // Menu + cart must be COMPLETE (dish 101 still has to render), so they
     // walk every page. Order history stays newest-first page 1: the active
     // order is always the newest row, so the tracker can never miss it.
@@ -161,7 +174,12 @@ export function useLiveTable(tableToken: string): LiveTableValue {
       apiGetOrders(tableToken, { limit: LIST_LIMIT }),
     ]);
     return {
-      table: toTable(session),
+      table: toTable({
+        table_id: session.table_id,
+        code: session.code,
+        name: session.name,
+        status: "active",
+      }),
       menu: menu.map(toMenuItem),
       cart: cart.map(toCartLine),
       orders: orderPage.data.map((row) => toOrder(row, session.code)),

@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, Pencil, Receipt, UserRound, Wallet } from "lucide-react";
+import { Activity, Pencil, QrCode, Receipt, UserRound, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { BillScope } from "@/components/diner/bill-drawer";
@@ -17,6 +17,9 @@ export interface DinerNavBarProps {
   onDisplayNameChange: (name: string) => void;
   /** Opens the bill breakdown panel on the requested slice. */
   onOpenBill: (scope: BillScope) => void;
+  /** Opens this table's PIN + QR pass. Absent in the offline demo, where
+      there is no real session to hand out. */
+  onOpenPass?: () => void;
 }
 
 /* The charcoal band is this surface's whole navigation. Who you are sits on
@@ -31,6 +34,7 @@ export function DinerNavBar({
   displayName,
   onDisplayNameChange,
   onOpenBill,
+  onOpenPass,
 }: DinerNavBarProps) {
   const { menuIndex, orders, cart, activeOrder } = live;
   const headerRef = useRef<HTMLElement>(null);
@@ -92,14 +96,21 @@ export function DinerNavBar({
     <header
       ref={headerRef}
       className={cn(
-        "sticky top-0 z-40 w-full border-b text-ink transition-colors duration-[var(--duration-base)] ease-gentle",
+        // sticky + safe-top: the band clears a notch without the guest having
+        // to scroll the menu out from under it.
+        "sticky top-0 z-40 w-full border-b pt-[env(safe-area-inset-top)] text-ink transition-colors duration-[var(--duration-base)] ease-gentle",
         scrolled ? "border-line bg-canvas/85 backdrop-blur-md" : "border-transparent",
       )}
     >
-      <Container className="flex flex-wrap items-center gap-x-4 gap-y-3 py-3">
-        <DinerIdentity displayName={displayName} onChange={onDisplayNameChange} />
+      {/* NOWRAP on purpose: at 320px the identity and four icon actions used
+          to wrap onto a second line, which re-flowed the whole menu under a
+          band that had just changed height. The name truncates instead. */}
+      <Container className="flex flex-nowrap items-center gap-2 py-2.5">
+        <div className="min-w-0 flex-1">
+          <DinerIdentity displayName={displayName} onChange={onDisplayNameChange} />
+        </div>
 
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
           <Tooltip label="Would you like to open live tracker?" side="bottom">
             <Link
               href={`/table/${tableToken}/tracker`}
@@ -137,14 +148,30 @@ export function DinerNavBar({
               <Wallet className="size-5" aria-hidden />
             </button>
           </Tooltip>
+
+          {onOpenPass ? (
+            <Tooltip label="Show this table's PIN and QR pass" side="bottom">
+              <button
+                type="button"
+                onClick={onOpenPass}
+                aria-label="Show the table pass"
+                className={actionClass}
+              >
+                <QrCode className="size-5" aria-hidden />
+              </button>
+            </Tooltip>
+          ) : null}
         </div>
       </Container>
     </header>
   );
 }
 
+/* 36px on the narrowest phones, 40px from `sm` up: four 40px targets plus a
+   name do not fit a 320px viewport, and shrinking the row is better than
+   wrapping it. */
 const actionClass =
-  "inline-flex size-10 items-center justify-center rounded-md text-ink-muted transition-colors duration-[var(--duration-fast)] ease-gentle hover:bg-sand hover:text-ink focus-visible:bg-sand focus-visible:text-ink focus-visible:outline-none";
+  "inline-flex size-9 items-center justify-center rounded-md text-ink-muted transition-colors duration-[var(--duration-fast)] ease-gentle hover:bg-sand hover:text-ink focus-visible:bg-sand focus-visible:text-ink focus-visible:outline-none sm:size-10";
 
 /* The guest's own name, editable in place. Committing it updates the shared
    display name, so the next dish they add carries it and every other phone at
@@ -184,7 +211,7 @@ function DinerIdentity({
     <div className="flex min-w-0 items-center gap-2.5">
       <span
         aria-hidden
-        className="flex size-10 shrink-0 items-center justify-center rounded-md bg-sand text-ink-muted"
+        className="hidden size-10 shrink-0 items-center justify-center rounded-md bg-sand text-ink-muted sm:flex"
       >
         <UserRound className="size-5" />
       </span>
@@ -214,7 +241,7 @@ function DinerIdentity({
             type="button"
             onClick={startEditing}
             aria-label={`Edit your name (currently ${displayName})`}
-            className="group flex max-w-40 cursor-pointer items-center gap-1.5 rounded-sm text-left"
+            className="group flex min-w-0 max-w-40 cursor-pointer items-center gap-1.5 rounded-sm text-left"
           >
             <span className="truncate font-display text-base font-semibold text-ink">
               {displayName}

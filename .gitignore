@@ -34,6 +34,10 @@ pnpm-debug.log*
 # ---- Local throwaway Postgres cluster used for E2E verification ------
 .pgdata/
 
+# ---- Agent working notes ---------------------------------------------
+# Scratch context for the implementation session (prompt copy + plan).
+.agent-context/
+
 # ---- Editor / OS / agent noise ---------------------------------------
 .DS_Store
 Thumbs.db

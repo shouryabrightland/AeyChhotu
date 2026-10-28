@@ -99,6 +99,11 @@ export function DishCard({
   return (
     <motion.div
       drag={interactive ? "x" : false}
+      /* Vertical scrolling wins: the browser decides the gesture axis once,
+         so a downward flick that wanders a few pixels sideways scrolls the
+         deck instead of adding a dish. Without this, long menus were almost
+         impossible to scroll with a thumb. */
+      dragDirectionLock
       dragConstraints={{ left: 0, right: 0 }}
       dragElastic={0.55}
       dragMomentum={false}

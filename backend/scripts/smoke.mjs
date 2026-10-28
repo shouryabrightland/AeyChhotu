@@ -78,9 +78,15 @@ if (process.env.DATABASE_URL) {
         WHERE table_id = (SELECT id FROM restaurant_tables WHERE code = $1)`,
       [TABLE_TOKEN],
     );
-    await client.query(`UPDATE restaurant_tables SET status = 'empty' WHERE code = $1`, [
-      TABLE_TOKEN,
-    ]);
+    // A clean table also means a clean SESSION: without this a credential
+    // minted by an interrupted run would survive into this one.
+    await client.query(
+      `UPDATE restaurant_tables
+          SET status = 'empty', session_pin = NULL, session_secret = NULL,
+              failed_pin_attempts = 0, session_started_at = NULL
+        WHERE code = $1`,
+      [TABLE_TOKEN],
+    );
     if (rows.length > 0) {
       console.log(`[smoke] pre-flight: cleared ${rows.length} leftover order(s)`);
     }
@@ -104,14 +110,44 @@ try {
   const pin = process.env.STAFF_PIN;
   let staffToken = null;
 
+  /* Two-layer table security (sql/005_table_session_security.sql). The whole
+     lifecycle runs against TABLE_TOKEN in order: the first scan claims the
+     table and mints the credentials, every later scan gets `locked`, three
+     wrong PINs flag it, and only the 20-character pass unlocks it again. */
+  let sessionPin = null;
+  let sessionSecret = null;
+
   {
     const r = await api("/api/v1/sessions/initialize", {
       method: "POST",
       body: { table_token: TABLE_TOKEN },
     });
-    check("E1 initialize → 200", r.status === 200, `got ${r.status}`);
-    check("E1 returns the table code", r.body?.data?.code === TABLE_TOKEN);
-    check("E1 returns a realtime_token field", "realtime_token" in (r.body?.data ?? {}));
+    const data = r.body?.data ?? {};
+    sessionPin = data.session_pin ?? null;
+    sessionSecret = data.session_secret ?? null;
+
+    check("E1 first scan claims the table → 200", r.status === 200, `got ${r.status}`);
+    check("E1 reports the session active", data.status === "active", `got ${data.status}`);
+    check("E1 returns the table code", data.code === TABLE_TOKEN);
+    check("E1 mints a 2-digit PIN", /^\d{2}$/.test(sessionPin ?? ""), `got ${sessionPin}`);
+    check(
+      "E1 mints a 20-character pass",
+      /^[A-Za-z0-9]{20}$/.test(sessionSecret ?? ""),
+      `got length ${sessionSecret?.length}`,
+    );
+    check("E1 returns a realtime_token field", "realtime_token" in data);
+
+    // The same table QR, scanned by a second phone: no credentials, no data.
+    const again = await api("/api/v1/sessions/initialize", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN },
+    });
+    const locked = again.body?.data ?? {};
+    check("E1 second scan of a live table → locked", locked.status === "locked", `got ${locked.status}`);
+    check("E1 locked reply reports the PIN unlocked", locked.pin_locked === false);
+    check("E1 locked reply releases no pass", !("session_secret" in locked));
+    check("E1 locked reply releases no read token", locked.realtime_token === null);
+    check("E1 locked reply reports 3 attempts", locked.attempts_remaining === 3, `got ${locked.attempts_remaining}`);
 
     const bad = await api("/api/v1/sessions/initialize", {
       method: "POST",
@@ -125,6 +161,98 @@ try {
     });
     check("E1 malformed token → 400 VALIDATION_ERROR", malformed.body?.error?.code === "VALIDATION_ERROR");
     check("E1 validation carries error.fields", Boolean(malformed.body?.error?.fields));
+  }
+
+  {
+    // ---- Layer 1: the 2-digit PIN, and the table-wide 3-strike lock ----
+    const wrongPin = sessionPin === "00" ? "99" : "00";
+
+    const first = await api("/api/v1/sessions/join-pin", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, pin: wrongPin },
+    });
+    check("E1b wrong PIN → 401 INVALID_SESSION_PIN", first.body?.error?.code === "INVALID_SESSION_PIN", `got ${first.body?.error?.code}`);
+    check("E1b wrong PIN reports 2 attempts left", first.body?.error?.attempts_remaining === 2, `got ${first.body?.error?.attempts_remaining}`);
+
+    const second = await api("/api/v1/sessions/join-pin", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, pin: wrongPin },
+    });
+    check("E1b second wrong PIN → 401", second.body?.error?.code === "INVALID_SESSION_PIN");
+    check("E1b second wrong PIN reports 1 attempt left", second.body?.error?.attempts_remaining === 1, `got ${second.body?.error?.attempts_remaining}`);
+
+    // The 3rd wrong PIN IS the lock (confirmed product decision).
+    const third = await api("/api/v1/sessions/join-pin", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, pin: wrongPin },
+    });
+    check("E1b third wrong PIN → 423 TABLE_PIN_LOCKED", third.body?.error?.code === "TABLE_PIN_LOCKED", `got ${third.body?.error?.code}`);
+    check("E1b the lock reports 0 attempts left", third.body?.error?.attempts_remaining === 0, `got ${third.body?.error?.attempts_remaining}`);
+
+    // Even the CORRECT PIN is refused while the table is flagged.
+    const correctWhileLocked = await api("/api/v1/sessions/join-pin", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, pin: sessionPin },
+    });
+    check("E1b correct PIN while flagged → 423", correctWhileLocked.body?.error?.code === "TABLE_PIN_LOCKED", `got ${correctWhileLocked.body?.error?.code}`);
+
+    const flagged = await api("/api/v1/sessions/initialize", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN },
+    });
+    check("E1 initialize reports the table flagged", flagged.body?.data?.pin_locked === true);
+
+    const badShape = await api("/api/v1/sessions/join-pin", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, pin: "7" },
+    });
+    check("E1b one-digit PIN → 400 VALIDATION_ERROR", badShape.body?.error?.code === "VALIDATION_ERROR", `got ${badShape.body?.error?.code}`);
+
+    // ---- Layer 2: the 20-character pass unlocks and unflags ------------
+    const wrongPass = sessionSecret === "A".repeat(20) ? "B".repeat(20) : "A".repeat(20);
+    const rejected = await api("/api/v1/sessions/join-pass", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, secret: wrongPass },
+    });
+    check("E1c wrong pass → 401 INVALID_SESSION_SECRET", rejected.body?.error?.code === "INVALID_SESSION_SECRET", `got ${rejected.body?.error?.code}`);
+
+    const shortPass = await api("/api/v1/sessions/join-pass", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, secret: "too-short" },
+    });
+    check("E1c 9-character pass → 400 VALIDATION_ERROR", shortPass.body?.error?.code === "VALIDATION_ERROR", `got ${shortPass.body?.error?.code}`);
+
+    const pass = await api("/api/v1/sessions/join-pass", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, secret: sessionSecret },
+    });
+    check("E1c correct pass → 200 active", pass.status === 200 && pass.body?.data?.status === "active", `got ${pass.status} / ${pass.body?.data?.status}`);
+    check("E1c pass returns the table's PIN", pass.body?.data?.session_pin === sessionPin);
+
+    const unflagged = await api("/api/v1/sessions/initialize", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN },
+    });
+    check("E1c the pass resets the 3-strike flag", unflagged.body?.data?.pin_locked === false);
+
+    const afterUnlock = await api("/api/v1/sessions/join-pin", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, pin: sessionPin },
+    });
+    check("E1b correct PIN after an unlock → 200", afterUnlock.body?.data?.status === "active", `got ${afterUnlock.body?.error?.code ?? afterUnlock.body?.data?.status}`);
+
+    // ---- Reconnect: a refresh must not re-prompt -----------------------
+    const reconnect = await api("/api/v1/sessions/reconnect", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, secret: sessionSecret },
+    });
+    check("E1d reconnect with the pass → 200", reconnect.status === 200 && reconnect.body?.data?.status === "active", `got ${reconnect.status}`);
+
+    const stale = await api("/api/v1/sessions/reconnect", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, secret: wrongPass },
+    });
+    check("E1d reconnect with a stale pass → 403 SESSION_ENDED", stale.body?.error?.code === "SESSION_ENDED", `got ${stale.body?.error?.code}`);
   }
 
   {
@@ -270,6 +398,16 @@ try {
     // is served and active_order becomes null).
     const floorLive = await api("/api/v1/floor/tables?limit=100", { token: staffToken });
     const liveRow = (floorLive.body?.data ?? []).find((t) => t.code === TABLE_TOKEN);
+
+    /* ZERO-KNOWLEDGE: the floor board and the kitchen board must never carry
+       the table's credentials — not the column names, and not the values. */
+    const floorJson = JSON.stringify(floorLive.body ?? {});
+    check("E17 never exposes session_pin", !floorJson.includes("session_pin"));
+    check("E17 never exposes session_secret", !floorJson.includes("session_secret"));
+    check(
+      "E17 never leaks the pass value",
+      !sessionSecret || !floorJson.includes(sessionSecret),
+    );
     check("E17 active_order carries the ticket items", Array.isArray(liveRow?.active_order?.items));
     check(
       "E17 items carry the allergy note",
@@ -310,6 +448,14 @@ try {
       ticket?.items?.[0]?.unit_price === target.price,
       `got ${ticket?.items?.[0]?.unit_price} expected ${target.price}`,
     );
+
+    const boardJson = JSON.stringify(board.body ?? {});
+    check("E10 never exposes session_pin", !boardJson.includes("session_pin"));
+    check("E10 never exposes session_secret", !boardJson.includes("session_secret"));
+    check(
+      "E10 never leaks the pass value",
+      !sessionSecret || !boardJson.includes(sessionSecret),
+    );
   }
 
   {
@@ -348,6 +494,31 @@ try {
     const prune = await api(`/api/v1/kds/tickets/${orderId}/prune`, { method: "PATCH", token: staffToken });
     check("E12 prune → served", prune.body?.data?.status === "served");
     check("E12 clears the table", prune.body?.data?.table_cleared === true);
+
+    /* Settling ENDS the session: the credentials must be gone from the row,
+       so the next party's first scan mints a fresh pair instead of inheriting
+       one that an old device could still reconnect with. Read straight from
+       the DB because the API deliberately never exposes these columns. */
+    if (process.env.DATABASE_URL) {
+      const db = new pg.Client({ connectionString: process.env.DATABASE_URL.trim() });
+      try {
+        await db.connect();
+        const { rows } = await db.query(
+          `SELECT status, session_pin, session_secret, failed_pin_attempts
+             FROM restaurant_tables WHERE code = $1`,
+          [TABLE_TOKEN],
+        );
+        const row = rows[0] ?? {};
+        check("E12 settle clears session_pin", row.session_pin === null, `got ${row.session_pin}`);
+        check("E12 settle clears session_secret", row.session_secret === null, `got ${row.session_secret}`);
+        check("E12 settle resets failed_pin_attempts", row.failed_pin_attempts === 0, `got ${row.failed_pin_attempts}`);
+        check("E12 settle leaves the table empty", row.status === "empty", `got ${row.status}`);
+      } catch (err) {
+        check("E12 settle verified against the database", false, err.message);
+      } finally {
+        await db.end().catch(() => {});
+      }
+    }
   }
 
   {
@@ -428,7 +599,10 @@ if (!KEEP && process.env.DATABASE_URL) {
       [TABLE_TOKEN],
     );
     await client.query(
-      `UPDATE restaurant_tables SET status = 'empty' WHERE code = $1`,
+      `UPDATE restaurant_tables
+          SET status = 'empty', session_pin = NULL, session_secret = NULL,
+              failed_pin_attempts = 0, session_started_at = NULL
+        WHERE code = $1`,
       [TABLE_TOKEN],
     );
     console.log(`\n[smoke] cleaned up ${rows.length} test order(s) — demo state restored`);

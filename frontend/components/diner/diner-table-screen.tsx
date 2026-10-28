@@ -10,7 +10,9 @@ import { CartStrip } from "@/components/diner/cart-strip";
 import { DinerNavBar } from "@/components/diner/diner-nav-bar";
 import { InactiveTableState } from "@/components/diner/inactive-table-state";
 import { MenuBrowser } from "@/components/diner/menu-browser";
+import { SessionEndedState } from "@/components/diner/session-ended-state";
 import { TableCart } from "@/components/diner/table-cart";
+import { TablePassModal } from "@/components/diner/table-pass-modal";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Container } from "@/components/ui/container";
@@ -21,6 +23,7 @@ import { usePresence } from "@/hooks/use-presence";
 import { useBills } from "@/hooks/use-bills";
 import { useLiveTable } from "@/hooks/use-live-table";
 import { getStoredDisplayName, storeDisplayName, storeTableToken } from "@/lib/api/session";
+import { clearStoredSession, getGrantedSession } from "@/lib/api/table-session";
 import type { MenuItem } from "@/lib/api/types";
 
 export interface DinerTableScreenProps {
@@ -41,6 +44,9 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
   // it also decides which slice shows first.
   const [billScope, setBillScope] = useState<BillScope | null>(null);
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
+  // The Table Pass sheet: this device's PIN plus the QR that carries the
+  // session secret to a tablemate's camera.
+  const [passOpen, setPassOpen] = useState(false);
   // The value is only ever rendered inside the cart modal, which opens after
   // hydration, so reading storage in the initialiser cannot mismatch the SSR HTML.
   const [displayName, setDisplayName] = useState(() => getStoredDisplayName());
@@ -104,6 +110,15 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
   if (live.phase === "error") {
     if (live.error?.error === "TABLE_NOT_FOUND") return <InactiveTableState />;
 
+    /* The server settled this table while the tab was open (or the session
+       secret rotated). Say so cleanly and drop the dead credentials — a
+       "lost connection" screen would suggest retrying something that can
+       never succeed. */
+    if (live.error?.error === "SESSION_ENDED") {
+      clearStoredSession(tableToken);
+      return <SessionEndedState />;
+    }
+
     return (
       <main id="main" className="min-h-dvh">
         <Container size="narrow" className="py-16">
@@ -125,6 +140,9 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
 
   if (!table) return <InactiveTableState />;
 
+  // Present whenever the gate granted a session; absent in the offline demo.
+  const session = getGrantedSession(tableToken);
+
   return (
     <main id="main" className="min-h-dvh pb-32">
       {/* The diner's one band of chrome: identity and the three reach-for
@@ -135,6 +153,7 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
         displayName={displayName}
         onDisplayNameChange={handleDisplayNameChange}
         onOpenBill={(scope) => setBillScope(scope)}
+        onOpenPass={session ? () => setPassOpen(true) : undefined}
       />
 
       {/* The heading block is gone on purpose: "Ready to order?" now lives on
@@ -214,6 +233,17 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
           router.push(`/table/${tableToken}/tracker`);
         }}
       />
+
+      {session ? (
+        <TablePassModal
+          open={passOpen}
+          onClose={() => setPassOpen(false)}
+          tableToken={tableToken}
+          tableName={session.name || session.code}
+          pin={session.session_pin}
+          secret={session.session_secret}
+        />
+      ) : null}
 
       {/* Last in the DOM so it sits above the cart, the strip and the nav. */}
       {settledAt ? (

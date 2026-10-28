@@ -20,6 +20,10 @@ export {
 } from "./apiClient";
 export {
   initializeSession,
+  startTableSession,
+  joinTableWithPin,
+  joinTableWithPass,
+  reconnectTableSession,
   loginKDS,
   getMe,
   checkActiveOrder,

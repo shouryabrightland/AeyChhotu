@@ -18,7 +18,10 @@ export function CartStrip({ itemCount, total, onView }: CartStripProps) {
 
   return (
     <div className="fixed inset-x-0 bottom-0 z-30 border-t border-ink/20 bg-ink text-ink-inverse shadow-lg lg:hidden">
-      <Container className="py-3">
+      {/* The strip is pinned to the very bottom, so it owns the home-indicator
+          inset: without this the Review button sits under the gesture bar on
+          an iPhone. `max()` keeps a sane minimum on devices with no inset. */}
+      <Container className="pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <button
           type="button"
           onClick={onView}

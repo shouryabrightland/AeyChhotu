@@ -118,6 +118,19 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
   const [audioArmed, setAudioArmed] = useState(false);
   const [availabilityOpen, setAvailabilityOpen] = useState(false);
 
+  /* Below `lg` the three-column Kanban becomes ONE lane plus a segmented
+     control. Stacking three full-height lanes meant a cook scrolled past two
+     screens of other work to reach the tickets they were hired to look at. */
+  const [lane, setLane] = useState<ColumnStatus>("pending");
+  const [isWide, setIsWide] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 64rem)");
+    const update = () => setIsWide(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
   usePresence(null);
 
   // Offline fallback heads-up: one toast so the operator knows the board
@@ -270,16 +283,60 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
           />
         </Container>
       ) : (
-        <Container className="grid gap-6 py-6 lg:grid-cols-3 lg:items-start">
-          {columns.map((column) => {
-            const list = tickets.filter((order) => order.status === column.status);
-
-            return (
-              <section
-                key={column.status}
-                aria-label={`${column.title} tickets`}
-                className="relative flex min-h-[26rem] flex-col gap-4 overflow-hidden rounded-lg border border-line-strong bg-surface p-4 pt-5 sm:p-5"
+        <>
+          {/* Segmented control — instant, local, no server round trip. */}
+          <div className="lg:hidden">
+            <Container className="pt-4">
+              <div
+                role="tablist"
+                aria-label="Filter tickets by stage"
+                className="grid grid-cols-3 gap-1 rounded-lg border border-line-strong bg-surface-sunken p-1"
               >
+                {columns.map((column) => {
+                  const count = tickets.filter((order) => order.status === column.status).length;
+                  const active = lane === column.status;
+
+                  return (
+                    <button
+                      key={column.status}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setLane(column.status)}
+                      className={cn(
+                        "flex h-10 cursor-pointer items-center justify-center gap-1.5 rounded-md px-1 text-xs font-semibold transition-colors duration-[var(--duration-fast)]",
+                        active ? "bg-surface text-ink shadow-xs" : "text-ink-muted",
+                      )}
+                    >
+                      <span
+                        aria-hidden
+                        className={cn("size-2 rounded-pill", column.rail)}
+                      />
+                      {column.title}
+                      <span className="tabular-nums opacity-70">({count})</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </Container>
+          </div>
+
+          <Container className="grid gap-6 py-6 lg:grid-cols-3 lg:items-start">
+            {columns.map((column) => {
+              const list = tickets.filter((order) => order.status === column.status);
+              const showOnPhone = column.status === lane;
+
+              return (
+                <section
+                  key={column.status}
+                  aria-label={`${column.title} tickets`}
+                  /* Exactly one display utility per breakpoint, so no
+                     ordering-dependent `hidden`/`flex` collision. */
+                  className={cn(
+                    "relative min-h-[20rem] flex-col gap-4 overflow-hidden rounded-lg border border-line-strong bg-surface p-4 pt-5 sm:p-5 lg:flex lg:min-h-[26rem]",
+                    showOnPhone ? "flex" : "hidden",
+                  )}
+                >
                 {/* The lane's own colour runs across its top edge so the three
                     columns are separable at a glance across the whole board. */}
                 <span aria-hidden className={cn("absolute inset-x-0 top-0 h-1", column.rail)} />
@@ -354,10 +411,11 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
                     </AnimatePresence>
                   </ul>
                 )}
-              </section>
-            );
-          })}
-        </Container>
+                </section>
+              );
+            })}
+          </Container>
+        </>
       )}
 
       <MenuAvailabilityDrawer

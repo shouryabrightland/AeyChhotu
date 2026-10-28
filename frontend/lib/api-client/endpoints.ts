@@ -30,6 +30,8 @@ import type {
   RemoveCartItemPayload,
   SessionIdentity,
   ShiftActivation,
+  TableScan,
+  TableSessionGrant,
   ShiftLogin,
   TableSession,
   UpdateCartItemPayload,
@@ -48,6 +50,67 @@ export async function initializeSession(tableToken: string): Promise<TableSessio
   const { data } = await apiRequest<TableSession>(`${BASE}/sessions/initialize`, {
     method: "POST",
     body: { table_token: tableToken },
+  });
+  setRealtimeAuth(data.realtime_token ?? null);
+  return data;
+}
+
+/** E1 — POST /api/v1/sessions/initialize, as the session GATE sees it.
+    Same endpoint as `initializeSession`, but typed for the discriminated
+    reply: an empty table is claimed (credentials returned), a live one is
+    `locked` (nothing returned). The gate — not the data hook — decides
+    which of those the guest sees, which is what keeps `useLiveTable` out of
+    the authentication business. */
+export async function startTableSession(tableToken: string): Promise<TableScan> {
+  const { data } = await apiRequest<TableScan>(`${BASE}/sessions/initialize`, {
+    method: "POST",
+    body: { table_token: tableToken },
+  });
+  setRealtimeAuth(data.realtime_token ?? null);
+  return data;
+}
+
+/* ---- Two-layer table session (E1b–E1d) -------------------------------
+   E1 itself is `initializeSession` above, kept for the token wiring. These
+   three are the join paths the gate drives. Each writes the realtime scope
+   only when the server actually GRANTED the session: a `locked` reply sets
+   it to null, so a browser that has not joined cannot subscribe to the
+   table's rows even if it guessed the channel name. */
+
+/** E1b — POST /api/v1/sessions/join-pin (2-digit keypad). */
+export async function joinTableWithPin(
+  tableToken: string,
+  pin: string,
+): Promise<TableSessionGrant> {
+  const { data } = await apiRequest<TableSessionGrant>(`${BASE}/sessions/join-pin`, {
+    method: "POST",
+    body: { table_token: tableToken, pin },
+  });
+  setRealtimeAuth(data.realtime_token ?? null);
+  return data;
+}
+
+/** E1c — POST /api/v1/sessions/join-pass (the 20-character QR pass). */
+export async function joinTableWithPass(
+  tableToken: string,
+  secret: string,
+): Promise<TableSessionGrant> {
+  const { data } = await apiRequest<TableSessionGrant>(`${BASE}/sessions/join-pass`, {
+    method: "POST",
+    body: { table_token: tableToken, secret },
+  });
+  setRealtimeAuth(data.realtime_token ?? null);
+  return data;
+}
+
+/** E1d — POST /api/v1/sessions/reconnect (a returning device, no keypad). */
+export async function reconnectTableSession(
+  tableToken: string,
+  secret: string,
+): Promise<TableSessionGrant> {
+  const { data } = await apiRequest<TableSessionGrant>(`${BASE}/sessions/reconnect`, {
+    method: "POST",
+    body: { table_token: tableToken, secret },
   });
   setRealtimeAuth(data.realtime_token ?? null);
   return data;

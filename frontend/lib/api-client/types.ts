@@ -69,6 +69,35 @@ export interface TableSession {
   realtime_token?: string | null;
 }
 
+/** E1 — a claimed / joined table session. The credentials are the diner's
+    own: they are what `join-pin`, `join-pass` and `reconnect` return, and
+    they are never present in a staff payload. */
+export interface TableSessionGrant {
+  table_id: string;
+  code: string;
+  name: string;
+  status: "active";
+  session_pin: string;
+  session_secret: string;
+  session_started_at: string | null;
+  realtime_token: string | null;
+}
+
+/** E1 — the reply to a scan of a table that already has a live session.
+    Deliberately carries no credentials and no read token. */
+export interface TableSessionLocked {
+  table_id: string;
+  code: string;
+  name: string;
+  status: "locked";
+  pin_locked: boolean;
+  attempts_remaining: number;
+  realtime_token: null;
+}
+
+/** E1 — the discriminated reply to a scan. */
+export type TableScan = TableSessionGrant | TableSessionLocked;
+
 /** E9 anti-duplicate guardrail (discriminated union). */
 export interface ActiveOrderBlocked {
   has_active_order: true;

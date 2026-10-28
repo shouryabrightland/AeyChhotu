@@ -55,7 +55,10 @@ export function Modal({
         onClose={onClose}
       />
       {children ? (
-        <div className="flex-1 overflow-y-auto px-6 py-5">{children}</div>
+        /* min-h-0 is what lets a flex child actually shrink and scroll
+           instead of pushing the footer off the sheet; overscroll-contain
+           stops the scroll chaining into the page behind the modal. */
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5">{children}</div>
       ) : null}
       {footer ? <OverlayFooter>{footer}</OverlayFooter> : null}
     </Overlay>

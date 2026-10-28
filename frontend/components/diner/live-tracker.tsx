@@ -18,6 +18,7 @@ import Link from "next/link";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ActiveDinersBadge } from "@/components/diner/active-diners-badge";
 import { InactiveTableState } from "@/components/diner/inactive-table-state";
+import { SessionEndedState } from "@/components/diner/session-ended-state";
 import { LogoMark } from "@/components/brand/logo";
 import { Button, buttonStyles } from "@/components/ui/button";
 import { Container } from "@/components/ui/container";
@@ -26,6 +27,7 @@ import { Skeleton } from "@/components/ui/loading-state";
 import { useNow } from "@/hooks/use-now";
 import { usePresence } from "@/hooks/use-presence";
 import { useLiveTable } from "@/hooks/use-live-table";
+import { clearStoredSession } from "@/lib/api/table-session";
 import type { Order, OrderStatus } from "@/lib/api/types";
 import { ACTIVITY_LINES, FOODIE_JOKES, estimateArrival } from "@/lib/diner/tracker";
 import { formatElapsed, formatIstTime } from "@/lib/format";
@@ -124,6 +126,13 @@ export function LiveTracker({ tableToken }: LiveTrackerProps) {
 
   // ---- State matrix: error (specific API message + Retry Connection) -----
   if (live.phase === "error") {
+    // Settled mid-view: the tracker's whole subject is gone, so drop the dead
+    // credentials and show the end state rather than a retry that cannot work.
+    if (live.error?.error === "SESSION_ENDED") {
+      clearStoredSession(tableToken);
+      return <SessionEndedState />;
+    }
+
     return (
       <main id="main" className="min-h-dvh">
         <Container size="narrow" className="py-16">
@@ -145,7 +154,7 @@ export function LiveTracker({ tableToken }: LiveTrackerProps) {
   if (!table) return <InactiveTableState />;
 
   const header = (
-    <div className="sticky top-0 z-30 border-b border-line bg-canvas/88 backdrop-blur-md">
+    <div className="sticky top-0 z-30 border-b border-line bg-canvas/88 pt-[env(safe-area-inset-top)] backdrop-blur-md">
       <Container className="flex flex-wrap items-center justify-between gap-3 py-3.5">
         <div className="flex items-center gap-3">
           <LogoMark className="size-8" />
@@ -314,9 +323,10 @@ function ProgressJourney({ status }: { status: OrderStatus }) {
             key={step.status}
             className={cn("flex items-start", index < steps.length - 1 && "flex-1")}
           >
-            {/* Equal-width stages keep the middle node exactly centred, so
-                the three connectors read as one straight line. */}
-            <span className="flex w-20 shrink-0 flex-col items-center gap-2.5 sm:w-24">
+            {/* Elastic stages: each one may grow to 90px but no wider, so
+                three of them plus their connectors still fit a 320px screen
+                without the last label clipping off the edge. */}
+            <span className="flex w-full max-w-[90px] flex-1 flex-col items-center gap-2.5">
               <span
                 aria-hidden
                 className={cn(
@@ -351,7 +361,7 @@ function ProgressJourney({ status }: { status: OrderStatus }) {
               <span
                 aria-hidden
                 className={cn(
-                  "mx-2 mt-4 h-px flex-1 transition-colors duration-[var(--duration-slow)] ease-gentle",
+                  "mx-1.5 mt-4 h-px flex-1 transition-colors duration-[var(--duration-slow)] ease-gentle",
                   segmentReached ? "bg-ember/45" : "bg-line-strong",
                 )}
               />
@@ -375,7 +385,7 @@ function ArrivalEstimateModule({
   const arriving = status === "ready" || status === "served";
 
   return (
-    <div className="flex flex-wrap items-center justify-center gap-x-3.5 gap-y-1 rounded-pill border border-line bg-surface/70 px-5 py-2">
+    <div className="flex max-w-full flex-wrap items-center justify-center gap-x-3.5 gap-y-1 rounded-pill border border-line bg-surface/70 px-4 py-2 sm:px-5">
       <span className="flex items-center gap-2 text-label text-ink-subtle uppercase">
         <Timer className="size-3.5" aria-hidden />
         {arriving ? "Arriving now" : "Estimated arrival"}

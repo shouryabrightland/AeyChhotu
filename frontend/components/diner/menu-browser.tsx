@@ -121,22 +121,32 @@ export function MenuBrowser({
 
   return (
     <div className="flex flex-col gap-7">
-      {/* Sticky so search and the view switch stay reachable on a phone while
-          the guest scrolls a long section. */}
+      {/* Sticky so search and the diet filter stay reachable while the guest
+          scrolls a long section. The offset is `--diner-nav-h`, published by
+          the navbar's ResizeObserver, so the two bands dock together instead
+          of the search sliding under the header.
+
+          ONE row, not two: on a 320px phone a labelled search above a
+          bordered filter strip measured ~124px of permanently-stuck chrome.
+          Search + chips side by side is 60px, which keeps the sticky band
+          under the 90px budget and gives the menu the screen back. */}
       <div
         className={cn(
-          "sticky z-20 -mx-1 rounded-lg bg-canvas/90 px-1 py-2 backdrop-blur-md",
+          "sticky z-20 -mx-1 rounded-lg bg-canvas/90 px-1 py-1.5 backdrop-blur-md",
           stickyTopClass,
         )}
       >
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+        <div className="flex items-center gap-2">
           <Input
-            label="Ready to order?"
-            placeholder="Dosa, biryani, chai…"
+            // The label is the placeholder here: a visible label row on a
+            // phone costs 20px of permanently-stuck height. The accessible
+            // name is kept on the control itself.
+            aria-label="Ready to order?"
+            placeholder="Ready to order? Dosa, biryani, chai…"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             leadingIcon={<Search className="size-4" aria-hidden />}
-            containerClassName="flex-1"
+            containerClassName="min-w-0 flex-1"
           />
 
           {/* Diet is the only axis worth a persistent control here: it maps
@@ -154,7 +164,7 @@ export function MenuBrowser({
                 onClick={() => chooseDiet(option.id)}
                 aria-pressed={diet === option.id}
                 className={cn(
-                  "flex h-full shrink-0 cursor-pointer items-center rounded-sm px-3.5 text-sm font-semibold transition-colors duration-[var(--duration-fast)]",
+                  "flex h-full shrink-0 cursor-pointer items-center rounded-sm px-3 text-sm font-semibold transition-colors duration-[var(--duration-fast)] sm:px-3.5",
                   diet === option.id ? "bg-ember text-on-ember" : "text-ink-muted hover:text-ink",
                 )}
               >

@@ -23,7 +23,9 @@ export function Container({
 }: ContainerProps) {
   return (
     <Component
-      className={cn("mx-auto w-full px-5 sm:px-8 lg:px-12", sizes[size], className)}
+      // 3.5 (14px) on phones rather than 5 (20px): on a 320–380px screen
+      // those 12px are a whole column of menu content back.
+      className={cn("mx-auto w-full px-3.5 sm:px-6 lg:px-12", sizes[size], className)}
       {...props}
     />
   );

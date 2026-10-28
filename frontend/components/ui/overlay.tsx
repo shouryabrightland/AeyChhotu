@@ -139,9 +139,15 @@ export function Overlay({
                   : { opacity: 0, x: 40 }
               }
               transition={transitionBase}
+              /* A centre sheet is capped against the DYNAMIC viewport, not
+                 the panel's containing block: on a phone the sheet is a
+                 bottom sheet, and its last row has to stay above Safari's
+                 collapsing toolbar. 85vh is the desktop cap it replaces. */
               className={cn(
-                "pointer-events-auto relative flex max-h-full w-full flex-col overflow-hidden border border-line-strong bg-surface shadow-lg outline-none",
-                position === "center" ? "rounded-t-2xl sm:rounded-xl" : "h-full rounded-none",
+                "pointer-events-auto relative flex w-full flex-col overflow-hidden border border-line-strong bg-surface shadow-lg outline-none",
+                position === "center"
+                  ? "max-h-[calc(100dvh-2rem)] rounded-t-2xl sm:max-h-[85vh] sm:rounded-xl"
+                  : "h-full max-h-full rounded-none",
                 className,
               )}
             >
@@ -199,7 +205,10 @@ export function OverlayFooter({ className, ...props }: HTMLAttributes<HTMLDivEle
   return (
     <div
       className={cn(
-        "flex flex-col gap-3 border-t border-line bg-surface-sunken/60 px-6 py-5 [&>*]:w-full sm:flex-row sm:justify-end sm:[&>*]:w-auto",
+        /* Only BUTTONS stretch on a phone. `[&>*]` used to widen every
+           child, so a price/total span became a full-width block and its
+           text drifted away from the action it described. */
+        "flex flex-col gap-3 border-t border-line bg-surface-sunken/60 px-6 py-5 [&>button]:w-full sm:flex-row sm:justify-end sm:[&>button]:w-auto",
         className,
       )}
       {...props}

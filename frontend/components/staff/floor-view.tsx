@@ -84,11 +84,30 @@ export interface FloorViewProps {
   onLock: () => void;
 }
 
+/* Mobile triage tabs. One endless column of every table is exactly the
+   problem this board exists to solve, so a phone gets the four questions a
+   server actually asks: what is ready, what is cooking, who wants the bill,
+   and (the fallback) everything. */
+type FloorTab = "all" | "ready" | "cooking" | "bill";
+
 export function FloorView({ onLock }: FloorViewProps) {
   const { phase, error, source, tables, retry } = useLiveFloor();
   const now = useNow(1000);
   const { toast } = useToast();
   const [availabilityOpen, setAvailabilityOpen] = useState(false);
+  const [tab, setTab] = useState<FloorTab>("all");
+
+  /* The tab filter is a phone affordance only (the bar is `lg:hidden`), so a
+     desktop board must always show the whole room — including after a guest
+     rotated a tablet that had filtered it. */
+  const [isWide, setIsWide] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 64rem)");
+    const update = () => setIsWide(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   /* Frontend-only coordination state: which tables this server has picked up.
      It exists to demonstrate the future claim flow and is deliberately not
@@ -137,6 +156,27 @@ export function FloorView({ onLock }: FloorViewProps) {
     [tables],
   );
   const ordersToday = DEMO_ORDERS_TODAY_BASE + activeTables;
+
+  const wantsBill = (summary: FloorTableSummary) => {
+    const bill = bills[summary.table.code];
+    return Boolean(bill && !bill.settled_at);
+  };
+
+  const tabCounts: Record<FloorTab, number> = {
+    all: ordered.length,
+    ready: ordered.filter((summary) => summary.active_order?.status === "ready").length,
+    cooking: ordered.filter((summary) => summary.active_order?.status === "preparing").length,
+    bill: ordered.filter(wantsBill).length,
+  };
+
+  const visible = isWide
+    ? ordered
+    : ordered.filter((summary) => {
+        if (tab === "ready") return summary.active_order?.status === "ready";
+        if (tab === "cooking") return summary.active_order?.status === "preparing";
+        if (tab === "bill") return wantsBill(summary);
+        return true;
+      });
 
   function claim(summary: FloorTableSummary) {
     setClaimed((current) => ({ ...current, [summary.table.id]: true }));
@@ -218,6 +258,41 @@ export function FloorView({ onLock }: FloorViewProps) {
           </div>
         ) : null}
 
+        {/* ---- Mobile triage tabs ------------------------------------- */}
+        {phase === "success" && ordered.length > 0 ? (
+          <div
+            role="tablist"
+            aria-label="Filter tables by status"
+            className="hide-scrollbar mt-8 flex gap-1.5 overflow-x-auto pb-1 lg:hidden"
+          >
+            {(
+              [
+                { id: "all", label: "All" },
+                { id: "ready", label: "Ready" },
+                { id: "cooking", label: "Cooking" },
+                { id: "bill", label: "Bill" },
+              ] as const
+            ).map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === option.id}
+                onClick={() => setTab(option.id)}
+                className={cn(
+                  "flex h-10 shrink-0 cursor-pointer items-center gap-1.5 rounded-pill border px-3.5 text-sm font-semibold transition-colors duration-[var(--duration-fast)]",
+                  tab === option.id
+                    ? "border-ember bg-ember text-on-ember"
+                    : "border-line-strong bg-surface text-ink-muted",
+                )}
+              >
+                {option.label}
+                <span className="tabular-nums opacity-70">({tabCounts[option.id]})</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         {/* ---- State matrix: loading ---------------------------------- */}
         {phase === "loading" ? (
           <div className="mt-10 grid gap-5 sm:grid-cols-2 xl:grid-cols-3" aria-busy="true">
@@ -254,8 +329,22 @@ export function FloorView({ onLock }: FloorViewProps) {
           </div>
         ) : (
           /* ---- State matrix: success --------------------------------- */
-          <ul className="mt-10 grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
-            {ordered.map((summary) => (
+          <ul className="mt-6 grid gap-5 sm:grid-cols-2 lg:mt-10 xl:grid-cols-3">
+            {visible.length === 0 ? (
+              <li className="sm:col-span-2 xl:col-span-3">
+                <EmptyState
+                  title="Nothing in this filter"
+                  description="No table matches right now — switch back to All to see the room."
+                  action={
+                    <Button variant="outline" size="sm" onClick={() => setTab("all")}>
+                      Show all tables
+                    </Button>
+                  }
+                />
+              </li>
+            ) : null}
+
+            {visible.map((summary) => (
               <TableCard
                 key={summary.table.id}
                 summary={summary}
@@ -459,7 +548,7 @@ function TableCard({
             type="button"
             onClick={() => onSettle(summary)}
             aria-label={`Take the bill at ${table.name} and clear the table`}
-            className="mt-4 flex w-full cursor-pointer items-center gap-3 rounded-md border border-ember/35 bg-ember-soft px-4 py-3 text-left transition-[border-color] duration-[var(--duration-fast)] hover:border-ember/60"
+            className="mt-5 mb-1 flex w-full cursor-pointer items-center gap-3 rounded-md border border-ember/35 bg-ember-soft px-4 py-3 text-left transition-[border-color] duration-[var(--duration-fast)] hover:border-ember/60"
           >
             <span
               aria-hidden
@@ -478,7 +567,10 @@ function TableCard({
         ) : null}
 
         {canServe ? (
-          <div className="mt-auto pt-6">
+          /* The bill banner and this CTA can be on screen together. mt-auto
+             pushes the action to the foot, and the extra top padding keeps a
+             thumb aimed at "I'll serve this" from landing on "take payment". */
+          <div className="mt-auto pt-7">
             <AnimatePresence mode="wait" initial={false}>
               {claimed ? (
                 <motion.div

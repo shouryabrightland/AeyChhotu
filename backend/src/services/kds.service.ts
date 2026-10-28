@@ -163,9 +163,22 @@ export async function pruneTicket(orderId: string) {
     );
     const tableCleared = (active.rows[0]?.count ?? 0) === 0;
     if (tableCleared) {
-      await client.query("UPDATE restaurant_tables SET status = 'empty' WHERE id = $1", [
-        order.table_id,
-      ]);
+      /* Settling the table ENDS its session (sql/005_table_session_security.sql).
+         The PIN and the pass are bearer credentials for the guests who were
+         sitting here; if they survived, the next party to scan the same QR
+         would inherit a session somebody else could still reconnect to. The
+         attempt counter goes back to zero with them, so a locked table is
+         also unlocked by settling. */
+      await client.query(
+        `UPDATE restaurant_tables
+            SET status              = 'empty',
+                session_pin         = NULL,
+                session_secret      = NULL,
+                failed_pin_attempts = 0,
+                session_started_at  = NULL
+          WHERE id = $1`,
+        [order.table_id],
+      );
     }
 
     await client.query("COMMIT");

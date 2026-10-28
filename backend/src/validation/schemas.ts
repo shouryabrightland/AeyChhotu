@@ -23,6 +23,31 @@ const note = z.string().max(500, "Notes must be 500 characters or fewer.");
 /** E1 POST /api/v1/sessions/initialize */
 export const initializeSchema = z.object({ table_token: tableToken });
 
+/** E1b POST /api/v1/sessions/join-pin — the 2-digit table PIN.
+    '00'–'99' only: the keypad can never produce anything else, so a
+    payload that is not exactly two digits is a client bug, not a typo. */
+export const joinPinSchema = z.object({
+  table_token: tableToken,
+  pin: z.string().regex(/^\d{2}$/, "PIN must be exactly two digits (00-99)."),
+});
+
+/** The 20-character pass shared by join-pass and reconnect. */
+const tableSecret = z
+  .string()
+  .regex(/^[A-Za-z0-9]{20}$/, "The table pass must be 20 letters or digits.");
+
+/** E1c POST /api/v1/sessions/join-pass — unlock a flagged table. */
+export const joinPassSchema = z.object({
+  table_token: tableToken,
+  secret: tableSecret,
+});
+
+/** E1d POST /api/v1/sessions/reconnect — a returning device, no keypad. */
+export const reconnectSchema = z.object({
+  table_token: tableToken,
+  secret: tableSecret,
+});
+
 /** E2 POST /api/v1/auth/kds-login */
 export const kdsLoginSchema = z.object({
   pin: z.string().regex(/^\d{4,6}$/, "PIN must be 4 to 6 digits."),

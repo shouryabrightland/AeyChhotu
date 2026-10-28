@@ -15,7 +15,17 @@ export const metadata: Metadata = {
   manifest: "/site.webmanifest",
 };
 
+/* The app shell is locked at 1×: this is not a document to be read at
+   arm's length, it is a hand-held surface. Zoom is disabled (`maximumScale`
+   + `userScalable`), and `viewportFit: "cover"` is what makes
+   env(safe-area-inset-*) resolve to real values so the nav band clears the
+   notch and the cart strip clears the home indicator. */
 export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: "cover",
   themeColor: "#fbf8f4",
   colorScheme: "light",
 };
