@@ -28,6 +28,14 @@ export interface MenuItemDto {
   image_url: string | null;
   image_small_url: string | null;
   blur_data_url: string | null;
+  /* Kitchen-maintained dish metadata (sql/015). Empty means "not recorded",
+     never "none" — the AI assistant and its allergy check rely on that
+     distinction, so these fields travel with every menu row. */
+  ingredients: string[];
+  spice_level: number;
+  allergens: string[];
+  diet_tags: string[];
+  portion_description: string;
 }
 
 /* E3 — GET /api/v1/menu.
@@ -70,6 +78,11 @@ export async function listMenu(params: MenuListParams): Promise<{
             mi.is_available,
             mi.description,
             mi.vegetarian,
+            mi.ingredients,
+            mi.spice_level,
+            mi.allergens,
+            mi.diet_tags,
+            mi.portion_description,
             img.storage_driver,
             img.original_key,
             img.small_key,
@@ -105,6 +118,11 @@ export async function listMenu(params: MenuListParams): Promise<{
       is_available: row.is_available,
       description: row.description,
       vegetarian: row.vegetarian,
+      ingredients: row.ingredients ?? [],
+      spice_level: row.spice_level ?? 0,
+      allergens: row.allergens ?? [],
+      diet_tags: row.diet_tags ?? [],
+      portion_description: row.portion_description ?? "",
       image_url: image?.image_url ?? null,
       image_small_url: image?.image_small_url ?? null,
       blur_data_url: image?.blur_data_url ?? null,

@@ -15,9 +15,11 @@ import { iso } from "../lib/util.js";
  *             keypad; three wrong PINs lock the TABLE (not the device), so
  *             a guesser cannot keep trying forever.
  *   Layer 2 — the pass. A 20-character secret that only devices which
- *             already joined ever hold. It is what the QR pass carries,
- *             what unlocks a flagged table, and what a refresh presents to
- *             reconnect without retyping anything.
+ *             already joined ever hold. It is what the QR pass carries and
+ *             what a refresh presents to reconnect without retyping
+ *             anything. It is NOT a shortcut past layer 1: join-pass only
+ *             succeeds once the table is PIN-locked (3 strikes), where it
+ *             is the unlock. A normal tablemate must type the 2-digit PIN.
  *
  * Zero-knowledge: neither value is ever returned by a staff endpoint or
  * rendered to staff. The DB additionally denies both columns to the
@@ -25,9 +27,10 @@ import { iso } from "../lib/util.js";
  *
  * The first scan of an EMPTY table claims the session: it mints the
  * credentials and hands them to that device. Every later scan of an ACTIVE
- * table gets `{ status: 'locked' }` and must join with a PIN or a pass —
- * which is what stops a passer-by who photographed the table QR from
- * reading or editing someone else's cart.
+ * table gets `{ status: 'locked' }` and must join with the PIN (or, once
+ * the table is flagged, a tablemate's pass) — which is what stops a
+ * passer-by who photographed the table QR from reading or editing someone
+ * else's cart.
  */
 
 export interface TableRecord {
@@ -146,6 +149,15 @@ export interface GrantedSession {
   session_started_at: string | null;
   bill_status: BillStatus;
   realtime_token: string | null;
+  /* The Chhotu assistant's Gemini key, released with the rest of the
+     credentials. DELIBERATE PRODUCT DECISION: the key is not in the JS
+     bundle, so an anonymous visitor to the site never gets it; it is only
+     handed to a device that has PROVEN it is at a table (initialize on an
+     empty table, join-pin, join-pass, reconnect). Anyone sitting at the
+     table can still read it — so the key must be a restricted, quota-capped
+     one. Null when the deployment has no GEMINI_API_KEY, which simply hides
+     the assistant. */
+  gemini_api_key: string | null;
 }
 
 /** The reply to a scan of a table that already has a live session. */
@@ -181,6 +193,7 @@ function grantedSession(row: SessionRow): GrantedSession {
     session_started_at: row.session_started_at ? iso(row.session_started_at) : null,
     bill_status: row.bill_status,
     realtime_token: issueTableReadToken(row),
+    gemini_api_key: env.geminiApiKey,
   };
 }
 
@@ -445,10 +458,12 @@ export async function joinWithPin(input: {
 }
 
 /* E1c — POST /api/v1/sessions/join-pass.
-   The QR fallback: a 20-character secret from a tablemate's screen. A
-   correct pass also clears the failed-attempt counter, which is what
-   unflags a locked table. One transaction covers the reset, the roster
-   entry and the stale-page check. */
+   The QR UNLOCK: a 20-character secret from a tablemate's screen. It is
+   accepted only when the table is PIN-locked (3 wrongs) — on a table whose
+   keypad still works it is refused with 403 PASS_REQUIRES_PIN, because a
+   photographed QR must not replace the 2-digit code. A correct pass clears
+   the failed-attempt counter, which is what unflags the table. One
+   transaction covers the reset, the roster entry and the stale-page check. */
 export async function joinWithPass(input: {
   table_token: string;
   secret: string;
@@ -476,6 +491,22 @@ export async function joinWithPass(input: {
     if (table.status !== "active" || !table.session_secret) {
       throw new AppError(403, "SESSION_ENDED", SESSION_ENDED_MESSAGE);
     }
+
+    /* The pass is the UNLOCK, not a shortcut past the PIN. While the keypad
+       still works, joining with a photographed pass QR would let anyone skip
+       layer 1 entirely — so the only way in is the 2-digit code. Checked
+       BEFORE the secret comparison, so a refused pass cannot even be used to
+       probe whether a guessed secret is right. */
+    if (table.failed_pin_attempts < MAX_PIN_ATTEMPTS) {
+      const remaining = MAX_PIN_ATTEMPTS - table.failed_pin_attempts;
+      throw new AppError(
+        403,
+        "PASS_REQUIRES_PIN",
+        `Enter the two-digit PIN on the table card to join. A tablemate's pass only unlocks a table after ${MAX_PIN_ATTEMPTS} wrong PINs.`,
+        { attempts_remaining: remaining, failed_attempts: table.failed_pin_attempts },
+      );
+    }
+
     if (table.session_secret !== input.secret) {
       throw new AppError(
         401,

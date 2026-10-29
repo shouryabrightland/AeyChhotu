@@ -1,6 +1,6 @@
 "use client";
 
-import { Search } from "lucide-react";
+import { Search, Sparkles } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useMemo, useState } from "react";
 import { DishDeck } from "@/components/diner/dish-deck";
@@ -24,6 +24,9 @@ export interface MenuBrowserProps {
   onAdd: (item: MenuItem) => void;
   /** Sticky offset for the search bar — the diner nav band docks above it. */
   stickyTopClass?: string;
+  /** Opens the Chhotu assistant. Lives beside the search field so it is
+      reachable at any scroll position, and omitted where there is no sheet. */
+  onOpenAssistant?: () => void;
 }
 
 /* One deck's worth of images, at the width a deck actually renders at. */
@@ -57,6 +60,7 @@ export function MenuBrowser({
   itemErrors,
   onAdd,
   stickyTopClass = "top-0",
+  onOpenAssistant,
 }: MenuBrowserProps) {
   const [query, setQuery] = useState("");
   // One diet at a time, with "All" as an explicit choice — see lib/diner/diet.
@@ -145,17 +149,37 @@ export function MenuBrowser({
         )}
       >
         <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
-          <Input
-            // The label is the placeholder here: a visible label row on a
-            // phone costs 20px of permanently-stuck height. The accessible
-            // name is kept on the control itself.
-            aria-label="Ready to order?"
-            placeholder="Ready to order? Dosa, biryani, chai…"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            leadingIcon={<Search className="size-4" aria-hidden />}
-            containerClassName="w-full sm:min-w-0 sm:flex-1"
-          />
+          <div className="flex w-full items-center gap-2 sm:min-w-0 sm:flex-1">
+            <Input
+              // The label is the placeholder here: a visible label row on a
+              // phone costs 20px of permanently-stuck height. The accessible
+              // name is kept on the control itself.
+              aria-label="Ready to order?"
+              placeholder="Ready to order? Dosa, biryani, chai…"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              leadingIcon={<Search className="size-4" aria-hidden />}
+              containerClassName="min-w-0 flex-1"
+            />
+
+            {/* “Ask Chhotu” sits in the sticky band, so a guest can ask for a
+                recommendation at any scroll position — not just before they
+                start browsing. Icon-only below `sm`: the field keeps its
+                width on a 320px phone and the accessible name carries the
+                words. */}
+            {onOpenAssistant ? (
+              <Button
+                variant="ember"
+                size="md"
+                onClick={onOpenAssistant}
+                aria-label="Ask Chhotu for a recommendation"
+                leftIcon={<Sparkles className="size-4" aria-hidden />}
+                className="h-12 shrink-0 px-3 sm:px-4"
+              >
+                <span className="hidden sm:inline">Ask Chhotu</span>
+              </Button>
+            ) : null}
+          </div>
 
           {/* Diet is the only axis worth a persistent control here: it maps
               to a real question at an Indian table. Scrolls sideways rather

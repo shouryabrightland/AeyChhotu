@@ -33,6 +33,11 @@ export interface GrantedTableSession {
   name: string;
   session_pin: string;
   session_secret: string;
+  /** The Chhotu assistant's key, handed over by the join/reconnect reply.
+      MEMORY ONLY: it is never written to localStorage, so the stored shape
+      stays exactly `{ table_token, session_pin, session_secret }` and a
+      returning device gets a fresh copy when it reconnects. */
+  gemini_api_key: string | null;
 }
 
 function read(): StoredTableSession | null {

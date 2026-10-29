@@ -1,0 +1,475 @@
+"use client";
+
+import type { GoogleGenAI } from "@google/genai";
+import { Check, Loader2, Mic, MicOff, Send, Sparkles, TriangleAlert } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Drawer } from "@/components/ui/drawer";
+import { Input } from "@/components/ui/input";
+import type { LiveTableValue } from "@/hooks/use-live-table";
+import { getChhotuClient, isChhotuConfigured } from "@/lib/ai/gemini-client";
+import { ChhotuLiveSession, type ChhotuPhase } from "@/lib/ai/live-session";
+import type { ChhotuAction, ChhotuMessage, ChhotuRuntime } from "@/lib/ai/types";
+import {
+  fireTableOrder as apiFireOrder,
+  removeCartItem as apiRemoveCartItem,
+  requestTableBill as apiRequestTableBill,
+  updateCartItem as apiUpdateCartItem,
+  upsertCartItem as apiUpsertCartItem,
+} from "@/lib/api-client";
+import { getStoredDisplayName } from "@/lib/api/session";
+import { getGrantedSession } from "@/lib/api/table-session";
+import { cn } from "@/lib/utils";
+
+/* Chhotu — the floating waiter, now voice-to-voice.
+
+   One Gemini LIVE session carries everything: the microphone goes up as PCM,
+   the spoken answer comes back down, and typed text travels over the same
+   socket (`sendText`). There is no text-only model anywhere in the app.
+
+   Tool calls arrive over the socket and run HERE, against the same REST
+   endpoints (and the same table token) as the rest of the diner UI. Any write
+   triggers `live.refresh()` so the cart, bill and KDS-visible state follow
+   without a reload.
+
+   Confirmation for fire/bill/clear is PROMPT-ONLY by product decision: the
+   system instruction forbids acting in the request turn, but the server does
+   not hold a pending-action token. The database guards (fire_order RPC,
+   one-active-order index, table scoping) still apply. */
+
+const QUICK_PROMPTS = [
+  "What's good tonight?",
+  "Something spicy under ₹250",
+  "Add 2 masala dosa",
+  "Where's my order?",
+  "Get the bill",
+] as const;
+
+const INTRO: ChhotuMessage = {
+  id: "intro",
+  role: "assistant",
+  text: "Namaste! I'm Chhotu, your table's waiter. Talk to me or type — ask what's good, add dishes to the shared cart, or check on your order.",
+};
+
+export interface ChhotuAssistantProps {
+  tableToken: string;
+  live: LiveTableValue;
+  /** Hydrated guest name on the menu screen; the tracker reads storage. */
+  displayName?: string;
+  /** Positioning for the floating trigger (bottom offsets differ per screen). */
+  className?: string;
+}
+
+function phaseLabel(phase: ChhotuPhase): string | null {
+  switch (phase) {
+    case "connecting":
+      return "Opening the voice line…";
+    case "listening":
+      return "Listening — speak, then tap the mic again when you're done.";
+    case "thinking":
+      return "Chhotu is thinking…";
+    case "speaking":
+      return "Chhotu is speaking…";
+    default:
+      return null;
+  }
+}
+
+export function ChhotuAssistant({ tableToken, live, displayName, className }: ChhotuAssistantProps) {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState<ChhotuMessage[]>([INTRO]);
+  const [input, setInput] = useState("");
+  const [userDraft, setUserDraft] = useState("");
+  const [assistantDraft, setAssistantDraft] = useState("");
+  const [actions, setActions] = useState<ChhotuAction[]>([]);
+  const [phase, setPhase] = useState<ChhotuPhase>("idle");
+  const [activity, setActivity] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const sessionRef = useRef<ChhotuLiveSession | null>(null);
+  const pendingRef = useRef<Promise<ChhotuLiveSession | null> | null>(null);
+  const endRef = useRef<HTMLDivElement>(null);
+  const idRef = useRef(0);
+
+  /* The session lives longer than a render, so it reads the newest snapshot
+     through refs: a tool must never act on the cart as it looked when the
+     drawer opened. */
+  const liveRef = useRef(live);
+  const userDraftRef = useRef("");
+  const assistantDraftRef = useRef("");
+  const actionsRef = useRef<ChhotuAction[]>([]);
+  const nameRef = useRef("");
+
+  /* Refs are written from effects, never during render: the session outlives
+     a render but a tool must still see the newest snapshot. */
+  useEffect(() => {
+    liveRef.current = live;
+  }, [live]);
+
+  useEffect(() => {
+    nameRef.current = (displayName || getStoredDisplayName()).trim();
+  }, [displayName]);
+
+  /* Released with the table credentials, never baked into the bundle: the
+     gate has granted a session before this component renders. */
+  const apiKey = getGrantedSession(tableToken)?.gemini_api_key ?? null;
+  const configured = isChhotuConfigured(apiKey);
+
+  const push = useCallback((message: Omit<ChhotuMessage, "id">) => {
+    idRef.current += 1;
+    setMessages((current) => [...current, { ...message, id: `chhotu-${idRef.current}` }]);
+  }, []);
+
+  /** Close the turn: whatever was heard/spoken becomes a pair of bubbles. */
+  const flushTurn = useCallback(() => {
+    const heard = userDraftRef.current.trim();
+    const spoken = assistantDraftRef.current.trim();
+    const turnActions = actionsRef.current;
+
+    userDraftRef.current = "";
+    assistantDraftRef.current = "";
+    actionsRef.current = [];
+    setUserDraft("");
+    setAssistantDraft("");
+    setActions([]);
+
+    if (heard) push({ role: "user", text: heard });
+    if (spoken || turnActions.length > 0) {
+      push({
+        role: "assistant",
+        text: spoken || "Done.",
+        ...(turnActions.length > 0 ? { actions: turnActions } : {}),
+      });
+    }
+  }, [push]);
+
+  /** Lazily open the Live socket, once, for both voice and text. */
+  const ensureSession = useCallback(async (): Promise<ChhotuLiveSession | null> => {
+    if (sessionRef.current) return sessionRef.current;
+    if (pendingRef.current) return pendingRef.current;
+
+    const ai: GoogleGenAI | null = getChhotuClient(apiKey);
+    if (!ai) return null;
+
+    const guestName = nameRef.current || (displayName || getStoredDisplayName()).trim();
+
+    const connect = (async () => {
+      const session = new ChhotuLiveSession({
+        client: ai,
+        guestName,
+        tableCode: liveRef.current.table?.code ?? tableToken,
+        // Fresh snapshot per tool call, so an 86 or a tablemate's edit is seen.
+        getRuntime: () => buildRuntime(liveRef.current, tableToken, guestName),
+        callbacks: {
+          onPhase: setPhase,
+          onUserSpeech: (delta) => {
+            userDraftRef.current += delta;
+            setUserDraft(userDraftRef.current);
+          },
+          onAssistantSpeech: (delta) => {
+            assistantDraftRef.current += delta;
+            setAssistantDraft(assistantDraftRef.current);
+          },
+          onTurnComplete: flushTurn,
+          onActivity: setActivity,
+          onActions: (next) => {
+            actionsRef.current = [...actionsRef.current, ...next];
+            setActions(actionsRef.current);
+          },
+          onMutated: () => {
+            void liveRef.current.refresh();
+          },
+          onError: setError,
+        },
+      });
+
+      await session.connect();
+      sessionRef.current = session;
+      return session;
+    })();
+
+    pendingRef.current = connect;
+    try {
+      return await connect;
+    } finally {
+      pendingRef.current = null;
+    }
+  }, [apiKey, displayName, flushTurn, tableToken]);
+
+  const teardown = useCallback(() => {
+    sessionRef.current?.close();
+    sessionRef.current = null;
+    userDraftRef.current = "";
+    assistantDraftRef.current = "";
+    actionsRef.current = [];
+    setUserDraft("");
+    setAssistantDraft("");
+    setActions([]);
+    setActivity(null);
+    setPhase("idle");
+  }, []);
+
+  useEffect(() => () => teardown(), [teardown]);
+
+  useEffect(() => {
+    if (!open) return;
+    endRef.current?.scrollIntoView({ block: "end" });
+  }, [open, messages, activity, userDraft, assistantDraft]);
+
+  const listening = phase === "listening";
+  const connecting = phase === "connecting";
+
+  async function send(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed || connecting) return;
+
+    setInput("");
+    setError(null);
+
+    if (!configured) {
+      push({
+        role: "assistant",
+        text: "Chhotu isn't switched on for this build yet. You can still browse the menu and add dishes yourself.",
+      });
+      return;
+    }
+
+    const session = await ensureSession();
+    if (!session) {
+      push({ role: "assistant", text: "Chhotu isn't available right now. Please order from the menu." });
+      return;
+    }
+
+    // Typed words are not transcribed back by the server, so echo them here.
+    push({ role: "user", text: trimmed });
+    session.sendText(trimmed);
+  }
+
+  async function toggleMic() {
+    setError(null);
+
+    if (!configured) {
+      push({
+        role: "assistant",
+        text: "Chhotu isn't switched on for this build yet. You can still browse the menu and add dishes yourself.",
+      });
+      return;
+    }
+
+    const session = await ensureSession();
+    if (!session) return;
+
+    if (session.micActive) session.stopMic();
+    else await session.startMic();
+  }
+
+  const canSend = input.trim().length > 0 && !connecting;
+  const statusLine = error ?? phaseLabel(phase);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+        aria-label="Ask Chhotu, your AI waiter"
+        className={cn(
+          "fixed right-4 z-40 inline-flex cursor-pointer items-center gap-2 rounded-pill border border-ember/30 bg-ember px-4 py-3 font-sans text-sm font-semibold text-on-ember shadow-lg transition-transform duration-[var(--duration-fast)] ease-gentle hover:-translate-y-0.5 hover:bg-ember-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ember/25",
+          className ?? "bottom-24 lg:bottom-6",
+        )}
+      >
+        <Sparkles className="size-4" aria-hidden />
+        <span>Ask Chhotu</span>
+      </button>
+
+      <Drawer
+        open={open}
+        onClose={() => {
+          teardown();
+          setOpen(false);
+        }}
+        title="Chhotu"
+        description="Your table's waiter — talk or type, ask, add, fire, track."
+        size="md"
+        footer={
+          <div className="flex w-full flex-col gap-2">
+            {statusLine ? (
+              <p
+                role={error ? "alert" : "status"}
+                className={cn("text-xs font-medium", error ? "text-alert" : "text-ink-muted")}
+              >
+                {statusLine}
+              </p>
+            ) : null}
+
+            <form
+              className="flex items-end gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void send(input);
+              }}
+            >
+              <Input
+                aria-label="Message Chhotu"
+                placeholder={listening ? "Listening…" : "Ask for a dish, or say what to add…"}
+                value={input}
+                maxLength={500}
+                onChange={(event) => setInput(event.target.value)}
+                containerClassName="min-w-0 flex-1"
+              />
+
+              <Button
+                type="button"
+                variant={listening ? "ember" : "soft"}
+                size="md"
+                aria-label={listening ? "Stop listening" : "Talk to Chhotu"}
+                aria-pressed={listening}
+                onClick={() => void toggleMic()}
+                disabled={connecting}
+                className="h-12 shrink-0 px-3"
+                leftIcon={
+                  listening ? <MicOff className="size-4" aria-hidden /> : <Mic className="size-4" aria-hidden />
+                }
+              >
+                <span className="sr-only">{listening ? "Stop listening" : "Voice"}</span>
+              </Button>
+
+              <Button
+                type="submit"
+                variant="ember"
+                size="md"
+                disabled={!canSend}
+                aria-label="Send message"
+                className="h-12 shrink-0 px-3"
+                leftIcon={<Send className="size-4" aria-hidden />}
+              >
+                <span className="sr-only">Send</span>
+              </Button>
+            </form>
+          </div>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          {!configured ? (
+            <p className="rounded-md border border-pending/30 bg-pending-surface px-3 py-2 text-sm text-ink">
+              Chhotu isn&apos;t configured in this build. The menu and cart still work normally.
+            </p>
+          ) : null}
+
+          <ul className="flex flex-col gap-3" aria-live="polite">
+            {messages.map((message) => (
+              <MessageBubble key={message.id} message={message} />
+            ))}
+
+            {userDraft ? (
+              <MessageBubble
+                message={{ id: "draft-user", role: "user", text: userDraft }}
+                live
+              />
+            ) : null}
+
+            {assistantDraft ? (
+              <MessageBubble
+                message={{
+                  id: "draft-assistant",
+                  role: "assistant",
+                  text: assistantDraft,
+                  ...(actions.length > 0 ? { actions } : {}),
+                }}
+                live
+              />
+            ) : null}
+          </ul>
+
+          {activity ? (
+            <div className="flex items-center gap-2 text-sm text-ink-muted" role="status">
+              <Loader2 className="size-4 shrink-0 animate-spin text-ember" aria-hidden />
+              <span>{activity}</span>
+            </div>
+          ) : null}
+
+          {messages.length === 1 && !userDraft && !assistantDraft ? (
+            <div role="group" aria-label="Quick requests" className="flex flex-wrap gap-2 pt-1">
+              {QUICK_PROMPTS.map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  disabled={connecting}
+                  onClick={() => void send(prompt)}
+                  className="cursor-pointer rounded-pill border border-line-strong bg-paper px-3 py-1.5 text-xs font-medium text-ink transition-colors duration-[var(--duration-fast)] ease-gentle hover:border-ember/40 hover:bg-ember-soft/50 focus-visible:border-ember focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <div ref={endRef} />
+        </div>
+      </Drawer>
+    </>
+  );
+}
+
+function MessageBubble({ message, live = false }: { message: ChhotuMessage; live?: boolean }) {
+  return (
+    <li className={cn("flex flex-col gap-1.5", message.role === "user" ? "items-end" : "items-start")}>
+      <div
+        className={cn(
+          "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
+          message.role === "user"
+            ? "border border-ember/20 bg-ember-soft text-ink"
+            : "border border-line bg-paper text-ink",
+        )}
+      >
+        {message.text}
+        {live ? (
+          <span aria-hidden className="ml-1 inline-block size-1.5 animate-pulse-soft rounded-pill bg-ember align-middle" />
+        ) : null}
+      </div>
+
+      {message.actions && message.actions.length > 0 ? (
+        <ul className="flex flex-wrap gap-1.5">
+          {message.actions.map((action, index) => (
+            <li
+              key={`${message.id}-action-${index}`}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-xs font-medium",
+                action.ok
+                  ? "border-ready/35 bg-ready-surface text-ready"
+                  : "border-alert/35 bg-alert-surface text-alert",
+              )}
+            >
+              {action.ok ? (
+                <Check className="size-3" aria-hidden />
+              ) : (
+                <TriangleAlert className="size-3" aria-hidden />
+              )}
+              {action.label}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+/** Bind the table and guest name OUTSIDE the model's reach. */
+function buildRuntime(live: LiveTableValue, tableToken: string, userName: string): ChhotuRuntime {
+  return {
+    userName,
+    menu: live.menu,
+    cart: live.cart,
+    orders: live.orders,
+    billStatus: live.billStatus,
+    addCartItem: (input) => apiUpsertCartItem({ table_token: tableToken, ...input }),
+    updateCartItem: (cartItemId, patch) =>
+      apiUpdateCartItem(cartItemId, { table_token: tableToken, ...patch }),
+    removeCartItem: (cartItemId) =>
+      apiRemoveCartItem({ table_token: tableToken, cart_item_id: cartItemId }),
+    fireOrder: () => apiFireOrder(tableToken),
+    requestBill: () => apiRequestTableBill(tableToken),
+    refresh: () => live.refresh(),
+    now: Date.now,
+  };
+}

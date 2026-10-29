@@ -128,6 +128,16 @@ describe("a failed join's next screen", () => {
     assert.equal(failure.attemptsRemaining, 0);
   });
 
+  it("denies a code that is not a table, without claiming the visit ended", () => {
+    const failure = joinFailureFor({
+      status: 404,
+      code: "TABLE_NOT_FOUND",
+      message: "Invalid table token parsed.",
+    });
+
+    assert.equal(failure.phase, "missing", "a bad table is not a settled table");
+  });
+
   it("ends the flow when the table was settled", () => {
     const failure = joinFailureFor({
       status: 403,
@@ -136,6 +146,18 @@ describe("a failed join's next screen", () => {
     });
 
     assert.equal(failure.phase, "ended");
+  });
+
+  it("sends a refused pass back to the keypad, not past it", () => {
+    const failure = joinFailureFor({
+      status: 403,
+      code: "PASS_REQUIRES_PIN",
+      message: "Enter the two-digit PIN on the table card to join.",
+      details: { attempts_remaining: 3, failed_attempts: 0 },
+    });
+
+    assert.equal(failure.phase, "pin", "the pass is unlock-only");
+    assert.equal(failure.attemptsRemaining, 3);
   });
 
   it("keeps the current screen usable when a SCANNED pass is wrong", () => {

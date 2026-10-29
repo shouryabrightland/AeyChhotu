@@ -126,4 +126,17 @@ export const env = {
       in sql/001_init.sql scope per table (diner: table_token, staff: staff).
       Without it no realtime token is issued and Realtime runs REST-only. */
   supabaseJwtSecret: process.env.SUPABASE_JWT_SECRET?.trim() || null,
+  /* Google Gemini API key for the client-side "Ask Chhotu" assistant.
+
+     The backend never calls Gemini. It holds this key for exactly one reason:
+     to hand it to a device that has PROVEN it belongs to a table (initialize
+     on an empty table, join-pin, join-pass, or reconnect). It is therefore
+     never in the JS bundle and never in a pre-join payload — the locked scan
+     reply carries no credentials at all.
+
+     OPTIONAL on purpose: the rest of the app must keep working without it, so
+     a missing key degrades the assistant only (the client hides it) instead of
+     refusing to boot. This value is the single source; the client never reads
+     NEXT_PUBLIC_* for it. */
+  geminiApiKey: process.env.GEMINI_API_KEY?.trim() || null,
 } as const;

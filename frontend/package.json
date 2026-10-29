@@ -17,6 +17,7 @@
     "check:session": "node scripts/session-check.mjs"
   },
   "dependencies": {
+    "@google/genai": "^2.32.0",
     "@supabase/supabase-js": "2.117.2",
     "clsx": "^2.1.1",
     "jsqr": "^1.4.0",

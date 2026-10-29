@@ -296,6 +296,19 @@ const adminDishDescription = z
   .trim()
   .max(500, "Descriptions must be 500 characters or fewer.");
 
+/* Dish metadata (sql/015). Kept intentionally simple: the kitchen types
+   ingredients and allergens as plain words, lower-cased for the assistant's
+   matching. Vegetarian stays its own boolean column. */
+const menuIngredients = z.array(
+  z.string().trim().min(1, "Ingredients cannot be empty.").max(80, "Ingredients must be 80 characters or fewer."),
+).max(40, "List at most 40 ingredients.");
+const menuSpiceLevel = z.coerce.number().int().min(0, "Spice level must be 0 (mild) to 3 (very hot).").max(3, "Spice level must be 0 (mild) to 3 (very hot).");
+const menuAllergens = z.array(
+  z.string().trim().toLowerCase().min(1, "Allergens cannot be empty.").max(40, "Allergens must be 40 characters or fewer."),
+).max(20, "List at most 20 allergen families.");
+const menuDietTags = z.array(z.enum(["jain", "vegan", "halal", "eggitarian"])).max(8);
+const menuPortionDescription = z.string().trim().max(80, "Portion descriptions must be 80 characters or fewer.");
+
 /** POST /api/v1/admin/menu */
 export const adminCreateMenuItemSchema = z.object({
   name: adminDishName,
@@ -307,6 +320,11 @@ export const adminCreateMenuItemSchema = z.object({
   description: adminDishDescription.default(""),
   vegetarian: z.boolean().default(true),
   is_available: z.boolean().default(true),
+  ingredients: menuIngredients.default([]),
+  spice_level: menuSpiceLevel.default(0),
+  allergens: menuAllergens.default([]),
+  diet_tags: menuDietTags.default([]),
+  portion_description: menuPortionDescription.default(""),
 });
 
 /* PATCH /api/v1/admin/menu/:menu_item_id — all fields optional, but at least
@@ -320,6 +338,11 @@ export const adminUpdateMenuItemSchema = z
     description: adminDishDescription.optional(),
     vegetarian: z.boolean().optional(),
     is_available: z.boolean().optional(),
+    ingredients: menuIngredients.optional(),
+    spice_level: menuSpiceLevel.optional(),
+    allergens: menuAllergens.optional(),
+    diet_tags: menuDietTags.optional(),
+    portion_description: menuPortionDescription.optional(),
   })
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: "Provide at least one field to update.",

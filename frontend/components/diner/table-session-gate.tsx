@@ -146,14 +146,17 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
       name: granted.name,
       session_pin: granted.session_pin,
       session_secret: granted.session_secret,
+      gemini_api_key: granted.gemini_api_key ?? null,
     });
     // Persist exactly the pair the QR pass carries — see lib/api/table-session.
+    // The AI key stays in memory: `storeSession` never writes it.
     storeSession({
       table_id: granted.table_id,
       code: granted.code,
       name: granted.name,
       session_pin: granted.session_pin,
       session_secret: granted.session_secret,
+      gemini_api_key: granted.gemini_api_key ?? null,
     });
 
     setTableName(granted.name || granted.code);
@@ -237,9 +240,11 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
         }
       }
 
-      /* 2. A native camera app can open the QR as a plain link. Consume the
-            pass it carries before asking to initialize, or the guest would
-            be shown a keypad for a table they already hold the key to. */
+      /* 2. A native camera app can open the QR as a plain link. The pass it
+            carries only works as an UNLOCK (the table must be PIN-locked);
+            on a healthy table the server refuses it with PASS_REQUIRES_PIN
+            and we fall through to the keypad below, exactly like a guest
+            who never had a pass. */
       const rawPass = readPassFromUrl();
       if (rawPass) {
         const parsed = parsePassPayload(rawPass);
@@ -264,6 +269,13 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
             ) {
               exitToHome();
               return;
+            }
+
+            /* The pass was refused because this table still has its keypad
+               (PASS_REQUIRES_PIN): drop it from the URL so a reload does not
+               replay a credential that cannot succeed. */
+            if (err instanceof ApiError && err.error === "PASS_REQUIRES_PIN") {
+              stripPassFromUrl();
             }
 
             // Any other failure (wrong table, dead secret) falls through to
@@ -343,6 +355,13 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
       // A settled/cleared table (or a rotated secret) is not a dead end to
       // retry from — go home with clean storage.
       exitToHome();
+      return;
+    }
+    if (failure.phase === "missing") {
+      /* No such table. Deny outright rather than offering another pass scan:
+         a dead code cannot start joining whatever is scanned at it. */
+      clearStoredSession(tableToken);
+      setPhase("missing");
       return;
     }
     if (failure.phase === "pin") {
@@ -489,22 +508,17 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
   }
 
   if (phase === "pin") {
+    /* No scanner here on purpose: the pass is the unlock for a FLAGGED table
+       only, and the server refuses it while this keypad still works
+       (403 PASS_REQUIRES_PIN). The scanner lives on the locked screen. */
     return (
-      <>
-        <TablePinPad
-          tableName={tableName}
-          attemptsRemaining={attempts}
-          error={notice}
-          busy={busy}
-          onSubmit={(pin) => void handlePin(pin)}
-          onUseScan={openScanner}
-        />
-        <InAppQrScanner
-          open={scanOpen}
-          onClose={() => setScanOpen(false)}
-          onDecode={(raw) => void handleScanned(raw)}
-        />
-      </>
+      <TablePinPad
+        tableName={tableName}
+        attemptsRemaining={attempts}
+        error={notice}
+        busy={busy}
+        onSubmit={(pin) => void handlePin(pin)}
+      />
     );
   }
 

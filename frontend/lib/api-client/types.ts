@@ -52,6 +52,15 @@ export interface MenuItem {
   image_url?: string | null;
   image_small_url?: string | null;
   blur_data_url?: string | null;
+  /** Kitchen-maintained metadata (sql/015). An EMPTY list means "not
+      recorded", never "contains none" — the assistant says so explicitly. */
+  ingredients?: string[];
+  /** 0 mild · 1 medium · 2 hot · 3 very hot. */
+  spice_level?: number;
+  allergens?: string[];
+  /** Best-effort diet tags: jain, vegan, halal, eggitarian. */
+  diet_tags?: string[];
+  portion_description?: string;
 }
 
 /** E4 cart row. */
@@ -94,10 +103,14 @@ export interface TableSessionGrant {
   session_started_at: string | null;
   bill_status: BillStatus;
   realtime_token: string | null;
+  /** The Chhotu assistant's Gemini key, released WITH the credentials — never
+      in the bundle and never in a pre-join reply. Null when the deployment
+      has no GEMINI_API_KEY, which simply hides the assistant. */
+  gemini_api_key: string | null;
 }
 
 /** E1 — the reply to a scan of a table that already has a live session.
-    Deliberately carries no credentials and no read token. */
+    Deliberately carries no credentials, no read token and no AI key. */
 export interface TableSessionLocked {
   table_id: string;
   code: string;
@@ -482,6 +495,11 @@ export interface CreateAdminMenuItemInput {
   description: string;
   vegetarian: boolean;
   is_available: boolean;
+  ingredients?: string[];
+  spice_level?: number;
+  allergens?: string[];
+  diet_tags?: string[];
+  portion_description?: string;
 }
 
 export type UpdateAdminMenuItemInput = Partial<CreateAdminMenuItemInput>;

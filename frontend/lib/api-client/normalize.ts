@@ -50,6 +50,11 @@ export function toMenuItem(item: ApiMenuItem): MenuItem {
     image_url: item.image_url ?? null,
     image_small_url: item.image_small_url ?? null,
     blur_data_url: item.blur_data_url ?? null,
+    ingredients: item.ingredients ?? [],
+    spice_level: item.spice_level ?? 0,
+    allergens: item.allergens ?? [],
+    diet_tags: item.diet_tags ?? [],
+    portion_description: item.portion_description ?? "",
   };
 }
 

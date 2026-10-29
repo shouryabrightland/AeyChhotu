@@ -48,8 +48,9 @@ export function gatePhase(status: string, failedAttempts: number): GatePhase {
 
 /** What a failed join means for the gate. */
 export interface JoinFailure {
-  /** `pin` keeps the keypad, `locked` swaps it for the scan CTA. */
-  phase: "pin" | "locked" | "ended" | "error";
+  /** `pin` keeps the keypad, `locked` swaps it for the scan CTA, `missing`
+      replaces everything with "that code is not a table". */
+  phase: "pin" | "locked" | "ended" | "missing" | "error";
   message: string;
   attemptsRemaining: number;
 }
@@ -78,12 +79,19 @@ export function joinFailureFor(input: {
       return { phase: "locked", message, attemptsRemaining: 0 };
     case "INVALID_SESSION_PIN":
       return { phase: "pin", message, attemptsRemaining: attempts };
+    /* The pass is unlock-only: scanned while the keypad still works, the
+       server refuses it and the guest belongs on the PIN screen. */
+    case "PASS_REQUIRES_PIN":
+      return { phase: "pin", message, attemptsRemaining: attempts };
     case "INVALID_SESSION_SECRET":
       return { phase: "error", message, attemptsRemaining: attempts };
     case "SESSION_ENDED":
       return { phase: "ended", message, attemptsRemaining: 0 };
+    /* A code that is not a table is NOT a settled table. The initialize
+       path already answers "that code is not a table" (docs/14 #26); a pass
+       scan against a dead code must not say "this session ended" instead. */
     case "TABLE_NOT_FOUND":
-      return { phase: "ended", message, attemptsRemaining: 0 };
+      return { phase: "missing", message, attemptsRemaining: 0 };
     default:
       return { phase: "error", message, attemptsRemaining: attempts };
   }

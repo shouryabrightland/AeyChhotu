@@ -80,6 +80,13 @@ services:
       # Optional: without it the app runs REST-only (no Realtime).
       - key: SUPABASE_JWT_SECRET
         sync: false
+      # Optional: Google Gemini key for the client-side "Ask Chhotu"
+      # assistant. The backend never calls Gemini — it releases this key only
+      # to a device that has joined a table. Without it the API deploys and
+      # serves everything else; the assistant simply stays hidden. Declared
+      # here so a Blueprint sync can set it without editing src/config/env.ts.
+      - key: GEMINI_API_KEY
+        sync: false
       # ---- Dish photos -------------------------------------------------
       # Default is the postgres byte store: durable on a host whose disk is
       # wiped on every deploy, and it needs no extra account — so it is pinned

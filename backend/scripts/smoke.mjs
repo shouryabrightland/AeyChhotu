@@ -188,6 +188,9 @@ try {
     check("E1 locked reply reports the PIN unlocked", locked.pin_locked === false);
     check("E1 locked reply releases no pass", !("session_secret" in locked));
     check("E1 locked reply releases no read token", locked.realtime_token === null);
+    /* The Chhotu key rides with the credentials and nothing else: a scan of a
+       table this device has not joined must not carry it. */
+    check("E1 locked reply releases no AI key", !("gemini_api_key" in locked));
     check("E1 locked reply reports 3 attempts", locked.attempts_remaining === 3, `got ${locked.attempts_remaining}`);
 
     const bad = await api("/api/v1/sessions/initialize", {
@@ -220,6 +223,25 @@ try {
   }
 
   {
+    /* ---- Layer 2 is the UNLOCK, not a shortcut ------------------------
+       The table was just claimed and has no failed attempts, so its keypad
+       works: a tablemate's pass must be refused outright here. Otherwise a
+       photographed QR would replace the 2-digit PIN entirely. */
+    const earlyPass = await api("/api/v1/sessions/join-pass", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, secret: sessionSecret, ...GUEST },
+    });
+    check(
+      "E1c pass on an unlocked table → 403 PASS_REQUIRES_PIN",
+      earlyPass.body?.error?.code === "PASS_REQUIRES_PIN",
+      `got ${earlyPass.body?.error?.code ?? earlyPass.status}`,
+    );
+    check(
+      "E1c refused pass reports all 3 PIN tries left",
+      earlyPass.body?.error?.attempts_remaining === 3,
+      `got ${earlyPass.body?.error?.attempts_remaining}`,
+    );
+
     // ---- Layer 1: the 2-digit PIN, and the table-wide 3-strike lock ----
     const wrongPin = sessionPin === "00" ? "99" : "00";
 
@@ -284,6 +306,11 @@ try {
     });
     check("E1c correct pass → 200 active", pass.status === 200 && pass.body?.data?.status === "active", `got ${pass.status} / ${pass.body?.data?.status}`);
     check("E1c pass returns the table's PIN", pass.body?.data?.session_pin === sessionPin);
+    check(
+      "E1c pass releases the AI key field with the credentials",
+      "gemini_api_key" in (pass.body?.data ?? {}),
+      JSON.stringify(Object.keys(pass.body?.data ?? {})),
+    );
 
     const unflagged = await api("/api/v1/sessions/initialize", {
       method: "POST",
@@ -296,6 +323,20 @@ try {
       body: { table_token: TABLE_TOKEN, pin: sessionPin, ...GUEST },
     });
     check("E1b correct PIN after an unlock → 200", afterUnlock.body?.data?.status === "active", `got ${afterUnlock.body?.error?.code ?? afterUnlock.body?.data?.status}`);
+    /* GEMINI_API_KEY is optional, so the field must ALWAYS be present on a
+       granted session but may legitimately be null. When this script can see
+       the same key the server was started with, the released value must match
+       it exactly — that is the whole contract. */
+    const expectedKey = process.env.GEMINI_API_KEY?.trim() || null;
+    const grantedKey = afterUnlock.body?.data?.gemini_api_key ?? null;
+    check(
+      "E1b a joined device receives the AI key",
+      "gemini_api_key" in (afterUnlock.body?.data ?? {}) &&
+        (grantedKey === null || grantedKey.length > 8) &&
+        (expectedKey === null || grantedKey === expectedKey),
+      `got ${grantedKey === null ? "null" : `${String(grantedKey).slice(0, 4)}…`}, ` +
+        `expected ${expectedKey ? `${expectedKey.slice(0, 4)}…` : "null"}`,
+    );
 
     // ---- Reconnect: a refresh must not re-prompt -----------------------
     const reconnect = await api("/api/v1/sessions/reconnect", {
@@ -303,6 +344,10 @@ try {
       body: { table_token: TABLE_TOKEN, secret: sessionSecret, ...GUEST },
     });
     check("E1d reconnect with the pass → 200", reconnect.status === 200 && reconnect.body?.data?.status === "active", `got ${reconnect.status}`);
+    check(
+      "E1d reconnect re-releases the AI key (memory-only on the client)",
+      reconnect.body?.data?.gemini_api_key === afterUnlock.body?.data?.gemini_api_key,
+    );
 
     const stale = await api("/api/v1/sessions/reconnect", {
       method: "POST",

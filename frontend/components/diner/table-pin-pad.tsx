@@ -1,6 +1,6 @@
 "use client";
 
-import { Delete, QrCode } from "lucide-react";
+import { Delete } from "lucide-react";
 import { useState } from "react";
 import { Container } from "@/components/ui/container";
 import { PIN_LENGTH } from "@/lib/diner/table-pass";
@@ -18,7 +18,12 @@ import { cn } from "@/lib/utils";
  *      Android skins strip them.
  *
  * The pad auto-submits on the second digit: there is nothing else to
- * confirm, and a Submit button would just be an extra tap for every guest. */
+ * confirm, and a Submit button would just be an extra tap for every guest.
+ *
+ * There is deliberately NO pass-scanner on this screen. A tablemate's pass is
+ * the UNLOCK for a flagged table, not a way around the PIN: the server
+ * refuses join-pass while the keypad still works (403 PASS_REQUIRES_PIN), so
+ * offering the scanner here would only produce a dead end. */
 
 const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
@@ -29,7 +34,6 @@ export interface TablePinPadProps {
   error?: string | null;
   busy?: boolean;
   onSubmit: (pin: string) => void;
-  onUseScan: () => void;
 }
 
 export function TablePinPad({
@@ -38,7 +42,6 @@ export function TablePinPad({
   error,
   busy = false,
   onSubmit,
-  onUseScan,
 }: TablePinPadProps) {
   const [digits, setDigits] = useState("");
 
@@ -137,18 +140,9 @@ export function TablePinPad({
             0
           </Key>
 
-          <Key onClick={onUseScan} disabled={busy} label="Scan a tablemate's pass" tone="accent">
-            <QrCode className="size-6" aria-hidden />
-          </Key>
+          {/* Keeps the 3-column grid aligned now that the QR key is gone. */}
+          <span aria-hidden />
         </div>
-
-        <button
-          type="button"
-          onClick={onUseScan}
-          className="cursor-pointer text-sm font-semibold text-ember underline-offset-4 hover:underline"
-        >
-          Or scan a tablemate&apos;s QR pass
-        </button>
       </Container>
     </main>
   );

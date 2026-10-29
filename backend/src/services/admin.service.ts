@@ -685,6 +685,12 @@ export interface AdminMenuItem {
   image_url: string | null;
   image_small_url: string | null;
   blur_data_url: string | null;
+  /** Kitchen-maintained dish metadata (sql/015). */
+  ingredients: string[];
+  spice_level: number;
+  allergens: string[];
+  diet_tags: string[];
+  portion_description: string;
 }
 
 interface AdminMenuRow {
@@ -696,6 +702,11 @@ interface AdminMenuRow {
   description: string;
   vegetarian: boolean;
   is_available: boolean;
+  ingredients: string[];
+  spice_level: number;
+  allergens: string[];
+  diet_tags: string[];
+  portion_description: string;
   storage_driver: string | null;
   original_key: string | null;
   small_key: string | null;
@@ -711,6 +722,11 @@ const MENU_COLUMNS = `mi.id,
        mi.description,
        mi.vegetarian,
        mi.is_available,
+       mi.ingredients,
+       mi.spice_level,
+       mi.allergens,
+       mi.diet_tags,
+       mi.portion_description,
        img.storage_driver,
        img.original_key,
        img.small_key,
@@ -742,6 +758,11 @@ function menuRowToDto(row: AdminMenuRow): AdminMenuItem {
     description: row.description,
     vegetarian: row.vegetarian,
     is_available: row.is_available,
+    ingredients: row.ingredients ?? [],
+    spice_level: row.spice_level ?? 0,
+    allergens: row.allergens ?? [],
+    diet_tags: row.diet_tags ?? [],
+    portion_description: row.portion_description ?? "",
     image_url: image?.image_url ?? null,
     image_small_url: image?.image_small_url ?? null,
     blur_data_url: image?.blur_data_url ?? null,
@@ -781,6 +802,11 @@ export interface CreateMenuItemInput {
   description: string;
   vegetarian: boolean;
   is_available: boolean;
+  ingredients?: string[];
+  spice_level?: number;
+  allergens?: string[];
+  diet_tags?: string[];
+  portion_description?: string;
 }
 
 /* POST /api/v1/admin/menu */
@@ -791,8 +817,11 @@ export async function createMenuItem(input: CreateMenuItemInput): Promise<AdminM
   });
 
   const res = await pool.query<{ id: string }>(
-    `INSERT INTO menu_items (name, price, category, category_id, description, vegetarian, is_available)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO menu_items (
+       name, price, category, category_id, description, vegetarian, is_available,
+       ingredients, spice_level, allergens, diet_tags, portion_description
+     )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id`,
     [
       input.name.trim(),
@@ -802,6 +831,11 @@ export async function createMenuItem(input: CreateMenuItemInput): Promise<AdminM
       input.description.trim(),
       input.vegetarian,
       input.is_available,
+      input.ingredients ?? [],
+      input.spice_level ?? 0,
+      input.allergens ?? [],
+      input.diet_tags ?? [],
+      (input.portion_description ?? "").trim(),
     ],
   );
 
@@ -839,7 +873,12 @@ export async function updateMenuItem(
             description  = COALESCE($5, description),
             vegetarian   = COALESCE($6, vegetarian),
             is_available = COALESCE($7, is_available),
-            category_id  = CASE WHEN $8::boolean THEN $9 ELSE category_id END
+            category_id  = CASE WHEN $8::boolean THEN $9 ELSE category_id END,
+            ingredients        = COALESCE($10, ingredients),
+            spice_level        = COALESCE($11, spice_level),
+            allergens          = COALESCE($12, allergens),
+            diet_tags          = COALESCE($13, diet_tags),
+            portion_description = COALESCE($14, portion_description)
       WHERE id = $1 AND deleted_at IS NULL
       RETURNING id`,
     [
@@ -852,6 +891,11 @@ export async function updateMenuItem(
       input.is_available ?? null,
       folder !== null,
       folder ? folder.category_id : null,
+      input.ingredients ?? null,
+      input.spice_level ?? null,
+      input.allergens ?? null,
+      input.diet_tags ?? null,
+      input.portion_description !== undefined ? input.portion_description.trim() : null,
     ],
   );
 

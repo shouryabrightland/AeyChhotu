@@ -349,11 +349,25 @@ try {
   let legalAllowed = false;
   try {
     await q("BEGIN");
+    /* Pick a table with NO active ticket: the one-active-order partial
+       unique index would otherwise reject this probe on a dev database that
+       happens to have a live table, and the check would report a trigger
+       failure that never happened. Same selection rule as 5e below. */
     const { rows: mk } = await q(
       `INSERT INTO orders (table_id, status)
-       VALUES ((SELECT id FROM restaurant_tables ORDER BY code LIMIT 1), 'pending')
+       SELECT t.id, 'pending'
+         FROM restaurant_tables t
+        WHERE t.deleted_at IS NULL
+          AND NOT EXISTS (
+                SELECT 1 FROM orders o
+                 WHERE o.table_id = t.id
+                   AND o.status IN ('pending', 'preparing', 'ready')
+              )
+        ORDER BY t.code
+        LIMIT 1
        RETURNING id`,
     );
+    if (!mk[0]) throw new Error("no idle table available for the status-guard probe");
     const probeId = mk[0].id;
     // legal: pending → preparing
     await q("UPDATE orders SET status = 'preparing' WHERE id = $1", [probeId]);

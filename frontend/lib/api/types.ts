@@ -29,6 +29,15 @@ export interface MenuItem {
   image_url?: string | null;
   image_small_url?: string | null;
   blur_data_url?: string | null;
+  /* Kitchen-maintained dish metadata (sql/015). An EMPTY list means "not
+     recorded", never "contains none". */
+  ingredients?: string[];
+  /** 0 mild · 1 medium · 2 hot · 3 very hot. */
+  spice_level?: number;
+  allergens?: string[];
+  /** Best-effort diet tags: jain, vegan, halal, eggitarian. */
+  diet_tags?: string[];
+  portion_description?: string;
 }
 
 export interface CartLine {

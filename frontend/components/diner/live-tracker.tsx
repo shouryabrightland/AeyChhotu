@@ -23,6 +23,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ActiveDinersBadge } from "@/components/diner/active-diners-badge";
+import { ChhotuAssistant } from "@/components/diner/chhotu-assistant";
 import { InactiveTableState } from "@/components/diner/inactive-table-state";
 import { SessionEndedState } from "@/components/diner/session-ended-state";
 import { LogoMark } from "@/components/brand/logo";
@@ -169,7 +170,10 @@ export function LiveTracker({ tableToken }: LiveTrackerProps) {
 
   if (!table) return <InactiveTableState />;
 
+  /* The assistant rides with the header so it is present on every success
+     state — live order, empty, and denied — without a second data hook. */
   const header = (
+    <>
     <div className="sticky top-0 z-30 border-b border-line bg-canvas/88 pt-[env(safe-area-inset-top)] backdrop-blur-md">
       <Container className="flex flex-wrap items-center justify-between gap-3 py-3.5">
         <div className="flex items-center gap-3">
@@ -206,6 +210,9 @@ export function LiveTracker({ tableToken }: LiveTrackerProps) {
         </div>
       </Container>
     </div>
+
+    <ChhotuAssistant tableToken={tableToken} live={live} className="bottom-6" />
+    </>
   );
 
   // ---- State matrix: empty (nothing fired yet) --------------------------

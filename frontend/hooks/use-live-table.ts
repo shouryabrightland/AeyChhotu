@@ -149,6 +149,9 @@ interface Snapshot {
 
 const LIST_LIMIT = 100;
 
+/** Quiet time before a burst of ± taps is written as one summed delta. */
+const QUANTITY_BURST_MS = 300;
+
 /** Safety-net cadence for the cart while realtime is unavailable. */
 const CART_POLL_MS = 5_000;
 /** Table status + bill lifecycle (settle/clear) without realtime. */
@@ -898,30 +901,40 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     [tableToken, reloadCart, fail, pushPendingAdd, popPendingAdd, beginSync, endSync],
   );
 
-  const updateLine = useCallback(
-    async (
-      cartItemId: string,
-      patch: {
-        quantity?: number;
-        quantity_delta?: number;
-        request_note?: string;
-        allergy_note?: string;
-      },
-    ) => {
-      /* Paint the ± tap immediately (#4). A note edit has no optimistic
-         representation (it lives on the line's text), so only the quantity
-         delta is overlaid. */
-      const optimisticDelta = patch.quantity_delta;
-      if (optimisticDelta !== undefined) bumpLineAdjustment(cartItemId, optimisticDelta);
+  /* A burst of ± taps is ONE write. Taps paint instantly (the overlay is
+     applied on the first tap) and their deltas are summed, so five quick +
+     taps become a single `quantity_delta: 5` PATCH and a single cart re-read
+     instead of five of each. Note edits never take this path: they arrive
+     already debounced by the row's local draft. */
+  const deltaTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const pendingDeltasRef = useRef(new Map<string, number>());
+
+  /* A screen that goes away mid-burst must not schedule work afterwards. */
+  useEffect(() => {
+    const timers = deltaTimersRef.current;
+    const pending = pendingDeltasRef.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+      pending.clear();
+    };
+  }, []);
+
+  const flushQuantityDelta = useCallback(
+    async (cartItemId: string) => {
+      deltaTimersRef.current.delete(cartItemId);
+      const delta = pendingDeltasRef.current.get(cartItemId) ?? 0;
+      pendingDeltasRef.current.delete(cartItemId);
+      if (delta === 0) return;
 
       beginSync();
       try {
-        await apiUpdateCartItem(cartItemId, { table_token: tableToken, ...patch });
+        await apiUpdateCartItem(cartItemId, { table_token: tableToken, quantity_delta: delta });
         await reloadCart();
-        /* The overlay this call added is now inside the server's cart. */
-        if (optimisticDelta !== undefined) bumpLineAdjustment(cartItemId, -optimisticDelta);
+        /* The overlay this burst added is now inside the server's cart. */
+        bumpLineAdjustment(cartItemId, -delta);
       } catch (err) {
-        if (optimisticDelta !== undefined) bumpLineAdjustment(cartItemId, -optimisticDelta);
+        bumpLineAdjustment(cartItemId, -delta);
         if (err instanceof ApiError && err.status !== 0) {
           // Inline validation vector: the line keeps its old value and the
           // operator sees why in the console-level warning.
@@ -936,8 +949,77 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     [tableToken, reloadCart, fail, beginSync, endSync, bumpLineAdjustment],
   );
 
+  const updateLine = useCallback(
+    async (
+      cartItemId: string,
+      patch: {
+        quantity?: number;
+        quantity_delta?: number;
+        request_note?: string;
+        allergy_note?: string;
+      },
+    ) => {
+      const isPureDelta =
+        patch.quantity_delta !== undefined &&
+        patch.quantity === undefined &&
+        patch.request_note === undefined &&
+        patch.allergy_note === undefined;
+
+      if (isPureDelta) {
+        /* Paint the tap in this frame (#4)… */
+        bumpLineAdjustment(cartItemId, patch.quantity_delta as number);
+
+        /* …then wait out the burst before touching the network. */
+        const accumulated =
+          (pendingDeltasRef.current.get(cartItemId) ?? 0) + (patch.quantity_delta as number);
+        pendingDeltasRef.current.set(cartItemId, accumulated);
+
+        const existing = deltaTimersRef.current.get(cartItemId);
+        if (existing) clearTimeout(existing);
+        deltaTimersRef.current.set(
+          cartItemId,
+          setTimeout(() => void flushQuantityDelta(cartItemId), QUANTITY_BURST_MS),
+        );
+        return;
+      }
+
+      /* A note edit or an absolute quantity: exactly one write, right away. */
+      beginSync();
+      try {
+        await apiUpdateCartItem(cartItemId, { table_token: tableToken, ...patch });
+        await reloadCart();
+      } catch (err) {
+        if (err instanceof ApiError && err.status !== 0) {
+          console.warn("updateLine failed:", err.error, err.message);
+          return;
+        }
+        fail(err);
+      } finally {
+        endSync();
+      }
+    },
+    [
+      tableToken,
+      reloadCart,
+      fail,
+      beginSync,
+      endSync,
+      bumpLineAdjustment,
+      flushQuantityDelta,
+    ],
+  );
+
   const removeLine = useCallback(
     async (cartItemId: string) => {
+      /* A queued ± burst for a line that is being removed is dropped: sending
+         it afterwards would race the delete against a stale delta. */
+      const queued = deltaTimersRef.current.get(cartItemId);
+      if (queued) {
+        clearTimeout(queued);
+        deltaTimersRef.current.delete(cartItemId);
+        pendingDeltasRef.current.delete(cartItemId);
+      }
+
       /* The line disappears in this frame; a failed remove puts it back. */
       setRemovedLines((current) => ({ ...current, [cartItemId]: true }));
 
@@ -960,6 +1042,14 @@ export function useLiveTable(tableToken: string): LiveTableValue {
 
   const fire = useCallback(async (): Promise<{ ok: true } | { ok: false; failure: FireFailure }> => {
     try {
+      /* A ± burst still inside its quiet window must land BEFORE the fire:
+         the RPC reads the server's cart, so an unsent delta would fire the
+         old quantity and leave the tap looking lost. */
+      const queued = [...deltaTimersRef.current.keys()];
+      if (queued.length > 0) {
+        await Promise.all(queued.map((cartItemId) => flushQuantityDelta(cartItemId)));
+      }
+
       /* E9 — the documented anti-duplicate guardrail (Feature 7 / screen S2's
          double-tap guard). Asking first means a second tap inside the same
          second is answered from the server's own state, with the contract's
@@ -1025,7 +1115,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         },
       };
     }
-  }, [tableToken, reloadCart, reloadOrders, fail]);
+  }, [tableToken, reloadCart, reloadOrders, fail, flushQuantityDelta]);
 
   const requestBill = useCallback(async (): Promise<{ ok: boolean; message?: string }> => {
     if (billStatus !== "unrequested") return { ok: true };
