@@ -524,14 +524,45 @@ try {
   await waitForText("Enter table PIN", 25_000);
 
   const wrongDigit = pin.startsWith("0") ? "9" : "0";
+
+  /* The pad ignores keys while its previous answer is in flight. A fixed
+     sleep guessed at that round trip and occasionally lost a pair (the dev
+     server can be slow to compile a route on first use), which made this
+     step flaky. Instead, wait for the SERVER to record each attempt: on a
+     live table `initialize` is a read-only probe that reports `pin_locked`
+     and the remaining count without consuming an attempt or joining the
+     roster. */
+  const waitForAttempt = async (remaining, timeoutMs = 4_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const probe = await api("/api/v1/sessions/initialize", {
+        method: "POST",
+        body: {
+          table_token: TABLE_TOKEN,
+          user_id: "session-check-probe",
+          name: "Probe",
+        },
+      });
+      const data = probe.body?.data ?? {};
+      if (data.pin_locked === true) return true;
+      if (
+        typeof data.attempts_remaining === "number" &&
+        data.attempts_remaining <= remaining
+      ) {
+        return true;
+      }
+      await sleep(150);
+    }
+    return false;
+  };
+
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await clickByText(wrongDigit);
     await sleep(120);
     await clickByText(wrongDigit);
-    /* The pad ignores keys while its previous answer is in flight; in dev the
-       round trip can take a moment, and a click lost here costs an attempt
-       without the script noticing. */
-    await sleep(1_600);
+    await waitForAttempt(2 - attempt);
+    // Let React paint the updated "tries left" line before the next pair.
+    await sleep(200);
   }
 
   const lockedText = await waitForText("Table locked", 20_000);
