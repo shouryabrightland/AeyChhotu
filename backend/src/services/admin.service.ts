@@ -110,7 +110,16 @@ export interface AdminTable {
   /** Whether this table currently has a PIN/pass issued. */
   has_session: boolean;
   session_started_at: string | null;
+  /** The guests on the session roster, oldest first (empty when unseated). */
+  members: AdminTableMember[];
   created_at: string;
+}
+
+/** One person seated at a table, as recorded when their phone joined. */
+export interface AdminTableMember {
+  user_id: string;
+  name: string;
+  joined_at: string;
 }
 
 interface AdminTableRow {
@@ -125,6 +134,7 @@ interface AdminTableRow {
   active_devices: number;
   has_session: boolean;
   session_started_at: Date | null;
+  members: AdminTableMember[];
   created_at: Date;
 }
 
@@ -153,7 +163,20 @@ export async function listAdminTables(): Promise<AdminTable[]> {
             (SELECT count(*)::int
                FROM table_device_presence p
               WHERE p.table_id = t.id
-                AND p.last_seen > now() - interval '120 seconds') AS active_devices
+                AND p.last_seen > now() - interval '120 seconds') AS active_devices,
+            /* Who is sitting here. The roster is written when a phone joins
+               (E1/E1b/E1c) and wiped with the seating, so this is the party
+               actually at the table — not last night's history. */
+            COALESCE(
+              (SELECT json_agg(json_build_object(
+                          'user_id', m.user_id,
+                          'name', m.name,
+                          'joined_at', m.joined_at
+                        ) ORDER BY m.joined_at, m.id)
+                 FROM table_members m
+                WHERE m.table_id = t.id),
+              '[]'::json
+            ) AS members
        FROM restaurant_tables t
       WHERE t.deleted_at IS NULL
       ORDER BY t.created_at, t.code`,
@@ -171,6 +194,11 @@ export async function listAdminTables(): Promise<AdminTable[]> {
     active_devices: row.active_devices,
     has_session: row.has_session,
     session_started_at: row.session_started_at ? iso(row.session_started_at) : null,
+    members: row.members.map((member) => ({
+      user_id: member.user_id,
+      name: member.name,
+      joined_at: iso(member.joined_at),
+    })),
     created_at: iso(row.created_at),
   }));
 }
@@ -219,6 +247,7 @@ export async function createTable(input: { name: string }): Promise<AdminTable> 
         active_devices: 0,
         has_session: false,
         session_started_at: null,
+        members: [],
         created_at: iso(row.created_at),
       };
     } catch (err) {

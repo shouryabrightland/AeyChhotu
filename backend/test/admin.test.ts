@@ -188,6 +188,42 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
     const row = list.find((entry) => entry.table_id === table.table_id);
     assert.ok(row, "the new table must appear in the admin grid");
     assert.equal(row.code, table.code);
+    assert.deepEqual(row.members, [], "an unseated table has no roster");
+  });
+
+  it("lists the guests seated at each table by name", async () => {
+    const table = await admin.createTable({ name: `Admin roster ${stamp}` });
+    createdTableIds.push(table.table_id);
+
+    // The roster rows a phone leaves when it joins (E1/E1b/E1c).
+    await pool.query(
+      `INSERT INTO table_members (table_id, user_id, name, joined_at)
+            VALUES ($1, 'dev-aarav', 'Aarav', now() - interval '2 minutes'),
+                   ($1, 'dev-meera', 'Meera', now())`,
+      [table.table_id],
+    );
+
+    const row = (await admin.listAdminTables()).find(
+      (entry) => entry.table_id === table.table_id,
+    );
+    assert.ok(row);
+    assert.deepEqual(
+      row.members.map((member) => member.name),
+      ["Aarav", "Meera"],
+      "the roster is oldest-first and carries real names",
+    );
+    assert.deepEqual(
+      row.members.map((member) => member.user_id),
+      ["dev-aarav", "dev-meera"],
+    );
+    assert.match(row.members[0]?.joined_at ?? "", /Z$/, "timestamps use the API's Z form");
+
+    // The roster dies with the seating (docs/14 #21), so a clear empties it.
+    await admin.clearTableAsAdmin(table.table_id);
+    const cleared = (await admin.listAdminTables()).find(
+      (entry) => entry.table_id === table.table_id,
+    );
+    assert.deepEqual(cleared?.members, []);
   });
 
   it("creates a distinct code per table", async () => {

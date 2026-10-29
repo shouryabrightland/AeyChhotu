@@ -1080,6 +1080,34 @@ function TablesTab({
                   </div>
                 </dl>
 
+                {/* Who is sitting here. The roster is written when each
+                    phone joins, so a manager can answer "who is at the corner
+                    booth?" without walking the floor. */}
+                <div>
+                  <p className="text-label text-ink-subtle uppercase">
+                    Sitting{table.members.length > 0 ? ` · ${table.members.length}` : ""}
+                  </p>
+                  {table.members.length > 0 ? (
+                    <ul className="mt-1.5 flex flex-wrap gap-1.5">
+                      {table.members.map((member) => (
+                        <li
+                          key={member.user_id}
+                          className="rounded-pill bg-sand px-2.5 py-1 text-xs font-semibold text-ink"
+                          title={`Joined ${formatIstDateTime(member.joined_at)}`}
+                        >
+                          {member.name}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-1 text-xs text-ink-subtle">
+                      {table.status === "active"
+                        ? "No one has joined on a phone yet."
+                        : "No one seated."}
+                    </p>
+                  )}
+                </div>
+
                 <p className="text-xs text-ink-subtle">
                   {table.has_session && table.session_started_at
                     ? `Session since ${formatIstDateTime(table.session_started_at)}`

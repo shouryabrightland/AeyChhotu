@@ -433,6 +433,13 @@ export interface AdminLogin {
 
 /** A live table row in the admin grid. `has_session` is whether a PIN/pass is
     currently issued; `status` is the table's own active/empty state. */
+/** A guest on a table's session roster, recorded when their phone joined. */
+export interface AdminTableMember {
+  user_id: string;
+  name: string;
+  joined_at: string;
+}
+
 export interface AdminTable {
   table_id: string;
   code: string;
@@ -447,6 +454,8 @@ export interface AdminTable {
   active_devices: number;
   has_session: boolean;
   session_started_at: string | null;
+  /** The people seated here, oldest first — empty when no one has joined. */
+  members: AdminTableMember[];
   created_at: string;
 }
 
