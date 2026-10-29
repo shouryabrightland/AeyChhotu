@@ -467,6 +467,24 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
     assert.ok(analytics.total_orders_served >= 1);
     assert.ok(analytics.active_tables_count >= 0);
 
+    /* The 24-hour trend is a fixed, zero-filled window (sql/013). Summing it
+       avoids asserting on a specific bucket, which would flake when the test
+       runs across an hour boundary. */
+    assert.equal(analytics.trend.length, 24, "24 hourly buckets, empty ones included");
+    for (const point of analytics.trend) {
+      assert.match(point.hour, /Z$/, "buckets use the API's Z timestamps");
+      assert.ok(point.revenue >= 0);
+      assert.ok(point.orders_served >= 0);
+    }
+    assert.ok(
+      analytics.trend.reduce((sum, point) => sum + point.revenue, 0) >= quantity * unitPrice,
+      "the served ticket must appear in the hourly trend",
+    );
+    assert.ok(
+      analytics.trend.reduce((sum, point) => sum + point.orders_served, 0) >= 1,
+      "the served ticket must be counted once in the hourly trend",
+    );
+
     // Leaderboard is ordered by units sold, descending.
     const sold = analytics.items.map((item) => item.total_sold);
     assert.deepEqual(sold, [...sold].sort((a, b) => b - a));

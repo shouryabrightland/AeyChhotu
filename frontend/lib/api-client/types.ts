@@ -540,10 +540,19 @@ export interface TopSellingItem {
   total_revenue: number;
 }
 
+/** One hourly bucket of the console's 24-hour trend graph. */
+export interface AdminAnalyticsTrendPoint {
+  hour: string;
+  revenue: number;
+  orders_served: number;
+}
+
 /** GET /api/v1/admin/analytics/top-selling */
 export interface AdminAnalytics {
   items: TopSellingItem[];
   total_revenue: number;
   total_orders_served: number;
   active_tables_count: number;
+  /** Last 24 clock hours, oldest first, empty hours included as zeros. */
+  trend: AdminAnalyticsTrendPoint[];
 }

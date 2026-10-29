@@ -907,11 +907,23 @@ export interface TopSellingItem {
   total_revenue: number;
 }
 
+/* One bucket of the 24-hour trend drawn on the console's top cards. Empty
+   hours are present with zeros, so the client can plot without inventing a
+   timeline. */
+export interface AnalyticsTrendPoint {
+  /** ISO hour start (UTC). */
+  hour: string;
+  revenue: number;
+  orders_served: number;
+}
+
 export interface AnalyticsSummary {
   items: TopSellingItem[];
   total_revenue: number;
   total_orders_served: number;
   active_tables_count: number;
+  /** The last 24 clock hours, oldest first, ending with the current hour. */
+  trend: AnalyticsTrendPoint[];
 }
 
 /* GET /api/v1/admin/analytics/top-selling.
@@ -923,7 +935,7 @@ export interface AnalyticsSummary {
    fire-time price snapshot (sql/004), so re-pricing a dish today cannot
    inflate yesterday's takings. */
 export async function topSellingAnalytics(): Promise<AnalyticsSummary> {
-  const [items, summary, tables] = await Promise.all([
+  const [items, summary, tables, trend] = await Promise.all([
     pool.query<{
       menu_item_id: string;
       name: string;
@@ -952,6 +964,24 @@ export async function topSellingAnalytics(): Promise<AnalyticsSummary> {
          FROM restaurant_tables
         WHERE deleted_at IS NULL AND status = 'active'`,
     ),
+    /* 24 clock hours ending at the current one. generate_series supplies the
+       empty buckets (a quiet hour must plot as zero, not vanish), and the
+       left join reads the hourly rollup (sql/013). */
+    pool.query<{ hour: Date; orders_served: number; revenue: string }>(
+      `WITH hours AS (
+         SELECT generate_series(
+                  date_trunc('hour', now()) - interval '23 hours',
+                  date_trunc('hour', now()),
+                  interval '1 hour'
+                ) AS hour
+       )
+       SELECT h.hour,
+              COALESCE(sh.orders_served, 0)::int AS orders_served,
+              COALESCE(sh.revenue, 0)::numeric(10,2) AS revenue
+         FROM hours h
+         LEFT JOIN sales_hour sh ON sh.hour = h.hour
+        ORDER BY h.hour`,
+    ),
   ]);
 
   return {
@@ -965,6 +995,11 @@ export async function topSellingAnalytics(): Promise<AnalyticsSummary> {
     total_revenue: Number(summary.rows[0]?.total_revenue ?? 0),
     total_orders_served: summary.rows[0]?.total_orders_served ?? 0,
     active_tables_count: tables.rows[0]?.active_tables_count ?? 0,
+    trend: trend.rows.map((row) => ({
+      hour: iso(row.hour),
+      revenue: Number(row.revenue),
+      orders_served: row.orders_served,
+    })),
   };
 }
 

@@ -8,7 +8,6 @@ import {
   Folder,
   FolderPlus,
   ImagePlus,
-  IndianRupee,
   KeyRound,
   LayoutGrid,
   LogOut,
@@ -24,7 +23,7 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import QRCode from "qrcode";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Logo } from "@/components/brand/logo";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -234,6 +233,12 @@ function AdminGate({ onUnlocked }: { onUnlocked: () => void }) {
 const ALL_SLICES = ["analytics", "tables", "menu"] as const;
 type ConsoleSlice = (typeof ALL_SLICES)[number];
 
+/* How often the Active Tables card records a live sample. It matches the
+   console's poll, so one point per refresh; 60 points keep the card readable
+   (15 minutes) without growing forever. */
+const ACTIVE_SAMPLE_MS = 15_000;
+const ACTIVE_SAMPLE_LIMIT = 60;
+
 function AdminConsole({ onLock }: { onLock: () => void }) {
   const { toast } = useToast();
   const [tab, setTab] = useState<AdminTab>("analytics");
@@ -249,6 +254,19 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const refreshDoneTimer = useRef<number | null>(null);
   const [clearingId, setClearingId] = useState<string | null>(null);
   const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
+
+  /* The Active Tables card has no stored history to read: nothing records how
+     many tables were open an hour ago. It therefore plots THIS console's own
+     polls. The buffer lives here rather than in the tab so switching tabs
+     does not restart the line. */
+  const [activeSeries, setActiveSeries] = useState<number[]>([]);
+  const tablesRef = useRef<AdminTable[]>([]);
+
+  // Mirrored in an effect (not during render) so the sampler below can read
+  // the latest grid without restarting its interval on every poll.
+  useEffect(() => {
+    tablesRef.current = tables;
+  }, [tables]);
 
   /* ---- Per-slice loading ---------------------------------------------
      The console used to reload all four datasets after every save and put
@@ -490,6 +508,21 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
      settle on the floor cannot re-render an open menu editor, and an 86
      cannot re-render the tables grid. The read is still soft (no skeletons)
      and still guarded by the per-slice equality check. */
+  /* One live point per poll for the Active Tables sparkline. Reads the table
+     list through a ref so the timer does not restart on every poll. */
+  useEffect(() => {
+    if (phase !== "success") return;
+
+    const sample = () => {
+      const count = tablesRef.current.filter((table) => table.status === "active").length;
+      setActiveSeries((current) => [...current, count].slice(-ACTIVE_SAMPLE_LIMIT));
+    };
+
+    sample();
+    const timer = window.setInterval(sample, ACTIVE_SAMPLE_MS);
+    return () => window.clearInterval(timer);
+  }, [phase]);
+
   useEffect(() => {
     if (phase !== "success") return;
 
@@ -553,16 +586,15 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     <main id="main" className="min-h-dvh bg-canvas pb-20">
       <header className="sticky top-0 z-30 border-b border-line bg-canvas/90 backdrop-blur-md">
         <Container className="flex flex-wrap items-center gap-x-4 gap-y-3 py-3">
+          {/* The same lockup as the home header: the app's own mark and the
+              AeyChhotu wordmark. The console's name sits beside it after a
+              hairline, so the brand is not restated as a faint eyebrow. */}
           <div className="flex min-w-0 items-center gap-3">
-            <span className="flex size-9 items-center justify-center rounded-md bg-ink text-ink-inverse">
-              <ShieldCheck className="size-4" aria-hidden />
-            </span>
-            <div className="min-w-0">
-              <p className="text-label text-ink-subtle uppercase">AeyChhotu</p>
-              <h1 className="truncate font-display text-subheading leading-none text-ink">
-                Manager console
-              </h1>
-            </div>
+            <Logo className="shrink-0" />
+            <span aria-hidden className="h-7 w-px shrink-0 bg-line" />
+            <h1 className="truncate font-display text-subheading font-semibold text-ink">
+              Manager console
+            </h1>
           </div>
 
           <div className="ml-auto flex items-center gap-2">
@@ -714,6 +746,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
           <AnalyticsTab
             analytics={analytics}
             tables={tables}
+            activeSeries={activeSeries}
             deactivatingId={deactivatingId}
             onDeactivate={(table) => void deactivateTable(table)}
           />
@@ -745,11 +778,13 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 function AnalyticsTab({
   analytics,
   tables,
+  activeSeries,
   deactivatingId,
   onDeactivate,
 }: {
   analytics: AdminAnalytics | null;
   tables: AdminTable[];
+  activeSeries: number[];
   deactivatingId: string | null;
   onDeactivate: (table: AdminTable) => void;
 }) {
@@ -775,20 +810,23 @@ function AnalyticsTab({
         <Stat
           label="Revenue collected"
           value={money(analytics.total_revenue)}
-          icon={IndianRupee}
           hint="Served tickets only"
+          values={analytics.trend.map((point) => point.revenue)}
+          windowLabel="Last 24h"
         />
         <Stat
           label="Orders completed"
           value={String(analytics.total_orders_served)}
-          icon={Check}
           hint="Tickets marked served"
+          values={analytics.trend.map((point) => point.orders_served)}
+          windowLabel="Last 24h"
         />
         <Stat
           label="Active tables"
           value={String(activeTables)}
-          icon={LayoutGrid}
           hint="Sessions open right now"
+          values={activeSeries.length > 0 ? activeSeries : [activeTables]}
+          windowLabel="Live"
         />
       </div>
 
@@ -924,22 +962,98 @@ function Stat({
   label,
   value,
   hint,
-  icon: Icon,
+  values,
+  windowLabel,
 }: {
   label: string;
   value: string;
   hint: string;
-  icon: typeof IndianRupee;
+  /** The series drawn where the old icon tile sat. */
+  values: number[];
+  /** "Last 24h" (server history) or "Live" (sampled by this console). */
+  windowLabel: string;
 }) {
   return (
     <div className="rounded-xl border border-line bg-surface p-5">
-      <span className="flex size-9 items-center justify-center rounded-md bg-ember-soft text-ember">
-        <Icon className="size-4" aria-hidden />
-      </span>
-      <p className="mt-4 text-label text-ink-subtle uppercase">{label}</p>
+      <div className="flex items-center justify-between gap-3">
+        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.14em] text-ink-subtle uppercase">
+          <span
+            aria-hidden
+            className="size-1.5 rounded-pill bg-ember motion-safe:animate-pulse"
+          />
+          {windowLabel}
+        </span>
+      </div>
+      <Sparkline
+        values={values}
+        label={`${label} trend, ${windowLabel}`}
+        className="mt-2 h-10 w-full"
+      />
+      <p className="mt-3 text-label text-ink-subtle uppercase">{label}</p>
       <p className="mt-1 font-display text-3xl font-semibold text-ink tabular-nums">{value}</p>
       <p className="mt-1 text-xs text-ink-subtle">{hint}</p>
     </div>
+  );
+}
+
+/* A sparkline small enough to sit where the card icon used to be. Drawn with
+   plain SVG (no chart dependency): zero-based area, a soft currentColor
+   gradient and a 1.6 px line that stays crisp when the box is stretched. */
+function Sparkline({
+  values,
+  label,
+  className,
+}: {
+  values: number[];
+  label: string;
+  className?: string;
+}) {
+  const gradientId = useId().replace(/:/g, "");
+
+  const WIDTH = 100;
+  const HEIGHT = 32;
+  const PAD = 3;
+
+  // One point still reads as a flat line rather than an empty box.
+  const series = values.length >= 2 ? values : [values[0] ?? 0, values[0] ?? 0];
+  const max = Math.max(...series, 0);
+  const step = WIDTH / (series.length - 1);
+  const yOf = (value: number) =>
+    max > 0 ? HEIGHT - PAD - (value / max) * (HEIGHT - PAD * 2) : HEIGHT - PAD;
+
+  const line = series
+    .map(
+      (value, index) =>
+        `${index === 0 ? "M" : "L"} ${(index * step).toFixed(2)} ${yOf(value).toFixed(2)}`,
+    )
+    .join(" ");
+  const area = `${line} L ${WIDTH} ${HEIGHT} L 0 ${HEIGHT} Z`;
+
+  return (
+    <svg
+      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label={label}
+      className={cn("text-ember", className)}
+    >
+      <defs>
+        <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="currentColor" stopOpacity="0.3" />
+          <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${gradientId})`} />
+      <path
+        d={line}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
   );
 }
 
