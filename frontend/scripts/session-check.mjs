@@ -50,8 +50,13 @@ const API = (process.env.SESSION_API_URL ?? "http://localhost:4000").replace(/\/
 const CHROME = process.env.CHROME_PATH ?? "google-chrome";
 const PORT = Number(process.env.CDP_PORT ?? 9223);
 /* A seeded table code. Override when the demo database was seeded under a
-   different code — the flow below settles it again on the way out. */
-const TABLE_TOKEN = process.env.SESSION_TABLE_TOKEN ?? "k7x2p";
+   different code — the flow below settles it again on the way out.
+
+   The code can also drift by itself: the admin console's "regenerate"
+   rewrites it and seed.sql will not undo that. So when the documented demo
+   code is not in the live list, the fixture below picks the first real table
+   (after the staff login, which is what can read the floor). */
+let TABLE_TOKEN = process.env.SESSION_TABLE_TOKEN ?? "k7x2p";
 const STORAGE_KEY = "aeychhotu.table_session.v1";
 
 let passed = 0;
@@ -362,6 +367,12 @@ try {
   const login = await api("/api/v1/auth/kds-login", { method: "POST", body: { pin: staffPin } });
   staffToken = login.body?.data?.token ?? null;
   check("staff login for the fixtures", Boolean(staffToken), `HTTP ${login.status}`);
+
+  if (!process.env.SESSION_TABLE_TOKEN) {
+    const floor = await api("/api/v1/floor/tables?limit=100", { token: staffToken });
+    const codes = (floor.body?.data ?? []).map((row) => row.code);
+    if (!codes.includes(TABLE_TOKEN)) TABLE_TOKEN = codes[0] ?? TABLE_TOKEN;
+  }
 
   /* Fire, then settle. Pruning is the ONLY path that sets a table empty AND
      wipes its credentials, and it needs an order to serve — a table left
