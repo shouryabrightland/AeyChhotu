@@ -228,6 +228,53 @@ export async function inventoryStatus(): Promise<Inventory> {
   };
 }
 
+/* The full dish catalogue, metadata included.
+
+   Why the console needs more than a name and a price: the owner asks "what
+   goes into the paneer butter masala", "which dishes have peanuts", "what
+   can I offer a vegan". Those answers live in the metadata columns added by
+   sql/015, not in the sales rollup. Read-only, admin-gated by the router. */
+export interface CatalogItem {
+  menu_item_id: string;
+  name: string;
+  category: string;
+  price: number;
+  description: string;
+  vegetarian: boolean;
+  spice_level: number;
+  ingredients: string[];
+  allergens: string[];
+  diet_tags: string[];
+  portion_description: string;
+  is_available: boolean;
+  stock_quantity: number | null;
+  low_stock_threshold: number | null;
+}
+
+export async function menuCatalog(): Promise<CatalogItem[]> {
+  const { rows } = await pool.query<CatalogItem>(
+    `SELECT id AS menu_item_id,
+            name,
+            category,
+            price::float8 AS price,
+            description,
+            vegetarian,
+            spice_level,
+            ingredients,
+            allergens,
+            diet_tags,
+            portion_description,
+            is_available,
+            stock_quantity,
+            low_stock_threshold
+       FROM menu_items
+      WHERE deleted_at IS NULL
+      ORDER BY category, name`,
+  );
+
+  return rows;
+}
+
 /** The most recent guest ratings. */
 export async function listFeedback(limit: number): Promise<FeedbackRow[]> {
   const { rows } = await pool.query<FeedbackRow>(

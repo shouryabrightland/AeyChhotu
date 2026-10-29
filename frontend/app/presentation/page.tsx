@@ -11,7 +11,7 @@ export const viewport: Viewport = {
 export const metadata: Metadata = {
   title: "Hackathon showcase",
   description:
-    "A 19-scene tour of AeyChhotu: shared cart, table PIN and pass, diet-aware menu, allergy guardrails, atomic order fire, live kitchen, split bill, floor board and the manager console.",
+    "A 23-scene tour of AeyChhotu: shared cart, table PIN and pass, diet-aware menu, allergy guardrails, atomic order fire, live kitchen, the three Gemini Live voice assistants, the waiter handoff, split bill and the manager console.",
   robots: { index: false },
 };
 

@@ -33,6 +33,7 @@ function fn(
 
 const whole = (description: string): Schema => ({ type: Type.INTEGER, description });
 const flag = (description: string): Schema => ({ type: Type.BOOLEAN, description });
+const text = (description: string): Schema => ({ type: Type.STRING, description });
 
 export const ADMIN_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   fn(
@@ -67,6 +68,15 @@ export const ADMIN_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   fn(
     "get_low_stock_items",
     "Only the dishes that are out of stock or at/below their low-stock threshold, worst first.",
+  ),
+  fn(
+    "get_menu_catalog",
+    "The real dish catalogue with ingredients, allergens, spice level, diet tags, portion, description and price. Use for 'what's in the paneer butter masala', 'which dishes have peanuts', 'what can I offer a vegan', 'which dishes are 86'd'.",
+    {
+      query: text("Free text matched against name, category, description, ingredients, allergens and diet tags (e.g. 'paneer', 'peanut', 'vegan')."),
+      category: text("Only dishes whose category contains this text."),
+      available_only: flag("When true, only dishes currently on the menu (not 86'd)."),
+    },
   ),
   fn(
     "get_guest_feedback",

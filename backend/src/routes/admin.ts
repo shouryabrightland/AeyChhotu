@@ -33,6 +33,7 @@ import {
   dailySalesSummary,
   inventoryStatus,
   listFeedback,
+  menuCatalog,
   pendingOrders,
   tableOccupancy,
 } from "../services/insights.service.js";
@@ -274,6 +275,13 @@ adminRouter.get("/insights/tables", async (_req, res) => {
 adminRouter.get("/insights/inventory", async (_req, res) => {
   const data = await inventoryStatus();
   res.status(200).json({ success: true, data });
+});
+
+/* The full catalogue with ingredients, allergens, spice and diet tags, so the
+   console can answer "what's in this dish" from data instead of guessing. */
+adminRouter.get("/insights/menu", async (_req, res) => {
+  const data = await menuCatalog();
+  res.status(200).json({ success: true, data: { count: data.length, items: data } });
 });
 
 adminRouter.get("/insights/feedback", async (req, res) => {

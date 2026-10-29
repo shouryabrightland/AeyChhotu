@@ -16,6 +16,7 @@
 
 import type {
   AdminBestSeller,
+  AdminCatalogItem,
   AdminFeedback,
   AdminInventory,
   AdminOccupancy,
@@ -31,6 +32,8 @@ export interface AdminRuntime {
   occupancy(): Promise<AdminOccupancy>;
   inventory(): Promise<AdminInventory>;
   feedback(limit: number): Promise<AdminFeedback[]>;
+  /** Every live dish with its ingredients, allergens, spice and diet tags. */
+  catalog(): Promise<AdminCatalogItem[]>;
 }
 
 function asString(value: unknown): string | null {
@@ -232,6 +235,48 @@ export async function executeAdminTool(
       );
     }
 
+    case "get_menu_catalog": {
+      const items = await runtime.catalog();
+      const query = asString(args.query)?.toLowerCase() ?? null;
+      const category = asString(args.category)?.toLowerCase() ?? null;
+      const availableOnly = asBoolean(args.available_only);
+
+      const filtered = items.filter((item) => {
+        if (availableOnly && !item.is_available) return false;
+        if (category && !item.category.toLowerCase().includes(category)) return false;
+        if (!query) return true;
+
+        /* Structured metadata, so "which dishes have peanuts" is a real query
+           rather than a guess from a description. */
+        const haystack = [
+          item.name,
+          item.category,
+          item.description,
+          item.portion_description,
+          ...item.ingredients,
+          ...item.allergens,
+          ...item.diet_tags,
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return haystack.includes(query);
+      });
+
+      return ok(
+        {
+          total: items.length,
+          count: filtered.length,
+          items: filtered,
+          note:
+            filtered.length === 0
+              ? "Nothing in the catalogue matches that. Say so instead of improvising a dish."
+              : "Ingredients, allergens, spice and diet tags are the kitchen's own records. Never add an ingredient that is not listed; if a field is empty, say it is not recorded.",
+        },
+        [{ kind: "info", label: `${filtered.length} of ${items.length} dishes`, ok: true }],
+      );
+    }
+
     default:
       return fail("UNKNOWN_TOOL", `Unknown console tool "${name}".`);
   }
@@ -253,6 +298,8 @@ export function describeAdminToolCall(name: string, args: Record<string, unknown
       return "Checking stock…";
     case "get_guest_feedback":
       return "Reading guest feedback…";
+    case "get_menu_catalog":
+      return "Checking the recipe book…";
     default:
       return "Working on it…";
   }

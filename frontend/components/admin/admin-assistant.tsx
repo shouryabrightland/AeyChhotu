@@ -15,6 +15,7 @@ import type { ChhotuAction, ChhotuMessage } from "@/lib/ai/types";
 import {
   getAdminAssistantKey,
   getAdminBestSelling,
+  getAdminMenuCatalog,
   getAdminFeedback,
   getAdminInventory,
   getAdminOccupancy,
@@ -87,6 +88,7 @@ const ADMIN_RUNTIME: AdminRuntime = {
   occupancy: () => getAdminOccupancy(),
   inventory: () => getAdminInventory(),
   feedback: async (limit) => (await getAdminFeedback(limit)).feedback,
+  catalog: async () => (await getAdminMenuCatalog()).items,
 };
 
 export function AdminAssistant() {

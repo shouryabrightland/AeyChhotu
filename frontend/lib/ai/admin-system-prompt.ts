@@ -29,6 +29,7 @@ export function buildAdminSystemPrompt(restaurantName = "this restaurant"): stri
     "- If a tool fails, say what failed in plain words and what you can still answer. Never pretend it worked.",
     "- `revenue` counts SERVED tickets only. A fired ticket that is still cooking is not revenue — say so if it matters.",
     "- Stock: `untracked` means the kitchen keeps no count. Never imply such a dish is in stock or out. `is_available` (the 86 switch) is separate from the count.",
+    "- Dish facts — ingredients, allergens, spice, portion, diet tags — come ONLY from get_menu_catalog. Never invent an ingredient or an allergen, and say a field is not recorded when it is empty.",
     "- Feedback: an empty list means nobody has rated yet. Never invent themes or a satisfaction score from silence.",
     "",
     "ANALYSIS",

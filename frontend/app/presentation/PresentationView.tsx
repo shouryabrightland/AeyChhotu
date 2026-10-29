@@ -14,7 +14,11 @@ import QRCode from "qrcode";
 import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import styles from "./PresentationView.module.css";
 
-/* The hackathon deck: nineteen visual-first scenes, one feature each.
+/* The hackathon deck: twenty-three visual-first scenes, one feature each.
+
+   Scenes 1–18 walk the service; scenes 19–22 are the WOW act — the three
+   Gemini Live surfaces and the waiter handoff — and 23 opens the product.
+   The wow slides carry a kicker so a judge can see they are the climax.
 
    The stage is the app's own warm canvas — cream, espresso ink, ember — and
    every scene shows the REAL product: menu, cart, tracker, bill, kitchen
@@ -37,12 +41,14 @@ import styles from "./PresentationView.module.css";
    table: a k7x2p link 404s on a fresh deployment, and a judge should land on
    the product itself. */
 const HOME_PATH = "/";
-const SLIDE_COUNT = 19;
+const SLIDE_COUNT = 23;
 
 interface Slide {
   title: string;
   subtitle: string;
   accent: string;
+  /** Optional eyebrow above the title — used by the WOW act. */
+  kicker?: string;
   scene: ReactNode;
 }
 
@@ -1117,6 +1123,217 @@ function TablesScene() {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* WOW act — the three Live surfaces + the waiter handoff               */
+/* ------------------------------------------------------------------ */
+
+/* WOW 01 — the guest talks to the table */
+function GuestVoiceScene() {
+  return (
+    <Scene accent="#9e3e14">
+      <div className={styles.voicePair}>
+        <Phone>
+          <AppTop eyebrow="Chhotu · live" title="What can I get you?" meta="voice + text" />
+          <span className={styles.wakePill}>
+            <span className={styles.micBars} aria-hidden>
+              <i />
+              <i />
+              <i />
+            </span>
+            Listening
+          </span>
+          <div className={styles.transcript}>
+            <span className={styles.bubbleUser}>
+              “do creamy, not too spicy — and I’m allergic to peanuts”
+            </span>
+            <span className={styles.bubbleAi}>
+              Paneer Butter Masala then. Added one — peanut allergy printed on the ticket.
+            </span>
+          </div>
+          <span className={styles.allergyNote}>
+            <strong>Peanut allergy</strong>
+            <span>Carried to the kitchen ticket, not just the chat.</span>
+          </span>
+          <span className={styles.appNote}>Interrupt it. Correct it. Type instead. Same session.</span>
+        </Phone>
+
+        <div className={styles.voicePanel}>
+          <header className={styles.panelHead}>
+            <span className={styles.panelEyebrow}>Table cart · changed by voice</span>
+            <strong className={styles.panelTitle}>Paneer Butter Masala</strong>
+            <span className={styles.panelMeta}>×1 · Aarav · ₹320</span>
+          </header>
+          <div className={styles.metricRow}>
+            <span>Understood</span>
+            <strong>“creamy, not too spicy”</strong>
+          </div>
+          <div className={styles.metricRow}>
+            <span>Corrected</span>
+            <strong>“actually make that two”</strong>
+          </div>
+          <div className={styles.metricRow}>
+            <span>Allergy</span>
+            <strong>flagged, never “safe”</strong>
+          </div>
+          <span className={styles.emberButton}>Fires as one table ticket</span>
+        </div>
+      </div>
+    </Scene>
+  );
+}
+
+/* WOW 02 — the kitchen is hands-free, and ambient talk cannot act */
+function KitchenVoiceScene() {
+  return (
+    <Scene accent="#a31b10">
+      <div className={styles.voicePair}>
+        <div className={styles.voicePanel}>
+          <span className={styles.wakePill}>
+            <span className={styles.micBars} aria-hidden>
+              <i />
+              <i />
+              <i />
+            </span>
+            Shift armed · always listening
+          </span>
+          <div className={styles.transcript}>
+            <span className={styles.bubbleUser}>“Aey Chhotu, table four ready.”</span>
+            <span className={styles.bubbleAi}>T04 ready.</span>
+            <span className={styles.bubbleUser}>“table nine is ready”</span>
+          </div>
+          <span className={styles.refusedChip}>No wake word · tool call refused</span>
+          <span className={styles.appNote}>
+            The model heard it. The app refused to act on it. Zero taps, zero accidents.
+          </span>
+        </div>
+
+        <span className={styles.flowArrow} aria-hidden>
+          →
+        </span>
+
+        <div className={styles.ticket}>
+          <header className={styles.ticketHead}>
+            <strong>T04</strong>
+            <span>Table k7x2p</span>
+          </header>
+          <div className={styles.ticketItem}>
+            <span>Masala Dosa</span>
+            <span>×2</span>
+          </div>
+          <div className={styles.ticketItem}>
+            <span>Filter Coffee</span>
+            <span>×2</span>
+          </div>
+          <div className={styles.kdsAllergy}>PEANUT ALLERGY</div>
+          <footer className={styles.ticketFoot}>
+            <span className={styles.pillReady}>Ready</span>
+            <span>voice · 0 taps</span>
+          </footer>
+        </div>
+      </div>
+    </Scene>
+  );
+}
+
+/* WOW 03 — the owner asks the restaurant */
+function ConsoleVoiceScene() {
+  return (
+    <Scene accent="#8a4a0b">
+      <div className={styles.voicePair}>
+        <div className={styles.voicePanel}>
+          <span className={styles.wakePill}>Manager console · read only</span>
+          <div className={styles.transcript}>
+            <span className={styles.bubbleUser}>“aaj kitna hua? aur top dish?”</span>
+            <span className={styles.bubbleAi}>
+              ₹1,01,780 from 58 orders. Masala Dosa led with 48 — two tables are free.
+            </span>
+            <span className={styles.bubbleUser}>“paneer mein kya hai?”</span>
+            <span className={styles.bubbleAi}>
+              Paneer, tomato, cashew, butter, cream. Allergens: dairy, tree nuts.
+            </span>
+          </div>
+          <span className={styles.appNote}>
+            8 tools. Not one of them can clear a table or change a price.
+          </span>
+        </div>
+
+        <div className={styles.voicePanel}>
+          <header className={styles.panelHead}>
+            <span className={styles.panelEyebrow}>Today · since 5 am</span>
+            <strong className={styles.panelTitle}>₹1,01,780</strong>
+            <span className={styles.panelMeta}>58 orders served</span>
+          </header>
+          <div className={styles.metricRow}>
+            <span>Top dish</span>
+            <strong>Masala Dosa · 48</strong>
+          </div>
+          <div className={styles.metricRow}>
+            <span>Free tables</span>
+            <strong>2 of 5</strong>
+          </div>
+          <div className={styles.metricRow}>
+            <span>Low stock</span>
+            <strong>untracked — and it says so</strong>
+          </div>
+          <div className={styles.metricRow}>
+            <span>Model power</span>
+            <strong>read only by design</strong>
+          </div>
+        </div>
+      </div>
+    </Scene>
+  );
+}
+
+/* WOW 04 — the floor tells the kitchen someone is walking over */
+function WaiterPingScene() {
+  return (
+    <Scene accent="#2c6631">
+      <div className={styles.voicePair}>
+        <div className={styles.panel}>
+          <header className={styles.panelHead}>
+            <span className={styles.panelEyebrow}>Floor · Window four-top</span>
+            <strong className={styles.panelTitle}>Ready at the pass</strong>
+            <span className={styles.panelMeta}>Masala Dosa ×2 · Filter Coffee ×2</span>
+          </header>
+          <div className={styles.statusCard} data-tone="ready">
+            <strong>Ready</strong>
+            <span>Nobody has picked it up yet.</span>
+          </div>
+          <span className={styles.emberButton}>I’ll serve this</span>
+          <span className={styles.appNote}>One tap. No call across the room.</span>
+        </div>
+
+        <span className={styles.flowArrow} aria-hidden>
+          →
+        </span>
+
+        <div className={styles.panel}>
+          <header className={styles.panelHead}>
+            <span className={styles.panelEyebrow}>Kitchen display</span>
+            <strong className={styles.panelTitle}>Live service</strong>
+          </header>
+          <div className={styles.waiterStrip}>
+            <i aria-hidden />
+            Waiter coming · T04
+          </div>
+          <div className={styles.kdsTicket}>
+            <div className={styles.kdsTicketTop}>
+              <strong>Table T04</strong>
+              <span>Ready 1m</span>
+            </div>
+            <span className={styles.kdsItem}>Masala Dosa ×2</span>
+            <span className={styles.kdsItem}>Filter Coffee ×2</span>
+          </div>
+          <span className={styles.appNote}>
+            The pass stops double-running it; serving clears the flag.
+          </span>
+        </div>
+      </div>
+    </Scene>
+  );
+}
+
 /* 15 — try it live */
 function LiveScene({ qrMarkup }: { qrMarkup: string | null }) {
   return (
@@ -1274,6 +1491,38 @@ function slides(qrMarkup: string | null): Slide[] {
       subtitle: "The QR, the session, and exactly who is sitting there.",
       accent: "#7c563b",
       scene: <TablesScene />,
+    },
+    {
+      kicker: "WOW 01 · THE GUEST",
+      title: "You can just talk to the table.",
+      subtitle:
+        "Hinglish, corrections, allergies — the cart changes while you speak, and the ticket follows.",
+      accent: "#9e3e14",
+      scene: <GuestVoiceScene />,
+    },
+    {
+      kicker: "WOW 02 · THE KITCHEN",
+      title: "The chef never touches the screen.",
+      subtitle:
+        "“Aey Chhotu” is the only way in. Background kitchen talk cannot move a ticket.",
+      accent: "#a31b10",
+      scene: <KitchenVoiceScene />,
+    },
+    {
+      kicker: "WOW 03 · THE OWNER",
+      title: "Ask the restaurant how it’s doing.",
+      subtitle:
+        "Revenue, best sellers, free tables, and what is inside a dish — answered out loud from real data.",
+      accent: "#8a4a0b",
+      scene: <ConsoleVoiceScene />,
+    },
+    {
+      kicker: "WOW 04 · THE HANDOFF",
+      title: "The plate knows someone is coming.",
+      subtitle:
+        "A waiter’s tap appears at the pass before the food goes cold — and clears itself when it is served.",
+      accent: "#2c6631",
+      scene: <WaiterPingScene />,
     },
     {
       title: "Now open a table.",
@@ -1471,6 +1720,7 @@ export function PresentationView() {
                 exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -18 }}
                 transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
               >
+                {active.kicker ? <span className={styles.kicker}>{active.kicker}</span> : null}
                 <h1 className={styles.title}>{active.title}</h1>
                 <p className={styles.subtitle}>{active.subtitle}</p>
               </motion.div>

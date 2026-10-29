@@ -8,6 +8,9 @@ A zero-download, real-time operational bridge that **groups every phone at a tab
 shared cart**, fires **one clean ticket** to the kitchen, and streams two-way status updates
 back to the diner — no app install, no login for guests.
 
+It also runs **three voice assistants** — the guest's waiter, the chef's hands-free board and the
+owner's read-only analyst — on **one Gemini Live model**, all backed by the same database.
+
 [![Next.js](https://img.shields.io/badge/Next.js-16.3.6-black?logo=nextdotjs&logoColor=white)](#-tech-stack)
 [![React](https://img.shields.io/badge/React-19.3-61DAFB?logo=react&logoColor=white)](#-tech-stack)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0_strict-3178C6?logo=typescript&logoColor=white)](#-tech-stack)
@@ -16,9 +19,9 @@ back to the diner — no app install, no login for guests.
 [![Postgres](https://img.shields.io/badge/Postgres-Supabase-4169E1?logo=postgresql&logoColor=white)](#-tech-stack)
 [![Zod](https://img.shields.io/badge/Zod-4.6-3E67B1?logo=zod&logoColor=white)](#-tech-stack)
 
-**Status:** MVP feature-complete and verified against a live Supabase database — **51/51** schema, RLS &
-hardening assertions, **69/69** contract checks, both apps green on typecheck · lint · build. CI enforces it
-(see [Project Status](#-project-status)).
+**Status:** Feature-complete and verified against a live database — **81** schema, RLS & hardening
+assertions, **126** live contract checks, **211** unit tests, and both apps green on typecheck · lint ·
+build. CI enforces it (see [Project Status](#-project-status)).
 
 </div>
 
@@ -29,6 +32,7 @@ hardening assertions, **69/69** contract checks, both apps green on typecheck ·
 - [Live deployment](#-live-deployment)
 - [The problem](#-the-problem)
 - [Core features](#-core-features)
+- [Voice & AI surfaces](#-voice--ai-surfaces)
 - [Who it is for](#-who-it-is-for)
 - [System architecture](#-system-architecture)
 - [Order lifecycle](#-order-lifecycle)
@@ -111,24 +115,109 @@ unavoidably on the KDS, and a live `pending → preparing → ready → served` 
 
 ## ✨ Core features
 
-| # | Feature | Where it lives | Status |
+### 🍽 Guest experience
+
+| # | Feature | Where it lives |
+|---|---|---|
+| 1 | **Zero-install table session** — scan the QR, no app, no account | `E1` + `app/table/[token]` |
+| 2 | **Two ways to claim a table** — a 2-digit PIN for the first device, a 20-char table pass for everyone else | `table-session-gate` + `table-pass` |
+| 3 | **Shared multi-device cart** — upsert plus atomic delta edits, every line attributed to who added it | `E4`–`E7` + channel A |
+| 4 | **Atomic “Review & Fire”** — cart frozen, inventory re-checked, one ticket created, cart drained, in one transaction | `E8` → `fire_order()` |
+| 5 | **Double-fire guard** — two phones tapping together produce one order; the other gets a polite 409 | `E9` + partial unique index |
+| 6 | **Live tracker** — `pending → preparing → ready` with a green confirmation and a wait estimate | `E15`/`E16` + channel C |
+| 7 | **Voice-and-text waiter** — Gemini 3.8 Live; Hinglish, barge-in, and typed input over the same session | `lib/ai/*` + `chhotu-assistant` |
+| 8 | **A conversation that survives a real order** — session memory, incomplete sentences, follow-ups, corrections (“actually make that three”), several commands in one breath | `system-prompt.ts` + `lib/ai/tools.ts` |
+| 9 | **Real tools, not a script** — menu search, dish detail, recommend, compare, cart add/update/remove/clear, fire, status, wait, bill, allergy screen, feedback | `tool-declarations.ts` |
+| 10 | **Dish cards with photos** — curated photo, uploaded photo, or a designed fallback plate | `dish-photo` + `food-photos` |
+| 11 | **Allergy screening that never certifies safety** — contains / may contain / not listed / not recorded, plus a staff-confirmation caveat | `lib/ai/allergy.ts` |
+| 12 | **Bill request** — one tap, persisted server-side, with the split by who ordered what | `sessions/:token/bill-request` |
+| 13 | **A kitchen “no” is usable** — a denied ticket shows the reason and offers retry, edit or cancel | `orders/:id/retry` · `requeue` · `dismiss` |
+| 14 | **Feedback that reaches the owner** — 1–5 plus a comment, written server-side | `sessions/:token/feedback` |
+
+### 🍳 Kitchen
+
+| # | Feature | Where it lives |
+|---|---|---|
+| 15 | **Kanban board** — Pending / Preparing / Ready, live over Realtime with a 15 s poll that also self-heals a dead socket | `E10` + channel B |
+| 16 | **Allergy-first ticket cards** — the note is the loudest element, with per-line check-off for plating | `kds-card` |
+| 17 | **One-tap advance** — sequential state machine enforced in SQL, per-ticket busy guard against double taps | `E11` |
+| 18 | **Refusal with a required reason** — the guest reads it and can retry | `kds/tickets/:id/deny` |
+| 19 | **Serving closes the ticket** — only from Ready, and it clears the waiter ping in the same transaction | `E12` |
+| 20 | **86 from the board** — live catalogue, shared with the floor, greys the dish for every guest | `E14` + `useStaffMenuCatalog` |
+| 21 | **Hands-free voice** — “Aey Chhotu”, 8 tools, spoken confirmation before anything destructive | `kitchen-voice` + `kitchen-tools` |
+| 22 | **“Waiter coming” strip** — a floor tap appears at the pass with a chime | `serve-request` + `kds-board` |
+| 23 | **Shift arming** — unlocks audio for chimes and registers the device | `E13` |
+
+### 🏃 Floor
+
+| # | Feature | Where it lives |
+|---|---|---|
+| 24 | **Urgency-sorted room** — ready / cooking / bill tabs, stale-device detection, guest counts | `E17` + `floor-view` |
+| 25 | **Take payment → auto-release** — a table is cleared only when paid, with no open ticket and no device heartbeat | `settle` + `007_bill_and_auto_release.sql` |
+| 26 | **Unpaid-table guard** — a staff clear is refused `409 BILL_UNPAID` and a manager is alerted; admin is the override | `clear` · `notify` |
+| 27 | **“I’ll serve this” / Release** — a real handoff to the kitchen, not a local flag | `floor/tables/:id/serve-request` |
+
+### 🧑‍💼 Manager console
+
+| # | Feature | Where it lives |
+|---|---|---|
+| 28 | **Its own PIN and role** — `ADMIN_PIN` → `role:"admin"`; tables create, rename, re-code, regenerate QR, clear, deactivate, archive | `admin/tables` |
+| 29 | **Catalogue control** — dishes, categories, photos, re-pricing, 86 | `admin/menu` · `admin/categories` |
+| 30 | **Insight reads** — daily sales (today vs yesterday vs 7-day), best sellers, pending tickets, occupancy with guest names, inventory, low stock, feedback | `/admin/insights/*` |
+| 31 | **Recipe catalogue for the assistant** — ingredients, allergens, spice, diet tags, portion | `insights/menu` |
+| 32 | **Read-only assistant** — 8 tools, and no destructive one exists | `admin-assistant` |
+| 33 | **Revenue survives a cleared table** — per-dish/day rollup fires on `served`, priced at fire time | `012` + `orders_record_sale_trg` |
+| 34 | **A business day that fits a restaurant** — 05:00 → 05:00 IST, so a 2 am order belongs to the night that just ended | `017_business_day_rollup.sql` |
+
+### 🔐 Platform guarantees
+
+| # | Feature | Where it lives |
+|---|---|---|
+| 35 | **Three credential families** — table capability, shift JWT (kitchen/floor), admin JWT; 401 vs 403 is real | `middleware/auth.ts` |
+| 36 | **Realtime is optional** — every channel has a REST path; a dead socket degrades to polling | `lib/api-client/realtime.ts` |
+| 37 | **The model never holds a credential** — no assistant tool accepts a token, and the key is released per role | `*/assistant/key` |
+| 38 | **Production never fakes data** — the offline demo store is gated off in a production build | `shouldUseDemoFallback()` |
+| 39 | **The whole thing is re-runnable** — 19 idempotent migrations, 211 unit tests, 126 contract checks, 81 schema assertions | `sql/` · `scripts/` |
+
+> **Honest state:** stock counts are `untracked` until someone enters them, guest feedback starts empty,
+> and the kitchen wake word needs a Chromium browser with mic permission. The assistants say so rather
+> than inventing an answer.
+
+---
+
+## 🎙 Voice & AI surfaces
+
+Three surfaces, **one model** (`gemini-3.8-live`). There is no text model anywhere: typed input
+travels over the same Live socket.
+
+| Surface | Persona | Voice | Can it write? |
 |---|---|---|---|
-| 1 | Anonymous table initialization (QR `…/table/k7x2p`) | `E1` + `app/table/[token]` | ✅ |
-| 2 | KDS shift authentication (shared `STAFF_PIN`) | `E2` / `E2b` + `kitchen-pin-wall` | ✅ |
-| 3 | Live menu browsing (86’d items greyed, never hidden) | `E3` + `menu-list` | ✅ |
-| 4 | Real-time **shared table cart** (upsert + atomic delta edits) | `E4`–`E6` + channel A | ✅ |
-| 5 | Cart line removal | `E7` | ✅ |
-| 6 | **“Review & Fire”** — atomic order submission | `E8` → `fire_order()` RPC | ✅ |
-| 7 | Anti-duplicate guardrail (“Order already sent”) | `E9` + DB partial unique index | ✅ |
-| 8 | Kitchen Kanban dashboard (Pending / Preparing / Ready) | `E10` + channel B | ✅ |
-| 9 | Guardrailed allergy rendering (bold red on the card) | inside `E10` payload | ✅ |
-| 10 | One-tap status state machine | `E11` | ✅ |
-| 11 | Completed ticket pruning → table goes `empty` | `E12` | ✅ |
-| 12 | Live guest progress tracker (grey → amber → **green flash**) | `E15` / `E16` + channel C | ✅ |
-| 13 | Screen flash & audio chime (“Start shift”) | `E13` + `lib/sound.ts` | ✅ |
-| 14 | Quick item hide / 86ing | `E14` | ✅ |
-| 15 | Floor view pacing board (S6) | `E17` + `floor-view` | ✅ live, PIN-gated |
-| 16 | **“Get bill now”** — diner calls for the bill, floor takes payment, table clears | `lib/api/bill` + `use-bills` + `floor-view` | ✅ browser channel |
+| Diner `/table/<code>` | the waiter | **Puck** (warm male) | cart, fire, bill, feedback |
+| Kitchen `/kitchen` | a line cook's right hand | **Kore** | tickets, 86, shift |
+| Manager `/admin` | an operations analyst | **Aoede** | **no** — read-only by construction |
+
+### Why the kitchen is the interesting one
+
+- The mic streams **continuously** while the shift is armed — 16 kHz PCM16 mono chunks over the same
+  session, so a cook never touches the screen.
+- The **wake gate** is the session's own `inputTranscription`. Until the transcript contains
+  “Aey Chhotu”, model audio is **buffered, not played**, and the transcript is not shown.
+- An unaddressed turn is dropped — and any `functionCall` inside it is answered `NOT_ADDRESSED` and
+  **never executed**. Ambient kitchen talk cannot move a ticket.
+- `deny_ticket` and an 86 do **not** run on the ask. They park a closure; only `confirm_action` after a
+  spoken yes can execute it, so a hallucinated `confirm: true` has nothing to fire.
+- Tickets are resolved by **table code** (“table four” → `T04`); an ambiguous reference is refused with
+  the candidates rather than guessed.
+
+### What the model is never given
+
+- **No token as a tool argument.** The table grant, shift JWT and admin JWT are bound inside each
+  runtime's closure by the api-client.
+- **No bundled API key.** The backend releases it per role (`/admin/assistant/key`,
+  `/kds/assistant/key`, or with the table session), and a wrong role gets 401/403.
+- **No destructive console tools.** Archiving a dish or clearing a table is a button a human presses.
+
+Full detail, including the wake-gate state machine and every tool: [`docs/15`](docs/15-voice-assistants-and-insights.md).
 
 ---
 
@@ -187,9 +276,9 @@ Every claim above is a command anyone can re-run:
 | Command | Where | What it proves |
 |---|---|---|
 | `npm run db:setup` | `backend/` | applies all SQL (idempotent) |
-| `npm test` | both apps | isolated unit tests: schemas, JWT, state machine (47) · normalizers, fallback gate, menu atlas, bill handoff (40) |
-| `npm run db:verify` | `backend/` | 51 assertions: schema, RLS on, 24 policies, indexes, claim-scoping, privileges, hardening |
-| `npm run smoke` | `backend/` | 69 contract checks across diner → kitchen → floor |
+| `npm test` | both apps | isolated unit tests: schemas, JWT, transitions, admin (75) · normalizers, AI tools, kitchen confirmation, menu atlas (136) |
+| `npm run db:verify` | `backend/` | 81 assertions: schema, RLS on, policies, indexes, claim-scoping, privileges, hardening |
+| `npm run smoke` | `backend/` | 126 contract checks across diner → kitchen → floor → admin |
 | `npm run realtime:check` | `frontend/` | Realtime auth, delivery, RLS scoping, Presence |
 | `npm run check:floor` | `frontend/` | the floor UI in real headless Chrome |
 
@@ -237,33 +326,32 @@ The last mile of the meal: the diner asks, the floor answers, the table clears.
 
 ```mermaid
 sequenceDiagram
-    participant D as 📱 Diner · table cart
-    participant B as 📦 lib/api/bill<br/>(localStorage + BroadcastChannel)
+    participant D as 📱 Diner
+    participant API as Express
+    participant DB as Postgres
     participant F as 📟 Floor board
 
-    D->>B: tap the receipt glyph — requestBill(code)
-    Note over B: idempotent · one request per table
-    B-->>F: useBills() re-renders the card
-    F->>B: server taps “Take the bill” — settleBill(code)
-    B-->>D: settled_at set → full-screen “Thank you!”
-    Note over F: settleTable(code) erases the table’s<br/>staged cart + orders — next guests start clean
-    D->>B: 3.6 s later, acknowledgeSettlement(code)
-    Note over B: event dropped · board is clear again
+    D->>API: POST /sessions/:table_token/bill-request
+    API->>DB: bill_status = 'requested'
+    F->>API: PATCH /floor/tables/:id/settle
+    API->>DB: bill_status = 'paid' → release check
+    Note over DB: release only when paid<br/>AND no open ticket<br/>AND no device heartbeat
+    D->>API: GET /sessions/:table_token
+    API-->>D: paid → “Thank you!”, table empty for the next party
 ```
 
 | Step | Where it lives |
 |---|---|
-| **Request** — a wordless receipt glyph beside *Review & fire*, tooltip “Get bill now”; disabled once asked | `components/diner/table-cart.tsx` |
-| **Read** — one shared view of every table’s bill state, through `useSyncExternalStore` | `hooks/use-bills.ts` → `lib/api/bill.ts` |
-| **Settle** — the floor card grows an ember “Bill requested → tap to take payment” row | `components/staff/floor-view.tsx` |
-| **Clear** — `settleTable()` erases that table’s staged cart and orders; `use-live-table` drops its local frame so the diner’s screen comes back empty | `lib/api/index.ts`, `hooks/use-live-table.ts` |
-| **Thank** — full-screen “Thank you!” for 3.6 s, then the event is acknowledged and dropped | `components/diner/diner-table-screen.tsx` |
+| **Request** — a receipt glyph beside *Review & fire*; written to `restaurant_tables.bill_status`, so every device sees it | `components/diner/table-cart.tsx` → `bill-request` |
+| **Split** — per-person subtotals from `added_by` on each order line | `requestTableBill()` |
+| **Settle** — the floor card grows an ember “Bill requested → tap to take payment” row; staff-only | `components/staff/floor-view.tsx` |
+| **Release** — the engine clears only when paid, with no open ticket and no device heartbeat | `007_bill_and_auto_release.sql` |
+| **Refuse** — clearing an unpaid table is `409 BILL_UNPAID` and raises a manager alert; only admin overrides | `clearFloorTable()` · `notifyFloorTable()` |
+| **Thank** — full-screen “Thank you!”, then the table is empty for the next party | `components/diner/diner-table-screen.tsx` |
 
-> **Scope — deliberately client-side.** The signal is a browser channel (`localStorage` +
-> `BroadcastChannel`), not an endpoint: two tabs on one machine see each other instantly, but a diner’s
-> phone and a separate floor tablet only sync once this moves into the API — [`docs/7`](docs/7-api-contract.md)
-> ends at **E17**. Every rule lives behind **`frontend/lib/api/bill.ts`**, so that swap replaces one file.
-> A request nobody settles goes stale after **15 minutes**. Pinned by `frontend/test/bill.test.mjs`.
+> **Scope — server-persisted.** The request is a column, not a browser event, so a diner's phone and a
+> floor tablet agree across devices. Settlement is a staff action; release is a database decision, not a
+> button's opinion.
 
 ---
 
@@ -385,11 +473,12 @@ Business outcomes are **returned as `jsonb` codes rather than raised**, so an
 
 | Layer | Path | Notes |
 |---|---|---|
-| App Router pages | `app/` | 6 routes: `/`, `/floor`, `/kitchen`, `/table/[token]`, `/table/[token]/tracker`, `api/v1/auth/kds-login` |
+| App Router pages | `app/` | 8 routes: `/`, `/about`, `/presentation`, `/admin`, `/floor`, `/kitchen`, `/table/[token]`, `/table/[token]/tracker` |
 | UI primitives | `components/ui/` | 24 reusable components (Button, Card, Modal, Drawer, Toast, Field, EmptyState, …) |
 | Diner surfaces | `components/diner/` | menu list, cart modal/strip, allergy input, live tracker |
 | Staff surfaces | `components/staff/` | PIN wall, KDS board + cards, floor view, 86 drawer |
 | Data runtimes | `hooks/use-live-table.ts`, `hooks/use-live-kds.ts` | Live-first with mock fallback + realtime + polling safety net |
+| AI runtimes | `lib/ai/` | Gemini Live session, three personas, three tool sets, wake-word gate, confirmation state |
 | API client | `lib/api-client/` | `apiClient` (20 s timeout, envelope parse, 401 guard), `endpoints` (1 fn per endpoint), `realtime`, `paginate`, `normalize` |
 | Offline demo store | `lib/api/` | Seeded store used **only** when the backend is unreachable |
 | Design tokens | `app/globals.css` | `@theme` block (Hospitality skin) + an unlayered `[data-skin="ops"]` block that enlarges the kitchen/floor ticket type — palette, type scale, radii, shadows, motion timings |
@@ -410,6 +499,7 @@ to enlarge the ticket type for reading at distance.
 | **B** | `kds_orders` | `postgres_changes` on `orders` | INSERT → chime + refetch | S5 board |
 | **C** | `order_tracker:{order_id}` | `postgres_changes` on `orders` | UPDATE → colour / green flash | S1, S3 tracker |
 | **D** | `table_presence:{table_token}` | Supabase **Presence** | `{ device_id, table_token }` | S1 active-diners badge |
+| **E** | `table_updates` | `postgres_changes` on `restaurant_tables` | UPDATE → bill state, session end, **waiter ping** | S1, S3, S5 |
 
 > Realtime needs **all three**: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 > (frontend) **and** `SUPABASE_JWT_SECRET` (backend, used to mint the RLS-scoped `realtime_token`).
@@ -444,17 +534,18 @@ to enlarge the ticket type for reading at distance.
 │   │   ├── 001_init.sql       ← tables, indexes, RLS, fire_order() RPC
 │   │   ├── 002_review_fixes.sql ← FK RESTRICT, one-active-order index, scoped RLS
 │   │   ├── 003_realtime.sql   ← Realtime publication + REPLICA IDENTITY FULL
-│   │   └── seed.sql           ← idempotent: 1 terminal / 5 tables / 20 dishes
+│   │   ├── 015–018*.sql       ← catalogue metadata · stock & feedback · business day · waiter ping
+│   │   └── seed.sql           ← idempotent: 1 terminal / 5 tables / 23 dishes
 │   ├── scripts/
 │   │   ├── db-setup.mjs       ← npm run db:setup   (apply every sql/*.sql)
-│   │   ├── db-verify.mjs      ← npm run db:verify  (51 schema/RLS/hardening assertions)
-│   │   └── smoke.mjs          ← npm run smoke      (69 contract checks)
+│   │   ├── db-verify.mjs      ← npm run db:verify  (81 schema/RLS/hardening assertions)
+│   │   └── smoke.mjs          ← npm run smoke      (126 contract checks)
 │   ├── src/
 │   │   ├── config/env.ts      ← boot-time env validation (exit 1 if broken)
 │   │   ├── db/pool.ts         ← shared pg Pool
 │   │   ├── lib/               ← jwt.ts · util.ts
 │   │   ├── middleware/        ← auth · not-found · error-handler
-│   │   ├── routes/            ← sessions auth menu cart orders kds floor health
+│   │   ├── routes/            ← sessions auth menu cart orders kds floor admin health
 │   │   ├── services/          ← all business logic + SQL
 │   │   ├── validation/        ← zod schemas (one per endpoint)
 │   │   └── main: index.ts · app.ts
@@ -466,10 +557,11 @@ to enlarge the ticket type for reading at distance.
 │   ├── hooks/                 ← use-live-table · use-live-kds · use-bills · use-db · use-presence · use-now
 │   ├── lib/
 │   │   ├── api-client/        ← apiClient · endpoints · realtime · paginate · normalize · types
-│   │   └── api/               ← offline demo store (fallback only) · bill.ts (request/settle channel)
+│   │   ├── ai/                ← Live session, personas, tools, wake-word gate
+│   │   └── api/               ← offline demo store (fallback only)
 │   ├── .env.example
 │   └── package.json
-└── docs/                      ← 11 design + engineering documents (source of truth)
+└── docs/                      ← 15 design + engineering documents (source of truth)
 ```
 
 ---
@@ -497,12 +589,12 @@ npm run db:setup          # applies every sql/*.sql in order
 npm run db:verify         # asserts the result (see below)
 ```
 
-No `psql` needed — the runner uses the `pg` dependency you already have. Every step is **idempotent**, so re-running is always safe: 1 terminal, 5 tables, 20 dishes, no duplicates.
+No `psql` needed — the runner uses the `pg` dependency you already have. Every step is **idempotent**, so re-running is always safe: 1 terminal, 5 tables, 23 dishes, no duplicates.
 
 ```bash
 npm run db:setup -- --dry-run     # list what would be applied
 npm run db:setup -- --no-seed     # schema only
-npm run db:verify                 # 51 assertions: schema, RLS scope, indexes, privileges, hardening
+npm run db:verify                 # 81 assertions: schema, RLS scope, indexes, privileges, hardening
 ```
 
 > 🌱 **`db:setup` also wires Supabase Realtime** (`003_realtime.sql`). That step used to be a dashboard click that failed *silently* when skipped — the browser subscribes fine, receives zero events, and the app quietly falls back to REST polling. On a Postgres without `wal_level=logical` it now reports that instead of aborting.
@@ -557,6 +649,7 @@ commands. Both apps are push-to-deploy on `main`.
 | `KDS_TOKEN_SECRET` | **yes** | long random string | HMAC secret for shift JWTs |
 | `SUPABASE_JWT_SECRET` | no | from Supabase → Settings → API | When set, E1/E2 also mint the RLS-scoped `realtime_token`. Empty ⇒ REST-only, by design |
 | `COOKIE_SAME_SITE` | no | `strict` | `strict` \| `lax` \| `none` for the httpOnly `kds_token` cookie. Use `none` when frontend and API live on **different sites** — it forces `Secure` automatically |
+| `GEMINI_API_KEY` | for voice | `AIza…` | The **only** model key. Released per role: diner with a table session, `/admin/assistant/key`, `/kds/assistant/key`. Empty ⇒ every voice surface shows an “assistant is off” notice |
 
 ### `frontend/.env.local`
 
@@ -579,8 +672,8 @@ flowchart LR
     A["001_init.sql<br/>tables · indexes · RLS · fire_order()"] --> B["002_review_fixes.sql<br/>FK RESTRICT · one-active-order<br/>claim-scoped RLS"]
     B -->    C["003_realtime.sql<br/>supabase_realtime publication<br/>REPLICA IDENTITY FULL"]
     C --> F["004_hardening.sql<br/>price snapshot · audit timestamps<br/>status-transition guard"]
-    F --> D["seed.sql<br/>1 terminal · 5 tables · 20 dishes"]
-    D --> E["db:verify<br/>51 assertions"]
+    F --> D["015–018 + seed.sql<br/>metadata · stock · 23 dishes"]
+    D --> E["db:verify<br/>81 assertions"]
 ```
 
 Run the whole chain with **`npm run db:setup`** — no `psql`, no dashboard clicks, safe to re-run.
@@ -628,10 +721,28 @@ It is **revoked from `anon`/`authenticated`** — only the backend’s service p
 | E16 | `GET /api/v1/orders` | none | S3 | ✅ |
 | E17 | `GET /api/v1/floor/tables` | staff | S6 | ✅ |
 
+### Beyond the E1–E17 contract
+
+Added for the operational and AI layers; same envelopes and the same role checks.
+
+| Method & path | Auth | Purpose |
+|---|---|---|
+| `GET /api/v1/sessions/:table_token` | none | own table state (bill, session, roster size) |
+| `POST /api/v1/sessions/:table_token/bill-request` | none | diner calls for the bill |
+| `POST /api/v1/sessions/:table_token/feedback` | none | 1–5 rating the owner can read |
+| `PATCH /api/v1/kds/tickets/:order_id/deny` | kitchen | refuse with a reason the guest sees |
+| `GET /api/v1/kds/assistant/key` | kitchen | Live key for the kitchen dock |
+| `POST /api/v1/floor/tables/:table_id/serve-request` | staff | “I'll serve this” → kitchen ping |
+| `DELETE /api/v1/floor/tables/:table_id/serve-request` | staff | Release the ping |
+| `GET /api/v1/admin/insights/{sales,best-selling,pending-orders,tables,inventory,menu,feedback}` | admin | console reads and assistant tools |
+| `GET /api/v1/admin/assistant/key` | admin | Live key for the console |
+
 **Error-code registry:** `VALIDATION_ERROR` `400` · `INVALID_PIN` `401` · `UNAUTHORIZED` `401`
 `FORBIDDEN` `403` · `TABLE_NOT_FOUND` `404` · `MENU_ITEM_NOT_FOUND` `404` · `CART_ITEM_NOT_FOUND` `404`
 `ORDER_NOT_FOUND` `404` · `ITEM_UNAVAILABLE` `409` · `EMPTY_CART` `409` · `DUPLICATE_ORDER` `409`
-`INVENTORY_FAILURE` `409` · `INVALID_STATUS_TRANSITION` `409` · `INTERNAL_ERROR` `500`
+`INVENTORY_FAILURE` `409` · `INVALID_STATUS_TRANSITION` `409` · `NO_READY_TICKET` `409` ·
+`BILL_UNPAID` `409` · `NO_OUTSTANDING_BILL` `409` · `TABLE_HAS_ACTIVE_ORDERS` `409` ·
+`INTERNAL_ERROR` `500`
 
 ---
 
@@ -646,6 +757,8 @@ It is **revoked from `anon`/`authenticated`** — only the backend’s service p
 | **Kitchen is PIN-gated** | `STAFF_PIN` compared with `timingSafeEqual`; token is an 8-hour HS256 JWT with an explicit `role: "kitchen"` claim; `requireAuth` → 401, `requireRole` → 403 |
 | **Writes bypass RLS only server-side** | `service_role` and `fire_order()` never reach the browser; `anon` has **no** INSERT/UPDATE/DELETE policy |
 | **Secrets never echo** | `staff_terminals.pin_env_var` stores the *variable name*; no PIN, secret or stack trace ever appears in a payload or log |
+| **Admin is a separate role** | `ADMIN_PIN` issues a `role:"admin"` JWT; a kitchen/floor token gets `403` on `/admin`, and an admin token gets `403` on `/kds` |
+| **The model never gets a credential** | No assistant tool accepts a token; each runtime binds the caller's credential, and the Gemini key is released per role — never bundled |
 | **Boot fails loudly** | Missing/invalid env → clear message + `exit(1)`, never a half-working server |
 
 ---
@@ -658,20 +771,20 @@ Everything below was run and is green on the current tree:
 |---|---|---|
 | Backend types | `cd backend && npm run typecheck` | ✅ 0 errors |
 | Backend build | `cd backend && npm run build` | ✅ clean `dist/` emit |
-| **Backend unit tests** | `cd backend && npm test` | ✅ **47/47** — validation schemas, HS256 JWT (tamper/expiry/alg-none), pagination meta, ISO timestamps, Rule-13 matrix |
+| **Backend unit tests** | `cd backend && npm test` | ✅ **75/75** — validation schemas, HS256 JWT (tamper/expiry/alg-none), pagination meta, ISO timestamps, Rule-13 matrix, session security, menu metadata, admin |
 | Frontend types | `cd frontend && npm run typecheck` | ✅ 0 errors |
 | Frontend lint | `cd frontend && npm run lint` | ✅ 0 errors |
-| Frontend build | `cd frontend && npm run build` | ✅ 7 routes compiled |
-| **Frontend unit tests** | `cd frontend && npm test` | ✅ **40/40** — normalizers incl. the fire-time price snapshot, production demo-fallback gate, menu atlas/photos, and the bill request → settle → clear handoff |
-| **Schema + RLS assertions** | `cd backend && npm run db:verify` | ✅ **51/51** — tables, RLS on, 24 policies, indexes, RLS claim-scoping, privileges, hardening (004) |
-| **Contract smoke (live server)** | `cd backend && npm run smoke` | ✅ **69/69** — every endpoint in the real diner → kitchen → floor journey, incl. the frozen bill |
+| Frontend build | `cd frontend && npm run build` | ✅ 8 routes compiled |
+| **Frontend unit tests** | `cd frontend && npm test` | ✅ **136/136** — normalizers incl. the fire-time price snapshot, production demo-fallback gate, menu atlas/photos, bill handoff, diner AI tools, kitchen tools + confirmation flow, wake-word matching, catalogue queries |
+| **Schema + RLS assertions** | `cd backend && npm run db:verify` | ✅ **81/81** — tables, RLS on, policies, indexes, claim-scoping, privileges, hardening (004), stock + feedback, waiter ping |
+| **Contract smoke (live server)** | `cd backend && npm run smoke` | ✅ **126/126** — every endpoint in the real diner → kitchen → floor journey, incl. the frozen bill and denial paths |
 | Realtime wiring | `db:setup` on `wal_level=logical` | ✅ publication created, `REPLICA IDENTITY FULL` set |
 | Degradation path | `db:setup` on `wal_level=replica` | ✅ reports and skips; app runs REST + 5 s polling |
 | Production fallback gate | `next build && next start` | ✅ dev-only login route returns `404` in prod; pages serve `200` |
 | **Realtime end-to-end** | `cd frontend && npm run realtime:check` | ✅ **12/12** — token acceptance, delivery, RLS scoping, Presence |
 | **Floor view in a browser** | `cd frontend && npm run check:floor` | ✅ **12/12** — headless Chrome over CDP: gate holds, E17 carries the QR code server-side, live board renders the fixture table by name, allergy alert reaches the card |
 | **Deployed stack (live)** | CORS preflight + E1→E17 against Vercel + Render | ✅ **27/27** — the real diner→kitchen→tracker journey on the hosted URLs, incl. cross-site cookie flags and the Realtime token |
-| Suites are idempotent | `npm run smoke` twice in a row | ✅ **69/69** both times (pre-flight reset) |
+| Suites are idempotent | `npm run smoke` twice in a row | ✅ **126/126** both times (pre-flight reset) |
 | CI | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | ✅ 3 jobs — typecheck · lint · build, schema verify + smoke against Postgres 17, and the browser E2E for the floor view |
 
 <details>
@@ -681,9 +794,11 @@ Everything below was run and is green on the current tree:
 Route (app)
 ┌ ○ /                            (Static)
 ├ ○ /_not-found
-├ ƒ /api/v1/auth/kds-login       (Dynamic)
+├ ○ /about                       (Static)
+├ ○ /admin                       (Static)
 ├ ○ /floor                       (Static)
 ├ ○ /kitchen                     (Static)
+├ ○ /presentation                (Static)
 ├ ƒ /table/[token]               (Dynamic)
 └ ƒ /table/[token]/tracker       (Dynamic)
 ```
@@ -694,10 +809,11 @@ Route (app)
 
 ## 🚦 Project status
 
-**Done:** all 12 core MVP features + 2 extensions, the full 17-endpoint contract, the atomic fire RPC,
-claim-scoped RLS, the design system, responsive QA (6 screens × 6 widths, 0 px overflow), green
-typecheck/lint/build on both apps — and, verified end-to-end against a live Supabase database,
-**51 schema/RLS/hardening assertions** plus a **69-check contract smoke** across the whole diner → kitchen → floor journey.
+**Done:** **39 shipped features** across four surfaces — guest, kitchen, floor and manager — the
+17-endpoint contract plus the admin/insights surface, **three voice assistants on one Live model**, the
+atomic fire RPC, claim-scoped RLS, a 05:00→05:00 business day, and the design system. Both apps are green
+on typecheck · lint · build, with **211 unit tests**, **81 schema/RLS/hardening assertions** and a
+**126-check contract smoke** across the whole diner → kitchen → floor → admin journey.
 
 **Closed in this pass:**
 
@@ -712,12 +828,17 @@ typecheck/lint/build on both apps — and, verified end-to-end against a live Su
 | **Dev-only auth route** | The frontend’s duplicate `kds-login` returns `404` in production and now speaks the contract envelope |
 | **Hosting flexibility** | Multi-origin CORS allow-list, `credentials: true`, configurable `COOKIE_SAME_SITE`, `credentials: "include"` on the client — same code works same-site *or* cross-site |
 | **Data integrity (004)** | `004_hardening.sql` freezes the bill at fire time (`order_items.unit_price`, `orders.total`), adds trigger-maintained `created_at`/`updated_at` to every table, and enforces Rule 13 with an `enforce_order_status_transition()` trigger — all asserted by `db:verify` §5, including firing a real cart in a rolled-back transaction |
-| **Automated verification** | `db:verify` (51 assertions) and `smoke` (69 assertions) replace the hand-run curl sweep |
+| **Automated verification** | `db:verify` (81 assertions) and `smoke` (126 assertions) replace the hand-run curl sweep |
 | **CI** | `.github/workflows/ci.yml` — typecheck, lint, build for both apps, plus schema verify and contract smoke against a real Postgres 17 |
 | **Repo hygiene** | Root `.gitignore` (covers `.env`, logs, `.pgdata`, editor noise); `dev.log` can no longer be committed |
 | **Ops hardening** | helmet security headers (backend + `next.config.ts`), two-tier rate limiting (10 *failed* PIN attempts / 10 min on `kds-login` — correct PINs never consume budget), ndjson structured logs with `X-Request-Id` correlation (upstream ids honoured), `/api/v1/ready` readiness probe with a cached real Postgres ping, and bounded graceful shutdown on SIGTERM (drain → close pool) — verified live: brute-force gets 429 after 10 tries, SIGTERM drains and exits cleanly |
-| **Unit tests** | First slice on `node:test` (zero test deps): backend 47 (schemas/JWT/transitions/util), frontend 10 (normalizers + fallback gate), both wired into CI |
-| **Bill handoff** | “Get bill now” on the diner cart → ember row on the floor card → settle clears the table’s session → timed thank-you. Client-side by design (`lib/api/bill.ts` + `use-bills`, idempotent, 15-min staleness, `BroadcastChannel` between tabs), with 8 unit tests in `frontend/test/bill.test.mjs` — the API endpoint is the one open piece |
+| **Unit tests** | `node:test` (zero test deps): backend 75 (schemas/JWT/transitions/admin/menu metadata), frontend 136 (normalizers, AI tools, kitchen confirmation, wake word, catalogue), both wired into CI |
+| **Bill handoff** | “Get bill now” is **server-persisted**: `bill_status` on the table, a staff-only settle, and an auto-release engine that requires paid + no open ticket + no device heartbeat. An unpaid clear is refused with `409 BILL_UNPAID` and raises a manager alert |
+| **Voice surfaces** | Diner waiter, kitchen dock and manager console share one Gemini Live runtime (`lib/ai/live-session.ts`), one model and one transcript format; voices are per surface (Puck / Kore / Aoede) |
+| **Kitchen wake word** | “Aey Chhotu” gates the transcript: unaddressed turns drop their audio **and** their tool calls are refused `NOT_ADDRESSED`. Deny/86 park an action that only `confirm_action` can run after a spoken yes |
+| **Waiter ping** | “I’ll serve this” writes `serve_requested_at` (`sql/018`); the KDS shows a “Waiter coming” strip, watches `restaurant_tables`, and clears the flag on serve/deny |
+| **Manager insights + catalogue** | Seven admin insight reads plus `insights/menu` (ingredients, allergens, spice, diet tags) feed a read-only assistant with 8 tools and guest names |
+| **Business day** | `sql/017` keys every rollup on `((created_at AT TIME ZONE 'Asia/Kolkata') - interval '5 hours')::date`, so a 2 am order belongs to the night that just ended |
 | **Docs** | `README.md` with architecture, ER, state-machine and sequence diagrams |
 
 **Still open:**
@@ -728,7 +849,9 @@ typecheck/lint/build on both apps — and, verified end-to-end against a live Su
 | **Licence** | No LICENSE file (deliberate, for now) |
 | **CSP** | `Content-Security-Policy` not yet set on either app — needs nonce plumbing with Next inlines; the rest of the header set is in place |
 | **Secrets rotation** | `KDS_TOKEN_SECRET`/`STAFF_PIN`/`ADMIN_PIN` rotation is manual (restart with new values); no dual-secret overlap window |
-| **Bill endpoint** | “Get bill now” syncs inside one browser only (`localStorage` + `BroadcastChannel`). A `bill_requests` table + endpoint would let a diner’s phone and a floor tablet see it across devices — sketched in [`docs/7`](docs/7-api-contract.md) §7 |
+| **Stock entry UI** | `stock_quantity` / `low_stock_threshold` exist and the assistant reads them, but there is no screen yet to enter counts — so every dish reports `untracked` |
+| **Voice QA** | The wake gate and confirmation flow are pinned by tests at the data layer; real playback and mic capture need a Chromium browser with a mic tap, so rehearse on the demo machine |
+| **Transcription dependency** | The wake gate trusts Live `inputTranscription`. If it never arrives the turn is dropped (safe), which is the intended failure direction |
 
 Full engineering detail lives in the [docs index](#-documentation-index) — especially
 [`docs/10-db-report.md`](docs/10-db-report.md) §4 and [`docs/9-integration-report.md`](docs/9-integration-report.md).
@@ -750,7 +873,10 @@ Full engineering detail lives in the [docs index](#-documentation-index) — esp
 | [`docs/9-integration-report.md`](docs/9-integration-report.md) | Frontend ↔ API integration report, 18/18 smoke |
 | [`docs/10-db-report.md`](docs/10-db-report.md) | Senior-DB review: rules → constraints, indexes, hygiene audit |
 | [`docs/11-deploy.md`](docs/11-deploy.md) | Free deployment: Vercel + Render + Supabase, push-to-deploy, verification |
-| [`docs/12-judge-pitch.md`](docs/12-judge-pitch.md) | The interactive judge pitch: one dinner service told twice, with judge roles and timing |
+| [`docs/12-codebase-guide.md`](docs/12-codebase-guide.md) | Every file, and why it exists |
+| [`docs/13-data-model.md`](docs/13-data-model.md) | Tables, tokens and payloads that move between those files |
+| [`docs/14-issue-audit.md`](docs/14-issue-audit.md) | Issue audit and the fixes behind them |
+| [`docs/15-voice-assistants-and-insights.md`](docs/15-voice-assistants-and-insights.md) | **The three Gemini Live surfaces** — diner waiter, kitchen voice, manager console; wake-word gating, chef tools, insight endpoints, the 05:00 business day and the waiter ping |
 
 ---
 

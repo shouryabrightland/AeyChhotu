@@ -10,6 +10,7 @@
 import { apiRequest } from "./apiClient";
 import type {
   AdminBestSeller,
+  AdminCatalogItem,
   AdminFeedback,
   AdminInventory,
   AdminOccupancy,
@@ -66,6 +67,18 @@ export async function getAdminInventory(): Promise<AdminInventory> {
   const { data } = await apiRequest<AdminInventory>(`${BASE}/admin/insights/inventory`, {
     adminAuth: true,
   });
+  return data;
+}
+
+/** GET /api/v1/admin/insights/menu — the full catalogue, metadata included. */
+export async function getAdminMenuCatalog(): Promise<{
+  count: number;
+  items: AdminCatalogItem[];
+}> {
+  const { data } = await apiRequest<{ count: number; items: AdminCatalogItem[] }>(
+    `${BASE}/admin/insights/menu`,
+    { adminAuth: true },
+  );
   return data;
 }
 
