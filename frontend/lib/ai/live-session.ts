@@ -59,8 +59,16 @@ const CONNECT_TIMEOUT_MS = 15_000;
 /** How long a model turn may sit unaddressed while its transcript is still
  *  arriving. Passing the gate is instant (the transcript contains the wake
  *  word); this only bounds how long a non-addressed turn stays buffered before
- *  it is dropped. */
-const WAKE_GATE_GRACE_MS = 3_000;
+ *  it is dropped. Generous on purpose: Live's input transcript can land a
+ *  couple of seconds after the audio, and a turn dropped early was a spoken
+ *  answer nobody heard. */
+const WAKE_GATE_GRACE_MS = 8_000;
+
+/** How long a tool call waits for the turn's transcript before it is refused.
+ *  The model decides to call a tool before the transcription model has
+ *  finished writing the same sentence down. Without this wait every spoken
+ *  command lost its tool call to "they did not say the wake phrase". */
+const WAKE_TOOL_WAIT_MS = 2_500;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -191,6 +199,9 @@ export class ChhotuLiveSession {
      turn was addressed — its audio is held, never played. */
   private turnUserText = "";
   private gate: "unknown" | "pass" | "block" = "unknown";
+  /** Set by an explicit tap on the kitchen's mic: that tap IS the address, so
+   *  the next utterance needs no wake phrase. Consumed by one turn. */
+  private tapped = false;
   private heldAudio: string[] = [];
   private heldText = "";
   private gateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -268,11 +279,46 @@ export class ChhotuLiveSession {
     });
   }
 
+  /** Create and resume the audio clocks INSIDE the caller's tap.
+
+      Browsers refuse to start an AudioContext without a user gesture, and a
+      suspended context never fires `onaudioprocess` — which is exactly what
+      the kitchen hit: the dock fetched its key and opened the socket before
+      touching Web Audio, so the page looked connected and streamed silence.
+
+      Must be called synchronously from the click handler, before any await.
+      `startMic` reuses whatever this creates. */
+  primeAudio(): void {
+    if (this.closed) return;
+
+    this.micContext ??= new AudioContext();
+    if (this.micContext.state !== "running") {
+      void this.micContext.resume().catch(() => undefined);
+    }
+
+    this.outputContext ??= new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE });
+    if (this.outputContext.state !== "running") {
+      void this.outputContext.resume().catch(() => undefined);
+    }
+  }
+
+  /** The cook tapped the mic instead of saying the phrase.
+
+      Tapping is a deliberate address — an alternative to the wake word, not a
+      way around it — so exactly ONE following turn is allowed through. It is
+      consumed by that turn and never persists, which keeps ambient kitchen
+      talk unable to move a ticket. */
+  addressNextTurn(): void {
+    this.tapped = true;
+    if (this.gate === "unknown") this.gate = "pass";
+  }
+
   /** Start streaming the microphone. Call from a user gesture (permission). */
   async startMic(): Promise<void> {
     if (this.micStream) return;
-    if (!this.session) await this.connect();
 
+    /* Capture comes BEFORE the socket on purpose: creating the context after
+       an awaited network round trip loses the gesture and mutes the mic. */
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
@@ -285,12 +331,30 @@ export class ChhotuLiveSession {
       });
     } catch {
       this.options.callbacks?.onError?.(
-        "Microphone permission was denied. Allow it in your browser, or type instead.",
+        "Microphone permission was denied. Allow it in your browser, then tap the mic again.",
       );
       return;
     }
 
-    const context = new AudioContext();
+    if (!this.session) await this.connect();
+
+    const context = (this.micContext ??= new AudioContext());
+    if (context.state !== "running") {
+      try {
+        await context.resume();
+      } catch {
+        /* Stays suspended: handled below. */
+      }
+    }
+
+    if (context.state !== "running") {
+      for (const track of stream.getTracks()) track.stop();
+      this.options.callbacks?.onError?.(
+        "The browser muted this tab's audio. Tap the mic once more to start the kitchen line.",
+      );
+      return;
+    }
+
     const source = context.createMediaStreamSource(stream);
     const processor = context.createScriptProcessor(4096, 1, 1);
 
@@ -444,6 +508,13 @@ export class ChhotuLiveSession {
     const collected: ChhotuAction[] = [];
     let mutated = false;
 
+    /* Wake gate: give the turn's transcript a moment to arrive before judging
+       it. The model calls tools before the transcription model has finished
+       writing down the same sentence, so an instant check refused almost every
+       real command. The wait only decides WHEN to look — a turn that never
+       contains the phrase is still refused below. */
+    if (this.options.wakePhrase) await this.settleGate(WAKE_TOOL_WAIT_MS);
+
     for (const call of calls) {
       const name = call.name ?? "";
 
@@ -495,6 +566,25 @@ export class ChhotuLiveSession {
 
   private get wakeEnabled(): boolean {
     return Boolean(this.options.wakePhrase?.phrase);
+  }
+
+  /** Wait (briefly) for the turn's transcript, then pass the gate if the
+   *  phrase is in it. A blocked turn stays blocked: nothing is executed. */
+  private async settleGate(maxMs: number): Promise<void> {
+    if (this.gate === "pass") return;
+
+    const deadline = Date.now() + maxMs;
+    while (this.gate === "unknown" && Date.now() < deadline) {
+      if (this.heardWakeWord()) {
+        this.passGate(this.turnUserText);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    if (this.gate === "unknown" && this.heardWakeWord()) {
+      this.passGate(this.turnUserText);
+    }
   }
 
   /** Did this turn contain the kitchen's wake phrase? */
@@ -552,12 +642,16 @@ export class ChhotuLiveSession {
     this.turnUserText = "";
     this.heldAudio = [];
     this.heldText = "";
-    this.gate = "unknown";
+    // A tap addresses the next turn only; after that the gate re-arms.
+    this.gate = this.tapped ? "pass" : "unknown";
+    this.tapped = false;
   }
 
   /** Queue one PCM16 chunk so consecutive chunks play back-to-back. */
   private play(base64: string): void {
     const context = (this.outputContext ??= new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE }));
+    // An interrupted answer suspends the clock; keep it warm and resume it.
+    if (context.state === "suspended") void context.resume().catch(() => undefined);
     const bytes = base64ToBytes(base64);
     const sampleCount = Math.floor(bytes.byteLength / 2);
     if (sampleCount === 0) return;
@@ -580,8 +674,9 @@ export class ChhotuLiveSession {
 
   private stopPlayback(): void {
     if (!this.outputContext) return;
-    void this.outputContext.close();
-    this.outputContext = null;
+    /* Suspend, never close: the clock was resumed under the user's tap, and a
+       fresh context for the next answer can start muted on Chrome. */
+    void this.outputContext.suspend().catch(() => undefined);
     this.playingUntil = 0;
   }
 }

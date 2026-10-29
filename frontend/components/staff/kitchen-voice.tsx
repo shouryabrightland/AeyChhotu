@@ -1,7 +1,9 @@
 "use client";
 
-import { Loader2, Mic, Square } from "lucide-react";
+import { Loader2, Mic, Sparkles, Square } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Drawer } from "@/components/ui/drawer";
 import { buildKitchenSystemPrompt } from "@/lib/ai/kitchen-system-prompt";
 import { KITCHEN_TOOL_DECLARATIONS } from "@/lib/ai/kitchen-tool-declarations";
 import {
@@ -17,16 +19,24 @@ import { getKdsAssistantKey } from "@/lib/api-client";
 import type { MenuItem, Order } from "@/lib/api/types";
 import { cn } from "@/lib/utils";
 
-/* The kitchen's voice dock — hands-free control of the Kanban board.
+/* The kitchen's voice assistant — the same Live session the diner sheet and
+   the manager console use, with the board's tools behind it.
 
-   HOW "ALWAYS LISTENING" WORKS: the mic streams continuously to the SAME
-   Gemini Live socket the diner and console use. The session (see
-   live-session.ts) holds every answer and refuses every tool call until the
-   turn's transcript contains "aey chhotu". So a noisy kitchen can stream
-   audio without a stray "table four ready" ever moving a ticket.
+   READ ONLY ON THE PAGE, VOICE ONLY IN PRACTICE: there is no text box and no
+   send button. The transcript is history, never an input. The cook either taps
+   the mic once (browsers require one gesture before any mic can open) or, once
+   it is listening, just says "Aey Chhotu" (or "Chhotu") followed by a command.
 
-   The key is released by the API to a kitchen shift token only; this
-   component renders inside the unlocked board, so the PIN wall is the gate. */
+   WHY THE MIC NOW ACTUALLY OPENS: the first version fetched the key and opened
+   the socket before touching Web Audio. Chrome starts an AudioContext created
+   outside a gesture SUSPENDED, and a suspended context never fires
+   `onaudioprocess`, so the panel looked connected and streamed silence.
+   `primeAudio()` is therefore called synchronously inside the tap, and
+   `startMic()` reuses that running clock. Once the browser has remembered the
+   permission, the panel also starts itself on load (see `autoStart`).
+
+   The key is released by the API to a KITCHEN shift token only; this component
+   renders inside the unlocked board, so the PIN wall is the gate. */
 
 export interface KitchenVoiceProps {
   tickets: Order[];
@@ -40,6 +50,8 @@ export interface KitchenVoiceProps {
     isAvailable: boolean,
   ) => Promise<{ ok: boolean; message?: string }>;
   onStartShift: () => Promise<{ ok: boolean; message?: string }>;
+  /** Bumped by the board's header button to open this dock from outside. */
+  openRequest?: number;
 }
 
 interface VoiceLine {
@@ -58,21 +70,33 @@ const KITCHEN_VOICE = "Kore";
 const HISTORY_KEY = "aeychhotu.kitchen_voice.history.v1";
 const HISTORY_LIMIT = 20;
 
-function statusText(enabled: boolean, phase: ChhotuPhase, wakeHeard: boolean): string {
-  if (!enabled) return "Tap to wake the kitchen assistant.";
+const INTRO: VoiceLine = {
+  id: "kitchen-intro",
+  role: "assistant",
+  text: "Bolo “Aey Chhotu” — board dekho, table four ready karo, ya dish 86 karo. Voice only; yeh pane read-only hai.",
+};
+
+function statusText(
+  enabled: boolean,
+  phase: ChhotuPhase,
+  wakeHeard: boolean,
+  busy: boolean,
+): string {
+  if (busy) return "Opening the kitchen line…";
   if (wakeHeard) return "Aey Chhotu heard…";
+  if (!enabled) return "Tap the mic once, then just talk.";
   if (phase === "connecting") return "Opening the voice line…";
   if (phase === "thinking") return "Reading the board…";
   if (phase === "speaking") return "Answering…";
-  if (phase === "error") return "The voice line dropped — tap Stop, then Enable.";
+  if (phase === "error") return "The line dropped — tap Start to reconnect.";
   return 'Listening — say "Aey Chhotu".';
 }
 
-function MicBars({ level, active = false }: { level: number; active?: boolean }) {
+function MicLevel({ level, listening }: { level: number; listening: boolean }) {
   return (
     <span aria-hidden className="relative flex size-4 items-center justify-center">
-      {active ? (
-        <span className="absolute inset-0 animate-ping rounded-pill bg-current opacity-25" />
+      {listening ? (
+        <span className="absolute inset-0 animate-ping rounded-pill bg-current opacity-20" />
       ) : null}
       <span className="flex h-4 items-end gap-[3px]">
         {[0.45, 1, 0.7].map((scale, index) => (
@@ -80,7 +104,7 @@ function MicBars({ level, active = false }: { level: number; active?: boolean })
             key={index}
             className="w-[3px] rounded-pill bg-current transition-[height] duration-75 ease-out"
             style={{
-              height: `${4 + Math.min(1, Math.max(active ? 0.22 : 0, level) * 2.2) * 12 * scale}px`,
+              height: `${4 + Math.min(1, Math.max(listening ? 0.18 : 0, level) * 2.2) * 12 * scale}px`,
             }}
           />
         ))}
@@ -98,8 +122,9 @@ export function KitchenVoice({
   onDeny,
   onSetAvailability,
   onStartShift,
+  openRequest = 0,
 }: KitchenVoiceProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [open, setOpen] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState<ChhotuPhase>("idle");
@@ -108,11 +133,15 @@ export function KitchenVoice({
   const [error, setError] = useState<string | null>(null);
   const [wakeHeard, setWakeHeard] = useState(false);
   const [waiting, setWaiting] = useState<string | null>(null);
-  const [lines, setLines] = useState<VoiceLine[]>([]);
+  const [lines, setLines] = useState<VoiceLine[]>([INTRO]);
   const [userDraft, setUserDraft] = useState("");
   const [assistantDraft, setAssistantDraft] = useState("");
+  const [keyState, setKeyState] = useState<"checking" | "ready" | "missing">("checking");
 
   const sessionRef = useRef<ChhotuLiveSession | null>(null);
+  const startingRef = useRef(false);
+  const autoStartedRef = useRef(false);
+  const apiKeyRef = useRef<string | null>(null);
   const userDraftRef = useRef("");
   const assistantDraftRef = useRef("");
   const actionsRef = useRef<ChhotuAction[]>([]);
@@ -120,8 +149,7 @@ export function KitchenVoice({
   const wakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* The runtime behind the tools is refreshed after every render, so a tool
-     call always reads the live board rather than a stale closure. The toolset
-     itself is created on first use (an event), never during render. */
+     call always reads the live board rather than a stale closure. */
   const runtimeRef = useRef<KitchenRuntime | null>(null);
   useEffect(() => {
     runtimeRef.current = {
@@ -168,7 +196,29 @@ export function KitchenVoice({
     return toolsetRef.current;
   }, []);
 
-  /* Load the previous shift's transcript once, after hydration. */
+  /* The key is released by the API to a kitchen shift token, so it is fetched
+     once here — before any tap — which lets the tap open the mic immediately
+     instead of waiting on the network first. */
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { gemini_api_key } = await getKdsAssistantKey();
+        if (cancelled) return;
+        apiKeyRef.current = gemini_api_key;
+        setKeyState(gemini_api_key ? "ready" : "missing");
+      } catch {
+        if (!cancelled) setKeyState("missing");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /* Restore the shift's transcript once, after hydration. */
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
@@ -189,7 +239,7 @@ export function KitchenVoice({
   /* Persist as the conversation grows, so a refresh does not erase it. */
   useEffect(() => {
     try {
-      if (lines.length === 0) window.sessionStorage.removeItem(HISTORY_KEY);
+      if (lines.length <= 1) window.sessionStorage.removeItem(HISTORY_KEY);
       else window.sessionStorage.setItem(HISTORY_KEY, JSON.stringify(lines));
     } catch {
       /* Private mode: the on-screen copy still works. */
@@ -230,27 +280,35 @@ export function KitchenVoice({
     setWaiting(toolsetRef.current?.pendingDescription() ?? null);
   }, []);
 
-  const enable = useCallback(async () => {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
+  const start = useCallback(
+    async (fromGesture: boolean) => {
+      if (startingRef.current || sessionRef.current) return;
 
-    try {
-      const { gemini_api_key } = await getKdsAssistantKey();
-      const ai = getChhotuClient(gemini_api_key);
-      if (!ai) {
+      const apiKey = apiKeyRef.current;
+      if (!apiKey) {
+        setOpen(true);
         setError("Voice is off: GEMINI_API_KEY is not set on the API.");
         return;
       }
 
-      const toolset = ensureToolset();
+      const ai = getChhotuClient(apiKey);
+      if (!ai) {
+        setOpen(true);
+        setError("Voice is off: the assistant key was empty.");
+        return;
+      }
+
+      startingRef.current = true;
+      setBusy(true);
+      setError(null);
+
       const session = new ChhotuLiveSession({
         client: ai,
         systemInstruction: buildKitchenSystemPrompt(),
         voiceName: KITCHEN_VOICE,
         tools: KITCHEN_TOOL_DECLARATIONS,
-        describe: toolset.describe,
-        execute: (name, args) => toolset.execute(name, args),
+        describe: (name, args) => ensureToolset().describe(name, args),
+        execute: (name, args) => ensureToolset().execute(name, args),
         wakePhrase: KITCHEN_WAKE,
         callbacks: {
           onPhase: setPhase,
@@ -258,7 +316,7 @@ export function KitchenVoice({
           onActivity: setActivity,
           onWake: () => {
             // A heard wake word always brings the assistant to the front.
-            setExpanded(true);
+            setOpen(true);
             setWakeHeard(true);
             if (wakeTimer.current !== null) clearTimeout(wakeTimer.current);
             wakeTimer.current = setTimeout(() => setWakeHeard(false), 1_800);
@@ -275,23 +333,94 @@ export function KitchenVoice({
           onActions: (next) => {
             actionsRef.current = [...actionsRef.current, ...next];
           },
-          onError: setError,
+          onError: (message) => setError(message),
         },
       });
 
-      await session.connect();
-      await session.startMic();
+      /* SYNCHRONOUS, inside the tap: Chrome starts any AudioContext created
+         after an await suspended, and a suspended context streams silence.
+         Also primed on the auto-start path (the PIN tap already grants this
+         page sticky activation, so the clock usually runs there too). */
+      session.primeAudio();
 
       sessionRef.current = session;
-      setEnabled(true);
-      // Arming the chime is part of opening the kitchen's voice line.
-      void onStartShift();
-    } catch {
-      setError("The voice line could not open. Try again — nothing was changed.");
-    } finally {
-      setBusy(false);
-    }
-  }, [busy, ensureToolset, flush, onStartShift]);
+
+      try {
+        await session.connect();
+        await session.startMic();
+
+        if (!session.micActive) {
+          // Permission denied or the browser muted the tab; keep the panel open
+          // so the cook sees why and can tap again.
+          sessionRef.current = null;
+          session.close();
+          setEnabled(false);
+          setOpen(true);
+          return;
+        }
+
+        /* The tap is the address, so the first sentence needs no wake word.
+           One turn only; then the wake gate re-arms. */
+        if (fromGesture) session.addressNextTurn();
+
+        setEnabled(true);
+        // Arming the chime is part of opening the kitchen's voice line.
+        void onStartShift();
+      } catch {
+        sessionRef.current = null;
+        session.close();
+        setEnabled(false);
+        setOpen(true);
+        setError("The voice line could not open. Tap the mic to try again — nothing was changed.");
+      } finally {
+        startingRef.current = false;
+        setBusy(false);
+      }
+    },
+    [ensureToolset, flush, onStartShift],
+  );
+
+  /* The board's header has its own "Chhotu" button: same tap, same one-turn
+     address, so the assistant is discoverable without hunting for the pill. */
+  useEffect(() => {
+    if (!openRequest) return;
+
+    /* Deferred by a tick so this is a subscription callback, not a cascading
+       setState inside the effect body. Sticky activation from the header
+       click still lets the audio clock start. */
+    const timer = window.setTimeout(() => {
+      setOpen(true);
+      void start(true);
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [openRequest, start]);
+
+  /* Once the browser remembers the mic permission, the kitchen line opens by
+     itself: the cook says "Aey Chhotu" with no tap at all. Without permission
+     this quietly does nothing and the pill asks for the one tap browsers
+     require. */
+  useEffect(() => {
+    if (keyState !== "ready" || autoStartedRef.current) return;
+    autoStartedRef.current = true;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const query = navigator.permissions?.query({
+          name: "microphone" as PermissionName,
+        });
+        const status = await query;
+        if (!cancelled && status?.state === "granted") void start(false);
+      } catch {
+        /* Safari / Firefox: leave the start to the tap. */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [keyState, start]);
 
   const stop = useCallback(() => {
     sessionRef.current?.close();
@@ -301,6 +430,10 @@ export function KitchenVoice({
     setLevel(0);
     setActivity(null);
     setWaiting(null);
+    setUserDraft("");
+    setAssistantDraft("");
+    userDraftRef.current = "";
+    assistantDraftRef.current = "";
   }, []);
 
   useEffect(
@@ -312,156 +445,188 @@ export function KitchenVoice({
   );
 
   const listening = enabled && phase !== "connecting";
+  const status = error ?? statusText(enabled, phase, wakeHeard, busy);
 
   return (
     <>
-      {expanded ? (
-        <section
-          aria-label="Kitchen voice assistant"
-          className="fixed right-5 bottom-24 z-40 flex w-[min(22rem,calc(100vw-2.5rem))] flex-col gap-3 rounded-lg border border-line-strong bg-surface p-4 shadow-lg"
-        >
-          <header className="flex items-start justify-between gap-3">
-            <div className="flex flex-col gap-1">
-              <h2 className="font-display text-sm font-semibold text-ink">Kitchen voice</h2>
-              <p
-                role={error ? "alert" : "status"}
-                className={cn("text-xs leading-snug", error ? "text-alert" : "text-ink-muted")}
-              >
-                {error ?? statusText(enabled, phase, wakeHeard)}
-              </p>
-            </div>
-            {listening ? (
-              <span className="mt-0.5 text-ember">
-                <MicBars level={level} active />
-              </span>
-            ) : null}
-          </header>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(true);
+          /* One tap is required by the browser before any mic can open; after
+             that, "Aey Chhotu" (or just "Chhotu") is the only control. */
+          if (!enabled && !busy) void start(true);
+        }}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label="Kitchen voice assistant"
+        className="fixed right-5 bottom-5 z-40 inline-flex cursor-pointer items-center gap-2 rounded-pill bg-ink px-4 py-3 text-sm font-semibold text-ink-inverse shadow-lg transition-transform duration-[var(--duration-fast)] ease-gentle hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ink/20"
+      >
+        {enabled ? (
+          <span className="text-on-ember">
+            <MicLevel level={level} listening={listening} />
+          </span>
+        ) : (
+          <Sparkles className="size-4" aria-hidden />
+        )}
+        <span>{enabled ? "Voice on" : "Ask Chhotu"}</span>
+      </button>
 
-          {lines.length > 0 ? (
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] font-semibold tracking-[0.14em] text-ink-subtle uppercase">
-                History · read only
-              </span>
-              <button
-                type="button"
-                onClick={() => setLines([])}
-                className="cursor-pointer text-[10px] font-semibold text-ink-subtle underline-offset-4 hover:text-ink hover:underline"
-              >
-                Clear
-              </button>
-            </div>
-          ) : null}
+      <Drawer
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Kitchen voice"
+        description="Read only — talk to it, nothing to type."
+        size="md"
+        footer={
+          <div className="flex w-full flex-col gap-2">
+            <p
+              role={error ? "alert" : "status"}
+              className={cn("text-xs font-medium", error ? "text-alert" : "text-ink-muted")}
+            >
+              {status}
+            </p>
 
-          {lines.length > 0 ? (
-            <ul aria-live="polite" className="flex max-h-52 flex-col gap-2 overflow-y-auto pr-1">
-              {lines.map((line) => (
-                <li
-                  key={line.id}
-                  className={cn("flex flex-col gap-1.5", line.role === "user" ? "items-end" : "items-start")}
-                >
-                  <div
-                    className={cn(
-                      "max-w-[92%] rounded-md px-3 py-2 text-xs leading-relaxed",
-                      line.role === "user"
-                        ? "bg-ember-soft text-ink"
-                        : "border border-line bg-paper text-ink",
-                    )}
-                  >
-                    {line.text}
-                  </div>
-                  {line.actions && line.actions.length > 0 ? (
-                    <ul className="flex flex-wrap gap-1">
-                      {line.actions.map((action, index) => (
-                        <li
-                          key={`${line.id}-a-${index}`}
-                          className={cn(
-                            "rounded-pill border px-2 py-0.5 text-[11px] font-medium",
-                            action.ok
-                              ? "border-ready/35 bg-ready-surface text-ready"
-                              : "border-pending/40 bg-pending-surface text-ink",
-                          )}
-                        >
-                          {action.label}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {userDraft || assistantDraft ? (
-            <div className="flex flex-col gap-1.5" aria-live="polite">
-              {userDraft ? (
-                <p className="self-end rounded-md bg-ember-soft px-3 py-2 text-xs text-ink">
-                  {userDraft}
-                </p>
-              ) : null}
-              {assistantDraft ? (
-                <p className="self-start rounded-md border border-line bg-paper px-3 py-2 text-xs text-ink">
-                  {assistantDraft}
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-
-          {activity ? (
-            <p role="status" className="flex items-center gap-2 text-xs text-ink-muted">
-              <Loader2 className="size-3.5 animate-spin text-ember" aria-hidden />
-              {activity}
+            <Button
+              type="button"
+              variant={enabled ? "outline" : "ember"}
+              size="lg"
+              fullWidth
+              disabled={busy || keyState === "checking"}
+              onClick={() => {
+                if (enabled) stop();
+                else void start(true);
+              }}
+              leftIcon={
+                busy ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden />
+                ) : enabled ? (
+                  <Square className="size-3.5" aria-hidden />
+                ) : (
+                  <Mic className="size-4" aria-hidden />
+                )
+              }
+            >
+              {busy ? "Opening…" : enabled ? "Stop listening" : "Start listening"}
+            </Button>
+          </div>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          {keyState === "missing" ? (
+            <p className="rounded-md border border-pending/30 bg-pending-surface px-3 py-2 text-sm text-ink">
+              GEMINI_API_KEY is not set on the API, so the kitchen assistant is off.
             </p>
           ) : null}
 
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] font-semibold tracking-[0.14em] text-ink-subtle uppercase">
+              History · read only
+            </span>
+            <div className="flex items-center gap-3">
+              {listening ? (
+                <span className="inline-flex items-center gap-1.5 text-ember">
+                  <MicLevel level={level} listening />
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.12em]">
+                    Live
+                  </span>
+                </span>
+              ) : null}
+              {lines.length > 1 ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLines([INTRO]);
+                    setWaiting(null);
+                  }}
+                  className="cursor-pointer text-[10px] font-semibold text-ink-subtle underline-offset-4 hover:text-ink hover:underline"
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <ul aria-live="polite" className="flex flex-col gap-3">
+            {lines.map((line) => (
+              <li
+                key={line.id}
+                className={cn(
+                  "flex flex-col gap-1.5",
+                  line.role === "user" ? "items-end" : "items-start",
+                )}
+              >
+                <div
+                  className={cn(
+                    "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
+                    line.role === "user"
+                      ? "border border-ember/20 bg-ember-soft text-ink"
+                      : "border border-line bg-paper text-ink",
+                  )}
+                >
+                  {line.text}
+                </div>
+                {line.actions && line.actions.length > 0 ? (
+                  <ul className="flex flex-wrap gap-1.5">
+                    {line.actions.map((action, index) => (
+                      <li
+                        key={`${line.id}-a-${index}`}
+                        className={cn(
+                          "rounded-pill border px-2.5 py-1 text-xs font-medium",
+                          action.ok
+                            ? "border-ready/35 bg-ready-surface text-ready"
+                            : "border-pending/40 bg-pending-surface text-ink",
+                        )}
+                      >
+                        {action.label}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </li>
+            ))}
+
+            {userDraft ? (
+              <li className="flex flex-col items-end gap-1.5">
+                <div className="max-w-[92%] rounded-lg border border-ember/20 bg-ember-soft px-3.5 py-2.5 text-sm leading-relaxed text-ink">
+                  {userDraft}
+                </div>
+              </li>
+            ) : null}
+
+            {assistantDraft ? (
+              <li className="flex flex-col items-start gap-1.5">
+                <div className="max-w-[92%] rounded-lg border border-line bg-paper px-3.5 py-2.5 text-sm leading-relaxed text-ink">
+                  {assistantDraft}
+                  <span
+                    aria-hidden
+                    className="ml-1 inline-block size-1.5 animate-pulse-soft rounded-pill bg-ember align-middle"
+                  />
+                </div>
+              </li>
+            ) : null}
+          </ul>
+
+          {activity ? (
+            <div role="status" className="flex items-center gap-2 text-sm text-ink-muted">
+              <Loader2 className="size-4 shrink-0 animate-spin text-ember" aria-hidden />
+              <span>{activity}</span>
+            </div>
+          ) : null}
+
           {waiting ? (
-            <p className="rounded-md border border-pending/40 bg-pending-surface px-3 py-2 text-xs font-medium text-ink">
+            <p className="rounded-md border border-pending/40 bg-pending-surface px-3 py-2 text-sm font-medium text-ink">
               Waiting for your yes: {waiting}
             </p>
           ) : null}
 
-          <button
-            type="button"
-            onClick={() => (enabled ? stop() : void enable())}
-            disabled={busy}
-            className="inline-flex h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-ink-inverse transition-opacity duration-[var(--duration-fast)] hover:opacity-90 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ink/20 disabled:cursor-wait disabled:opacity-60"
-          >
-            {busy ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden />
-            ) : enabled ? (
-              <Square className="size-3.5" aria-hidden />
-            ) : (
-              <Mic className="size-4" aria-hidden />
-            )}
-            {busy ? "Opening…" : enabled ? "Stop voice" : "Enable voice"}
-          </button>
-
-          <p className="text-[11px] leading-snug text-ink-subtle">
-            One tap starts the mic. After that it stays listening — say
-            &ldquo;Aey Chhotu&rdquo; or just &ldquo;Chhotu&rdquo; before a command.
+          <p className="text-xs leading-snug text-ink-subtle">
+            Say &ldquo;Aey Chhotu&rdquo; or just &ldquo;Chhotu&rdquo; before a command — board
+            dekho, table four ready, dish 86, shift start. Answers come back as speech, and this
+            transcript is the only record.
           </p>
-        </section>
-      ) : null}
-
-      <button
-        type="button"
-        onClick={() => {
-          /* One tap is required by the browser before any mic can open; after
-             that, “Aey Chhotu” (or just “Chhotu”) is the only control needed. */
-          setExpanded((current) => !current || !enabled);
-          if (!enabled && !busy) void enable();
-        }}
-        aria-expanded={expanded}
-        aria-label="Kitchen voice assistant"
-        className="fixed right-5 bottom-5 z-40 inline-flex cursor-pointer items-center gap-2 rounded-pill bg-ink px-4 py-3 text-sm font-semibold text-ink-inverse shadow-lg transition-transform duration-[var(--duration-fast)] ease-gentle hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ink/20"
-      >            {enabled ? (
-              <span className="text-on-ember">
-                <MicBars level={level} active={listening} />
-              </span>
-            ) : (
-              <Mic className="size-4" aria-hidden />
-            )}
-            <span>{enabled ? "Voice on" : "Start voice"}</span>
-      </button>
+        </div>
+      </Drawer>
     </>
   );
 }

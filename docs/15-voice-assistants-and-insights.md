@@ -59,6 +59,15 @@ Live session's `inputTranscription`:
    flashes "Aey Chhotu heard").
 5. At `turnComplete` an unaddressed turn is **dropped** and produces no bubble.
 
+A tap on the mic is the other way in: `addressNextTurn()` lets exactly **one**
+following turn through without the phrase, then the gate re-arms. So a cook can
+say "Aey Chhotu, table four ready", or tap once and just say "table four ready".
+
+Timing matters and is handled: Live's `inputTranscription` can land a second or
+two after the model has already decided to call a tool, so `runTools` waits up to
+2.5 s for that turn's transcript before judging it. Previously every spoken
+command raced the transcript and lost, answering `NOT_ADDRESSED`.
+
 **The hard part is tools.** In `runTools`, a `functionCall` on a turn that did
 not pass the gate is answered with `NOT_ADDRESSED` and is **never executed**.
 Ambient kitchen talk therefore cannot move a ticket, 86 a dish, or serve food —
@@ -176,9 +185,14 @@ reads it.
 - **Stock is mostly untracked.** `NULL` means the kitchen keeps no count; the
   assistant is told never to read that as zero. There is no UI yet to set counts.
 - **Feedback starts empty.** The console is told not to invent themes from it.
-- **The wake gate depends on transcription.** If the transcript never arrives,
-  the turn is dropped (safe) rather than acted on. The mic is browser-only:
-  Chrome/Edge are the reliable targets.
+- **The wake gate depends on transcription.** If the transcript never arrives
+  within the wait, the turn is refused (safe) rather than acted on. A tap is the
+  fallback when recognition is slow. The mic is browser-only: Chrome/Edge are
+  the reliable targets.
+- **The mic needs one real tap the first time.** Browsers will not open an
+  `AudioContext` or capture audio without a gesture, and a suspended context
+  streams silence. After the permission is remembered the dock starts itself on
+  load; `primeAudio()` is what makes that first tap work.
 - **No wake word on the diner sheet or console** — those are tap-to-talk.
 - **Rollup rows written before 017** keep their UTC-calendar day keys; the
   migration documents that they age out.
