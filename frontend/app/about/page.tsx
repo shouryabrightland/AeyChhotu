@@ -14,6 +14,7 @@ import Link from "next/link";
 import { LogoWatermark } from "@/components/brand/logo";
 import { SiteFooter } from "@/components/layout/site-footer";
 import { SiteHeader } from "@/components/layout/site-header";
+import { SoftSnap } from "@/components/layout/soft-snap";
 import { ExpandableCard } from "@/components/marketing/expandable-card";
 import { FlipCard } from "@/components/marketing/flip-card";
 import { HeroVisual } from "@/components/marketing/hero-visual";
@@ -135,6 +136,7 @@ const trackerStages = ["Pending", "Preparing", "Ready", "Served"];
 export default function AboutPage() {
   return (
     <div className="flex min-h-dvh flex-col">
+      <SoftSnap />
       <SiteHeader />
 
       <main id="main" className="flex-1">

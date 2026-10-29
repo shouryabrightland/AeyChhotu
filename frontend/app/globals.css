@@ -278,6 +278,29 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* Soft section snapping — opted into per page by <SoftSnap />.
+
+   The root is the scroller (see the lockdown above), so the snap container
+   has to be `html`. `proximity` is deliberate: a section only settles when
+   the reader already stopped near its edge, which never fights a long hero
+   or a paragraph being read halfway. The scroll padding clears the sticky
+   header so a snapped section starts below it, not under it. */
+html.soft-snap {
+  scroll-snap-type: y proximity;
+  scroll-padding-top: 4.5rem;
+}
+
+html.soft-snap main > section {
+  scroll-snap-align: start;
+  scroll-snap-stop: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.soft-snap {
+    scroll-snap-type: none;
+  }
+}
+
 @layer base {
   *,
   *::before,

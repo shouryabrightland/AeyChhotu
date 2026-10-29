@@ -1,7 +1,7 @@
 "use client";
 
 import { AnimatePresence } from "motion/react";
-import { BellRing, ChefHat, EyeOff, Flame, Lock, RefreshCw, Volume2, VolumeX } from "lucide-react";
+import { BellRing, Check, ChefHat, EyeOff, Flame, Lock, RefreshCw, Volume2, VolumeX } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KdsCard } from "@/components/staff/kds-card";
 import { MenuAvailabilityDrawer } from "@/components/staff/menu-availability-drawer";
@@ -80,6 +80,42 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
      presentational: ticking a line never writes a status, and the real
      one-tap advance below is untouched. */
   const [checked, setChecked] = useState<Record<string, string[]>>({});
+
+  /* Manual refresh feedback. The board usually updates itself over Realtime,
+     so a silent re-read was indistinguishable from a dead button. The arrow
+     now turns slowly while the read is in flight, then a green tick holds for
+     a second — the same confirmation the manager console uses. */
+  const [refreshing, setRefreshing] = useState(false);
+  const [justRefreshed, setJustRefreshed] = useState(false);
+  const refreshDoneTimer = useRef<number | null>(null);
+
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return;
+
+    if (refreshDoneTimer.current !== null) {
+      window.clearTimeout(refreshDoneTimer.current);
+      refreshDoneTimer.current = null;
+    }
+    setJustRefreshed(false);
+    setRefreshing(true);
+    try {
+      await refresh();
+      setJustRefreshed(true);
+      refreshDoneTimer.current = window.setTimeout(() => {
+        refreshDoneTimer.current = null;
+        setJustRefreshed(false);
+      }, 1_100);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refresh, refreshing]);
+
+  useEffect(
+    () => () => {
+      if (refreshDoneTimer.current !== null) window.clearTimeout(refreshDoneTimer.current);
+    },
+    [],
+  );
 
   const toggleItem = useCallback((orderId: string, itemId: string) => {
     setChecked((current) => {
@@ -224,15 +260,40 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
 
             {/* Backup refresh: the board normally updates itself over
                 Realtime, but a manual re-read is there when a socket silently
-                dies on a wall tablet. */}
+                dies on a wall tablet. The glyph carries the state: a slow
+                turn while reading, a green tick for a second after. */}
             <IconButton
               label="Refresh board"
               tone="ghost"
               size="md"
-              onClick={() => void refresh()}
+              onClick={() => void handleRefresh()}
+              aria-busy={refreshing || undefined}
+              className={cn(
+                "transition-colors duration-500 ease-gentle",
+                justRefreshed && "text-ready hover:text-ready",
+              )}
             >
-              <RefreshCw className="size-4" aria-hidden />
+              <span aria-hidden className="relative inline-flex size-4 items-center justify-center">
+                <RefreshCw
+                  className={cn(
+                    "absolute size-4 transition-all duration-500 ease-gentle",
+                    justRefreshed
+                      ? "rotate-45 scale-75 opacity-0"
+                      : "rotate-0 scale-100 opacity-100",
+                    refreshing && "animate-spin [animation-duration:1.8s]",
+                  )}
+                />
+                <Check
+                  className={cn(
+                    "absolute size-4 text-ready transition-all duration-500 ease-gentle",
+                    justRefreshed ? "scale-100 opacity-100" : "scale-75 opacity-0",
+                  )}
+                />
+              </span>
             </IconButton>
+            <span role="status" className="sr-only">
+              {justRefreshed ? "Kitchen board refreshed" : refreshing ? "Refreshing kitchen board" : ""}
+            </span>
 
             <IconButton
               label="Manage 86"

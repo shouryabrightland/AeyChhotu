@@ -1,17 +1,17 @@
 import type { Metadata, Viewport } from "next";
 import { PresentationView } from "./PresentationView";
 
-/* The hackathon showcase is a standalone dark exhibit, so it owns its own
-   browser chrome colour instead of inheriting the app's cream. */
+/* The showcase sits on the app's own canvas, so the browser chrome is the
+   same warm cream as every product screen. */
 export const viewport: Viewport = {
-  themeColor: "#070a13",
-  colorScheme: "dark",
+  themeColor: "#fbf8f4",
+  colorScheme: "light",
 };
 
 export const metadata: Metadata = {
   title: "Hackathon showcase",
   description:
-    "An 11-scene guided tour of AeyChhotu: the shared cart, table PIN, allergy guardrails, atomic order fire and live kitchen tracker.",
+    "A 19-scene tour of AeyChhotu: shared cart, table PIN and pass, diet-aware menu, allergy guardrails, atomic order fire, live kitchen, split bill, floor board and the manager console.",
   robots: { index: false },
 };
 
