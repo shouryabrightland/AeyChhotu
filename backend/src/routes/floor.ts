@@ -4,9 +4,11 @@ import {
   clearFloorTable,
   listFloorTables,
   notifyAdminForTable,
+  requestServe,
   settleTableBill,
 } from "../services/floor.service.js";
 import {
+  floorClearSchema,
   floorQuerySchema,
   floorTableParamsSchema,
   parseOrThrow,
@@ -60,6 +62,31 @@ floorRouter.post(
   },
 );
 
+/* "I'll serve this" — tells the KITCHEN a server is carrying the plate over.
+   Requires a Ready ticket; the kitchen clears the flag when it serves or
+   refuses that ticket. DELETE is the waiter's Release. */
+floorRouter.post(
+  "/tables/:table_id/serve-request",
+  requireAuth,
+  requireRole(...FLOOR_ROLES),
+  async (req, res) => {
+    const params = parseOrThrow(floorTableParamsSchema, req.params);
+    const data = await requestServe(params.table_id, true);
+    res.status(200).json({ success: true, data });
+  },
+);
+
+floorRouter.delete(
+  "/tables/:table_id/serve-request",
+  requireAuth,
+  requireRole(...FLOOR_ROLES),
+  async (req, res) => {
+    const params = parseOrThrow(floorTableParamsSchema, req.params);
+    const data = await requestServe(params.table_id, false);
+    res.status(200).json({ success: true, data });
+  },
+);
+
 /* Staff clear a flagged table. An unpaid table is refused with 409
    BILL_UNPAID and an admin alert; the admin route below is the override. */
 floorRouter.patch(
@@ -68,7 +95,8 @@ floorRouter.patch(
   requireRole(...FLOOR_ROLES),
   async (req, res) => {
     const params = parseOrThrow(floorTableParamsSchema, req.params);
-    const data = await clearFloorTable(params.table_id);
+    const body = parseOrThrow(floorClearSchema, req.body ?? {});
+    const data = await clearFloorTable(params.table_id, { force: body.force });
     res.status(200).json({ success: true, data });
   },
 );

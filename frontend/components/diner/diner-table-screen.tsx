@@ -22,8 +22,9 @@ import { Skeleton } from "@/components/ui/loading-state";
 import { useToast } from "@/components/ui/toast";
 import { usePresence } from "@/hooks/use-presence";
 import { useLiveTable } from "@/hooks/use-live-table";
-import { getStoredDisplayName, storeDisplayName, storeTableToken } from "@/lib/api/session";
+import { getDeviceId, getStoredDisplayName, storeDisplayName, storeTableToken } from "@/lib/api/session";
 import { clearStoredSession, getGrantedSession } from "@/lib/api/table-session";
+import { removeHeartbeat } from "@/lib/api-client";
 import type { MenuItem } from "@/lib/api/types";
 
 export interface DinerTableScreenProps {
@@ -70,6 +71,37 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
      kitchen; until then the guest keeps the tracker and history. */
   const paidWhileCooking = live.billStatus === "paid" && live.hasCookingOrders;
   const settled = live.billStatus === "paid" && !live.hasCookingOrders;
+
+  /* A settled visit closes itself. One minute after the thank-you appears,
+     this device leaves the table (its heartbeat is removed), the release
+     engine clears the table once every phone has gone, and the guest lands
+     back on the home screen — no dead tab left on the table's QR. */
+  const [secondsLeft, setSecondsLeft] = useState(60);
+
+  useEffect(() => {
+    if (!settled) return;
+    const timer = window.setInterval(() => {
+      setSecondsLeft((current) => Math.max(0, current - 1));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [settled]);
+
+  useEffect(() => {
+    if (!settled || secondsLeft > 0) return;
+    let cancelled = false;
+
+    void removeHeartbeat(tableToken, getDeviceId())
+      .catch(() => undefined)
+      .finally(() => {
+        if (cancelled) return;
+        clearStoredSession(tableToken);
+        router.push("/");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [settled, secondsLeft, tableToken, router]);
 
   usePresence(tableToken);
 
@@ -352,6 +384,16 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
           <p className="max-w-md text-lead text-ink-muted">
             Your bill is settled. Thank you for dining with us.
           </p>
+          <p className="max-w-md text-sm text-ink-subtle">
+            Taking you home in {secondsLeft}s — this phone is leaving the table, so it can be
+            cleared for the next guests.
+          </p>
+          <Link
+            href="/"
+            className="text-sm font-semibold text-ember underline underline-offset-4"
+          >
+            Go home now
+          </Link>
         </div>
       ) : null}
     </main>

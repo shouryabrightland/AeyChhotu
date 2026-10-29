@@ -748,7 +748,7 @@ export interface ClearTableResult {
    fire or a settle. */
 export async function clearTableSession(
   tableId: string,
-  options: { allowUnpaid: boolean },
+  options: { allowUnpaid: boolean; cancelActiveOrders?: boolean },
 ): Promise<ClearTableResult> {
   const client = await pool.connect();
   let committed = false;
@@ -803,7 +803,24 @@ export async function clearTableSession(
     const sessionOrderCount = counts.rows[0]?.session_order_count ?? 0;
     const activeOrders = counts.rows[0]?.active_orders ?? 0;
 
-    if (activeOrders > 0) {
+    /* A staff "clear anyway" cancels the open tickets instead of refusing.
+       They are DENIED, never served: nobody earned that revenue, and the guest
+       sees why the round stopped. The unpaid check below still uses the count
+       captured before this update, so cancelling a ticket can never erase a
+       debt that only a manager may forgive. */
+    if (activeOrders > 0 && options.cancelActiveOrders) {
+      await client.query(
+        `UPDATE orders
+            SET status        = 'denied',
+                denial_reason = COALESCE(NULLIF(denial_reason, ''), 'Table cleared by staff'),
+                updated_at    = now()
+          WHERE table_id = $1
+            AND status IN ('pending', 'preparing', 'ready')`,
+        [tableId],
+      );
+    }
+
+    if (activeOrders > 0 && !options.cancelActiveOrders) {
       await client.query("COMMIT");
       committed = true;
       return {

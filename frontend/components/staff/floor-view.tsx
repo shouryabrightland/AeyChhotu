@@ -28,8 +28,10 @@ import { useNow } from "@/hooks/use-now";
 import { useStaffMenuCatalog } from "@/hooks/use-staff-menu-catalog";
 import {
   ApiError,
+  cancelFloorServe,
   clearFloorTable,
   notifyFloorTable,
+  requestFloorServe,
   settleTableBill,
 } from "@/lib/api-client";
 import type { FloorTableSummary, OrderStatus } from "@/lib/api/types";
@@ -179,13 +181,28 @@ export function FloorView({ onLock }: FloorViewProps) {
         return true;
       });
 
-  function claim(summary: FloorTableSummary) {
+  /* "I'll serve this" is now a real handoff, not just a local flag: the tap
+     writes serve_requested_at on the table, which the KDS ticket payload
+     carries to the kitchen so the pass knows someone is walking over. The
+     server refuses it when nothing is actually Ready (409 NO_READY_TICKET). */
+  async function claim(summary: FloorTableSummary) {
     setClaimed((current) => ({ ...current, [summary.table.id]: true }));
-    toast({
-      title: `${summary.table.name} claimed`,
-      description: "You're serving this one — the room sees it as taken.",
-      tone: "success",
-    });
+
+    try {
+      await requestFloorServe(summary.table.id);
+      toast({
+        title: `Kitchen pinged · ${summary.table.name}`,
+        description: "The pass knows you're carrying this one out.",
+        tone: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Kitchen could not be pinged",
+        description:
+          err instanceof ApiError ? err.message : "Try again — the plate is still on the pass.",
+        tone: "error",
+      });
+    }
   }
 
   function release(summary: FloorTableSummary) {
@@ -194,6 +211,9 @@ export function FloorView({ onLock }: FloorViewProps) {
       delete next[summary.table.id];
       return next;
     });
+    // Undo the kitchen ping too, so the pass stops expecting this plate.
+    void cancelFloorServe(summary.table.id).catch(() => undefined);
+
     toast({
       title: `${summary.table.name} released`,
       description: "Back in the open pool for any server.",
@@ -227,12 +247,17 @@ export function FloorView({ onLock }: FloorViewProps) {
     }
   }
 
-  async function clearTable(summary: FloorTableSummary) {
+  /* `force` is the staff "clear anyway": the server cancels any open ticket
+     (denied, never served) and ends the session. An unpaid bill is still the
+     manager's call — that refusal comes back as BILL_UNPAID below. */
+  async function clearTable(summary: FloorTableSummary, force = false) {
     try {
-      await clearFloorTable(summary.table.id);
+      await clearFloorTable(summary.table.id, force);
       toast({
         title: `${summary.table.name} cleared`,
-        description: "Session ended. The table is ready for its next guests.",
+        description: force
+          ? "The open ticket was cancelled. The table is ready for its next guests."
+          : "Session ended. The table is ready for its next guests.",
         tone: "success",
       });
       await refresh();
@@ -477,7 +502,7 @@ function TableCard({
   onClaim: (summary: FloorTableSummary) => void;
   onRelease: (summary: FloorTableSummary) => void;
   onSettle: (summary: FloorTableSummary) => void;
-  onClear: (summary: FloorTableSummary) => void;
+  onClear: (summary: FloorTableSummary, force?: boolean) => void;
   onNotify: (summary: FloorTableSummary) => void;
 }) {
   const { table, active_order: order, cart_line_count } = summary;
@@ -534,6 +559,14 @@ function TableCard({
   const billRequested = table.bill_status === "requested";
   const paid = table.bill_status === "paid";
   const unpaid = Boolean(summary.bill_unpaid);
+  /* A table with a session, staged lines or a ticket is occupying the room;
+     staff may clear it by hand even while it is active. */
+  const occupied =
+    Boolean(order) ||
+    cart_line_count > 0 ||
+    (summary.active_devices ?? 0) > 0 ||
+    summary.needs_attention;
+  const [confirmingClear, setConfirmingClear] = useState(false);
 
   return (
     <li className="h-full">
@@ -754,6 +787,44 @@ function TableCard({
                 </motion.div>
               )}
             </AnimatePresence>
+          </div>
+        ) : null}
+
+        {!stale && !unpaid && occupied ? (
+          <div className="mt-4 border-t border-line pt-3">
+            {confirmingClear ? (
+              <div className="flex flex-col gap-2">
+                <p className="text-xs leading-snug text-ink-muted">
+                  {itemCount > 0
+                    ? `${itemCount} ${itemCount === 1 ? "item is" : "items are"} still open. Clearing cancels the ticket — the guest sees why — and frees the table.`
+                    : "This ends the current session and frees the table for the next guests."}
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    fullWidth
+                    onClick={() => {
+                      setConfirmingClear(false);
+                      onClear(summary, true);
+                    }}
+                  >
+                    Clear anyway
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setConfirmingClear(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmingClear(true)}
+                className="cursor-pointer text-xs font-semibold text-ink-subtle underline-offset-4 transition-colors duration-[var(--duration-fast)] hover:text-ink hover:underline"
+              >
+                Clear table manually
+              </button>
+            )}
           </div>
         ) : null}
       </article>

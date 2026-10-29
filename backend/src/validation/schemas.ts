@@ -239,6 +239,10 @@ export const floorQuerySchema = z.object({ ...pagination });
 /** PATCH /api/v1/floor/tables/:table_id/settle */
 export const floorTableParamsSchema = z.object({ table_id: uuid("table_id") });
 
+/** PATCH /api/v1/floor/tables/:table_id/clear — `force` cancels an open ticket
+    so staff can clear an occupied table without serving food nobody got. */
+export const floorClearSchema = z.object({ force: z.boolean().optional().default(false) });
+
 // ---- Module 5: Executive admin console --------------------------------
 
 /** POST /api/v1/admin/tables */

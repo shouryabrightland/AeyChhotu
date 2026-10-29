@@ -294,8 +294,15 @@ export async function notifyAdminForTable(tableId: string): Promise<NotifyAdminR
   };
 }
 
-export async function clearFloorTable(tableId: string): Promise<ClearFloorTableResult> {
-  const result = await clearTableSession(tableId, { allowUnpaid: false });
+export async function clearFloorTable(
+  tableId: string,
+  options: { force?: boolean } = {},
+): Promise<ClearFloorTableResult> {
+  const result = await clearTableSession(tableId, {
+    allowUnpaid: false,
+    // "Clear anyway" on an occupied table cancels its open tickets (denied).
+    cancelActiveOrders: options.force === true,
+  });
 
   if (result.outcome === "not_found") {
     throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table id parsed.");
@@ -305,8 +312,8 @@ export async function clearFloorTable(tableId: string): Promise<ClearFloorTableR
     throw new AppError(
       409,
       "TABLE_HAS_ACTIVE_ORDERS",
-      "This table still has an open ticket. Serve or prune it before clearing the table.",
-      { table_id: tableId, active_orders: result.active_orders },
+      "This table still has an open ticket. Confirm clear anyway to cancel it, or serve/prune it first.",
+      { table_id: tableId, active_orders: result.active_orders, force_available: true },
     );
   }
 
@@ -333,4 +340,81 @@ export async function clearFloorTable(tableId: string): Promise<ClearFloorTableR
   }
 
   return { table_id: tableId, cleared: true, bill_status: result.bill_status ?? "paid" };
+}
+
+/* POST /api/v1/floor/tables/:table_id/serve-request
+   DELETE /api/v1/floor/tables/:table_id/serve-request
+
+   The floor's "I'll serve this" used to be a browser-only claim, so the
+   kitchen never knew a server was walking over. This writes a timestamp on
+   the table; the KDS ticket payload carries it back to the pass, where the
+   board shows "waiter coming" and pings the chime.
+
+   Requiring a READY ticket is the server-side guard: a ping with nothing at
+   the pass would be noise, and the kitchen clears it when the ticket is
+   served or refused. */
+export interface ServeRequestResult {
+  table_id: string;
+  requested: boolean;
+  serve_requested_at: string | null;
+}
+
+export async function requestServe(tableId: string, requested: boolean): Promise<ServeRequestResult> {
+  if (!requested) {
+    const cleared = await pool.query<{ id: string }>(
+      `UPDATE restaurant_tables
+          SET serve_requested_at = NULL
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id`,
+      [tableId],
+    );
+
+    if (!cleared.rows[0]) {
+      throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table id parsed.");
+    }
+
+    return { table_id: tableId, requested: false, serve_requested_at: null };
+  }
+
+  const found = await pool.query<{ ready: boolean }>(
+    `SELECT EXISTS (
+              SELECT 1 FROM orders o
+               WHERE o.table_id = t.id AND o.status = 'ready'
+            ) AS ready
+       FROM restaurant_tables t
+      WHERE t.id = $1 AND t.deleted_at IS NULL`,
+    [tableId],
+  );
+
+  const row = found.rows[0];
+  if (!row) {
+    throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table id parsed.");
+  }
+
+  if (!row.ready) {
+    throw new AppError(
+      409,
+      "NO_READY_TICKET",
+      "Nothing is at the pass for this table yet.",
+    );
+  }
+
+  const updated = await pool.query<{ serve_requested_at: Date }>(
+    `UPDATE restaurant_tables
+        SET serve_requested_at = now()
+      WHERE id = $1
+      RETURNING serve_requested_at`,
+    [tableId],
+  );
+
+  const requestedAt = updated.rows[0]?.serve_requested_at;
+  if (!requestedAt) {
+    throw new AppError(500, "INTERNAL_ERROR", "The kitchen could not be pinged.");
+  }
+
+  return {
+    table_id: tableId,
+    requested: true,
+    serve_requested_at: iso(requestedAt),
+  };
 }
