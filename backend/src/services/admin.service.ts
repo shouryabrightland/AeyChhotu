@@ -989,21 +989,26 @@ export async function topSellingAnalytics(): Promise<AnalyticsSummary> {
       total_sold: number;
       total_revenue: string;
     }>(
-      `SELECT mi.id AS menu_item_id,
+      `WITH b AS (SELECT ((now() AT TIME ZONE 'Asia/Kolkata') - interval '5 hours')::date AS today)
+       SELECT mi.id AS menu_item_id,
               mi.name,
               mi.category,
               COALESCE(SUM(sr.quantity), 0)::int AS total_sold,
               COALESCE(SUM(sr.revenue), 0)::numeric(10,2) AS total_revenue
          FROM sales_rollup sr
          JOIN menu_items mi ON mi.id = sr.menu_item_id
+        WHERE sr.day = (SELECT today FROM b)
         GROUP BY mi.id, mi.name, mi.category
         ORDER BY total_sold DESC
         LIMIT 10`,
     ),
     pool.query<{ total_revenue: string; total_orders_served: number }>(
+      /* The SAME business day the leaderboard and the assistant use, so the
+         card, the table and Chhotu can never quote three different numbers. */
       `SELECT COALESCE(SUM(revenue), 0)::numeric(10,2) AS total_revenue,
               COALESCE(SUM(orders_served), 0)::int AS total_orders_served
-         FROM sales_day`,
+         FROM sales_day
+        WHERE day = ((now() AT TIME ZONE 'Asia/Kolkata') - interval '5 hours')::date`,
     ),
     pool.query<{ active_tables_count: number }>(
       `SELECT count(*)::int AS active_tables_count

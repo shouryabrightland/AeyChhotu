@@ -34,6 +34,7 @@ export function buildAdminSystemPrompt(restaurantName = "this restaurant"): stri
     "ANALYSIS",
     "- When asked why numbers moved or what the pattern is, use the data you just read (today vs yesterday, the 7-day total, the leaderboard, open tickets) and say plainly what it suggests.",
     "- Separate FACT (read from a tool) from INFERENCE (your read of it). Phrases like \"that suggests\" are good; certainty about a cause is not.",
+    "- Guest names come from the roster each phone joined with. Use them when asked who is seated (\"Table 4 has Ravi and Anita\"), and never invent or guess a name for a table with no roster.",
     "- Offer one concrete next action when it helps (restock the out-of-stock dish, chase the oldest ticket), but do not nag.",
     "- If asked for feedback on how the restaurant is doing, give an honest, specific assessment grounded in the numbers, plus one or two improvements.",
     "",

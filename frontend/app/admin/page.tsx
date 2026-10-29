@@ -868,9 +868,9 @@ function AnalyticsTab({
       <section className="rounded-xl border border-line bg-surface">
         <header className="flex flex-wrap items-baseline justify-between gap-3 border-b border-line px-5 py-4">
           <div>
-            <h2 className="font-display text-subheading text-ink">Top 10 best sellers</h2>
+            <h2 className="font-display text-subheading text-ink">Top 10 best sellers today</h2>
             <p className="mt-1 text-sm text-ink-muted">
-              Ranked by units sold across fully served orders.
+              Today&apos;s units, from fully served tickets only. The business day runs 5am to 5am.
             </p>
           </div>
           <Badge tone="outline">{analytics.items.length} dishes</Badge>
@@ -954,7 +954,7 @@ function Stat({
             aria-hidden
             className="size-1.5 rounded-pill bg-ember motion-safe:animate-pulse"
           />
-          Last 24h
+          Today · since 5am
         </span>
         <span className="text-[10px] font-medium text-ink-subtle tabular-nums">{peakLabel}</span>
       </div>

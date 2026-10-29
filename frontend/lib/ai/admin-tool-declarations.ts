@@ -53,7 +53,7 @@ export const ADMIN_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   ),
   fn(
     "get_table_occupancy",
-    "How many tables are seated vs free right now, plus per-table devices, guests and open tickets. Use for 'which tables are free'.",
+    "How many tables are seated vs free right now, plus per-table guest NAMES, device count and open tickets. Use for 'which tables are free', 'who is at table 4', or 'how many guests are in tonight'.",
     {
       only_free: flag("When true, return only tables with no open session."),
       only_occupied: flag("When true, return only tables with an open session."),

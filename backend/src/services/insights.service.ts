@@ -59,6 +59,8 @@ export interface TableOccupancyRow {
   bill_status: string;
   devices: number;
   guests: number;
+  /** Names the roster recorded when each phone joined, oldest first. */
+  member_names: string[];
   open_orders: number;
 }
 
@@ -99,21 +101,27 @@ export interface FeedbackRow {
   table_code: string;
 }
 
-/** Today, yesterday and the last seven days, in one round trip. */
+/* The one definition of "today", shared with the writer (sql/017): the
+   business day starts at 05:00 IST, so the 2 am order belongs to last night.
+   Reading CURRENT_DATE here would key on the database's timezone instead. */
+const BUSINESS_TODAY = "((now() AT TIME ZONE 'Asia/Kolkata') - interval '5 hours')::date";
+
+/** Today (05:00→05:00 IST), yesterday and the last seven business days. */
 export async function dailySalesSummary(): Promise<DailySalesSummary> {
   const { rows } = await pool.query<DailySalesSummary>(
-    `SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS day,
-            COALESCE((SELECT revenue FROM sales_day WHERE day = CURRENT_DATE), 0)::float8 AS revenue_today,
-            COALESCE((SELECT orders_served FROM sales_day WHERE day = CURRENT_DATE), 0)::int AS orders_today,
-            COALESCE((SELECT SUM(quantity) FROM sales_rollup WHERE day = CURRENT_DATE), 0)::int AS items_sold_today,
+    `WITH b AS (SELECT ${BUSINESS_TODAY} AS today)
+     SELECT to_char((SELECT today FROM b), 'YYYY-MM-DD') AS day,
+            COALESCE((SELECT revenue FROM sales_day WHERE day = (SELECT today FROM b)), 0)::float8 AS revenue_today,
+            COALESCE((SELECT orders_served FROM sales_day WHERE day = (SELECT today FROM b)), 0)::int AS orders_today,
+            COALESCE((SELECT SUM(quantity) FROM sales_rollup WHERE day = (SELECT today FROM b)), 0)::int AS items_sold_today,
             COALESCE((
               SELECT CASE WHEN orders_served > 0 THEN revenue / orders_served ELSE 0 END
-                FROM sales_day WHERE day = CURRENT_DATE
+                FROM sales_day WHERE day = (SELECT today FROM b)
             ), 0)::float8 AS average_ticket_today,
-            COALESCE((SELECT revenue FROM sales_day WHERE day = CURRENT_DATE - 1), 0)::float8 AS revenue_yesterday,
-            COALESCE((SELECT orders_served FROM sales_day WHERE day = CURRENT_DATE - 1), 0)::int AS orders_yesterday,
-            COALESCE((SELECT SUM(revenue) FROM sales_day WHERE day >= CURRENT_DATE - 6), 0)::float8 AS revenue_7d,
-            COALESCE((SELECT SUM(orders_served) FROM sales_day WHERE day >= CURRENT_DATE - 6), 0)::int AS orders_7d`,
+            COALESCE((SELECT revenue FROM sales_day WHERE day = (SELECT today FROM b) - 1), 0)::float8 AS revenue_yesterday,
+            COALESCE((SELECT orders_served FROM sales_day WHERE day = (SELECT today FROM b) - 1), 0)::int AS orders_yesterday,
+            COALESCE((SELECT SUM(revenue) FROM sales_day WHERE day >= (SELECT today FROM b) - 6), 0)::float8 AS revenue_7d,
+            COALESCE((SELECT SUM(orders_served) FROM sales_day WHERE day >= (SELECT today FROM b) - 6), 0)::int AS orders_7d`,
   );
 
   const row = rows[0];
@@ -126,14 +134,15 @@ export async function dailySalesSummary(): Promise<DailySalesSummary> {
 /** Units and revenue per dish over a window, best first. */
 export async function bestSellingDishes(limit: number, days: number): Promise<BestSeller[]> {
   const { rows } = await pool.query<BestSeller>(
-    `SELECT mi.id AS menu_item_id,
+    `WITH b AS (SELECT ${BUSINESS_TODAY} AS today)
+     SELECT mi.id AS menu_item_id,
             mi.name,
             mi.category,
             SUM(sr.quantity)::int AS units,
             SUM(sr.revenue)::float8 AS revenue
        FROM sales_rollup sr
        JOIN menu_items mi ON mi.id = sr.menu_item_id
-      WHERE sr.day >= CURRENT_DATE - ($1::int - 1)
+      WHERE sr.day BETWEEN (SELECT today FROM b) - ($1::int - 1) AND (SELECT today FROM b)
       GROUP BY mi.id, mi.name, mi.category
       ORDER BY units DESC, revenue DESC
       LIMIT $2::int`,
@@ -170,6 +179,10 @@ export async function tableOccupancy(): Promise<Occupancy> {
             t.bill_status,
             (SELECT count(*)::int FROM table_device_presence p WHERE p.table_id = t.id) AS devices,
             (SELECT count(*)::int FROM table_members m WHERE m.table_id = t.id) AS guests,
+            COALESCE((
+              SELECT json_agg(m.name ORDER BY m.joined_at)
+                FROM table_members m WHERE m.table_id = t.id
+            ), '[]'::json) AS member_names,
             (SELECT count(*)::int FROM orders o
               WHERE o.table_id = t.id AND o.status IN ('pending', 'preparing', 'ready')) AS open_orders
        FROM restaurant_tables t

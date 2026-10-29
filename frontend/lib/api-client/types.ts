@@ -618,6 +618,8 @@ export interface AdminOccupancyRow {
   bill_status: string;
   devices: number;
   guests: number;
+  /** Roster names captured when each phone joined, oldest first. */
+  member_names: string[];
   open_orders: number;
 }
 
