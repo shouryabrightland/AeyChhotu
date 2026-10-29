@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { env } from "../config/env.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import {
   advanceStatus,
@@ -58,4 +59,13 @@ kdsRouter.post("/shift/activate", async (req, res) => {
   const body = parseOrThrow(shiftActivateSchema, req.body);
   const data = await armShift(body.device_id);
   res.status(200).json({ success: true, data });
+});
+
+/* GET /api/v1/kds/assistant/key — the Live key for the kitchen's voice
+   assistant. Same restricted key the diner sheet and the manager console
+   receive, released here to a KITCHEN shift token only (the router above is
+   requireAuth + requireRole("kitchen"), so a diner grant or an admin token
+   gets 401/403 before this handler runs). */
+kdsRouter.get("/assistant/key", (_req, res) => {
+  res.status(200).json({ success: true, data: { gemini_api_key: env.geminiApiKey } });
 });

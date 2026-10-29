@@ -20,6 +20,7 @@ import type {
   AdminTable,
   AdminTableToken,
   AvailabilityResult,
+  ServeRequestResult,
   CreateAdminCategoryInput,
   CreateAdminMenuItemInput,
   UpdateAdminCategoryInput,
@@ -393,6 +394,15 @@ export async function activateShift(deviceId: string): Promise<ShiftActivation> 
   return data;
 }
 
+/** GET /api/v1/kds/assistant/key — released to a KITCHEN shift token only. */
+export async function getKdsAssistantKey(): Promise<{ gemini_api_key: string | null }> {
+  const { data } = await apiRequest<{ gemini_api_key: string | null }>(
+    `${BASE}/kds/assistant/key`,
+    { auth: true },
+  );
+  return data;
+}
+
 // ---- Module 4: Floor operations ---------------------------------------
 
 /** PATCH /api/v1/floor/tables/:table_id/settle (auth; staff role).
@@ -424,10 +434,13 @@ export async function notifyFloorTable(
 /** PATCH /api/v1/floor/tables/:table_id/clear (auth; staff role).
     Clears a flagged table when nothing is owed. Throws 409 BILL_UNPAID when
     the table has history and an unpaid bill — that call also alerts admin. */
-export async function clearFloorTable(tableId: string): Promise<TableClearResult> {
+export async function clearFloorTable(
+  tableId: string,
+  force = false,
+): Promise<TableClearResult> {
   const { data } = await apiRequest<TableClearResult>(
     `${BASE}/floor/tables/${encodeURIComponent(tableId)}/clear`,
-    { method: "PATCH", auth: true },
+    { method: "PATCH", auth: true, body: { force } },
   );
   return data;
 }
@@ -440,6 +453,26 @@ export async function toggleItemAvailability(
   const { data } = await apiRequest<AvailabilityResult>(
     `${BASE}/menu/items/${encodeURIComponent(itemId)}/availability`,
     { method: "PATCH", auth: true, body: { is_available: isAvailable } },
+  );
+  return data;
+}
+
+/** POST /api/v1/floor/tables/:table_id/serve-request — "I'll serve this".
+    Pings the kitchen that a waiter is carrying the plate over. */
+export async function requestFloorServe(tableId: string): Promise<ServeRequestResult> {
+  const { data } = await apiRequest<ServeRequestResult>(
+    `${BASE}/floor/tables/${encodeURIComponent(tableId)}/serve-request`,
+    { method: "POST", auth: true },
+  );
+  return data;
+}
+
+/** DELETE /api/v1/floor/tables/:table_id/serve-request — the waiter's Release,
+    which withdraws the "on my way" ping from the kitchen. */
+export async function cancelFloorServe(tableId: string): Promise<ServeRequestResult> {
+  const { data } = await apiRequest<ServeRequestResult>(
+    `${BASE}/floor/tables/${encodeURIComponent(tableId)}/serve-request`,
+    { method: "DELETE", auth: true },
   );
   return data;
 }

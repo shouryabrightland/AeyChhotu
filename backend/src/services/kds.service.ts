@@ -9,7 +9,13 @@ import { checkAndAutoReleaseTable } from "./sessions.service.js";
 
 export interface KdsTicket {
   order_id: string;
-  table: { id: string; code: string; name: string };
+  table: {
+    id: string;
+    code: string;
+    name: string;
+    /** Set when a floor waiter tapped "I'll serve this" (sql/018). */
+    serve_requested_at: string | null;
+  };
   status: string;
   created_at: string;
   items: Array<{
@@ -51,13 +57,18 @@ export async function listTickets(params: {
     order_id: string;
     status: string;
     created_at: Date;
-    table: { id: string; code: string; name: string };
+    table: { id: string; code: string; name: string; serve_requested_at: string | null };
     items: KdsTicket["items"];
   }>(
     `SELECT o.id AS order_id,
             o.status,
             o.created_at,
-            jsonb_build_object('id', t.id, 'code', t.code, 'name', t.name) AS "table",
+            jsonb_build_object(
+              'id', t.id,
+              'code', t.code,
+              'name', t.name,
+              'serve_requested_at', t.serve_requested_at
+            ) AS "table",
             COALESCE(
               (
                 SELECT jsonb_agg(
@@ -170,6 +181,11 @@ export async function pruneTicket(orderId: string) {
       orderId,
     ]);
 
+    // The waiter's "on my way" ping was about this ticket; it is done.
+    await client.query("UPDATE restaurant_tables SET serve_requested_at = NULL WHERE id = $1", [
+      order.table_id,
+    ]);
+
     await client.query("COMMIT");
     committed = true;
 
@@ -243,6 +259,12 @@ export async function denyTicket(orderId: string, reason: string): Promise<DenyT
       { current_status: currentStatus, requested_status: "denied" },
     );
   }
+
+  // A refused ticket is no longer coming out of the pass, so any waiter ping
+  // for it is stale the moment the kitchen refuses it.
+  await pool.query("UPDATE restaurant_tables SET serve_requested_at = NULL WHERE id = $1", [
+    row.table_id,
+  ]);
 
   // Separate transaction: the release engine takes its own FOR UPDATE lock on
   // the table row, which must not be nested inside the order UPDATE.

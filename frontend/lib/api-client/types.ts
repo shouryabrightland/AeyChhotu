@@ -223,7 +223,13 @@ export interface OrderHistoryItem {
 /** E10 — KDS ticket. */
 export interface KdsTicket {
   order_id: string;
-  table: { id: string; code: string; name: string };
+  table: {
+    id: string;
+    code: string;
+    name: string;
+    /** A floor waiter tapped "I'll serve this" and is walking over. */
+    serve_requested_at: string | null;
+  };
   status: ActiveOrderStatus;
   created_at: string;
   items: OrderItemLine[];
@@ -254,6 +260,32 @@ export interface AvailabilityResult {
   menu_item_id: string;
   is_available: boolean;
   denied_orders?: number;
+}
+
+/** GET /api/v1/admin/insights/menu — one dish with its full metadata. */
+export interface AdminCatalogItem {
+  menu_item_id: string;
+  name: string;
+  category: string;
+  price: number;
+  description: string;
+  vegetarian: boolean;
+  spice_level: number;
+  ingredients: string[];
+  allergens: string[];
+  diet_tags: string[];
+  portion_description: string;
+  is_available: boolean;
+  stock_quantity: number | null;
+  low_stock_threshold: number | null;
+}
+
+/** POST/DELETE /api/v1/floor/tables/:table_id/serve-request — the waiter's
+    "I'll serve this" / Release. */
+export interface ServeRequestResult {
+  table_id: string;
+  requested: boolean;
+  serve_requested_at: string | null;
 }
 
 /** PATCH /api/v1/kds/tickets/:order_id/deny — the chef's refusal. */

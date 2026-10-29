@@ -22,6 +22,7 @@ import {
   pruneKdsTicket as apiPruneKdsTicket,
   subscribeKdsOrders,
   subscribeOrdersFeed,
+  subscribeTableUpdates,
   toKdsOrder,
   updateKdsStatus as apiUpdateKdsStatus,
 } from "@/lib/api-client";
@@ -160,6 +161,13 @@ export function useLiveKds(): LiveKdsValue {
       void refresh();
     });
 
+    /* A waiter's "I'll serve this" writes restaurant_tables, not orders, so
+       without this the "waiter coming" ping only appeared on the 15 s poll.
+       Watching the table row makes it land the moment the floor taps. */
+    const detachTables = subscribeTableUpdates(() => {
+      void refresh();
+    });
+
     /* docs/14 #10 — the board must not freeze when Realtime is unavailable.
        Subscriptions are NO-OPs without Supabase (and silent when RLS matches
        nothing), so a slow poll underneath keeps the kitchen truthful. 15 s
@@ -172,6 +180,7 @@ export function useLiveKds(): LiveKdsValue {
       clearInterval(poll);
       detachIntake();
       detachFeed();
+      detachTables();
     };
   }, [phase, refresh]);
 

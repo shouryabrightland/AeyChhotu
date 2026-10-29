@@ -4,6 +4,7 @@ import { AnimatePresence } from "motion/react";
 import { BellRing, Check, ChefHat, EyeOff, Flame, Lock, RefreshCw, Volume2, VolumeX } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KdsCard } from "@/components/staff/kds-card";
+import { KitchenVoice } from "@/components/staff/kitchen-voice";
 import { MenuAvailabilityDrawer } from "@/components/staff/menu-availability-drawer";
 import { OpsBar } from "@/components/staff/ops-bar";
 import { Badge } from "@/components/ui/badge";
@@ -171,12 +172,54 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
     });
   }, [tickets, audioArmed, toast]);
 
-  function handleStartShift() {
+  /* A waiter's "I'll serve this" on the floor writes serve_requested_at on the
+     table (sql/018), which rides along on the ticket. Announce each new one so
+     the pass knows someone is walking over — the strip above the lanes stays
+     up until the ticket is served or refused. */
+  const announcedServing = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const announced = announcedServing.current;
+    const fresh = tickets.filter(
+      (order) => order.serve_requested_at && !announced.has(order.id),
+    );
+
+    for (const order of tickets) {
+      if (order.serve_requested_at) announced.add(order.id);
+      else announced.delete(order.id);
+    }
+
+    const first = fresh[0];
+    if (!first) return;
+    if (audioArmed && isAudioArmed()) playChime();
+
+    toast({
+      title: `Waiter coming · Table ${first.table_code}`,
+      description: "A server tapped “I'll serve this” on the floor board.",
+    });
+  }, [tickets, audioArmed, toast]);
+
+  /* Stale pings are hidden after 20 minutes; the backend clears the flag when
+     the ticket is served or denied, so this only catches a crashed device. */
+  const incoming = tickets.filter((order) => {
+    if (order.status !== "ready" || !order.serve_requested_at) return false;
+    const requestedAt = Date.parse(order.serve_requested_at);
+    if (!Number.isFinite(requestedAt)) return false;
+    // Before the clock ticks, show the ping rather than hiding it.
+    return now === null || now - requestedAt < 20 * 60_000;
+  });
+
+  /* Also the voice assistant's `start_shift` tool target, so a chef can arm
+     the line by saying it. Returns a result instead of only toasting. */
+  const handleStartShift = useCallback(async () => {
     const armed = armAudio();
     setAudioArmed(armed);
 
     // E13 — register this device for shift chimes (no-op when offline).
-    void activateShift(getDeviceId()).catch(() => undefined);
+    try {
+      await activateShift(getDeviceId());
+    } catch {
+      return { ok: false, message: "This device could not register for shift chimes." };
+    }
 
     toast({
       title: armed ? "Shift active · Audio armed." : "Audio blocked",
@@ -185,7 +228,11 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
         : "This browser blocked the audio context — the board still updates visually.",
       tone: armed ? "success" : "error",
     });
-  }
+
+    return armed
+      ? { ok: true }
+      : { ok: false, message: "This browser blocked audio, but the board is live." };
+  }, [toast]);
 
   /* Manual refusal. The card has already collected a required reason in its
      confirmation modal; this only reports the outcome. */
@@ -327,6 +374,26 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
         </Container>
       ) : (
         <>
+          {incoming.length > 0 ? (
+            <Container className="pt-4">
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-ember/30 bg-ember-soft px-4 py-3">
+                <BellRing className="size-4 shrink-0 text-ember" aria-hidden />
+                <p className="text-sm font-semibold text-ink">Waiter coming</p>
+                <ul className="flex flex-wrap gap-1.5">
+                  {incoming.map((order) => (
+                    <li
+                      key={order.id}
+                      className="rounded-pill bg-surface px-2.5 py-1 text-xs font-semibold text-ink tabular-nums"
+                    >
+                      Table {order.table_code}
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-ink-muted">Hand the plate over at the pass.</p>
+              </div>
+            </Container>
+          ) : null}
+
           {/* Segmented control — instant, local, no server round trip. */}
           <div className="lg:hidden">
             <Container className="pt-4">
@@ -452,6 +519,17 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
           </Container>
         </>
       )}
+
+      <KitchenVoice
+        tickets={tickets}
+        menu={catalog.menu}
+        refresh={refresh}
+        onMove={(order, next) => advance(order, next)}
+        onServe={(order) => advance(order, "served")}
+        onDeny={deny}
+        onSetAvailability={catalog.setAvailability}
+        onStartShift={handleStartShift}
+      />
 
       <MenuAvailabilityDrawer
         open={availabilityOpen}

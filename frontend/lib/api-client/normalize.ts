@@ -140,6 +140,7 @@ export function toKdsOrder(ticket: KdsTicket): Order {
     id: ticket.order_id,
     table_id: ticket.table.id,
     table_code: ticket.table.code,
+    serve_requested_at: ticket.table.serve_requested_at ?? null,
     status: ticket.status as OrderStatus,
     created_at: ticket.created_at,
     updated_at: ticket.created_at,

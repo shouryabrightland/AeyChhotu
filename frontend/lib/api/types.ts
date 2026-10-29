@@ -68,6 +68,8 @@ export interface Order {
   id: string;
   table_id: string;
   table_code: string;
+  /** KDS only: set when a floor waiter said "I'll serve this" (sql/018). */
+  serve_requested_at?: string | null;
   status: OrderStatus;
   created_at: string;
   updated_at: string;
