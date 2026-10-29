@@ -87,4 +87,63 @@ describe("console catalogue tool", () => {
     assert.equal(result.response.data.count, 0);
     assert.match(result.response.data.note, /improvising/i);
   });
+
+  it("gives every dish the labels the menu screen shows", async () => {
+    const runtime = makeRuntime([
+      dish(),
+      dish({
+        menu_item_id: "dish-2",
+        name: "Tandoori Roti",
+        vegetarian: false,
+        diet_tags: ["jain"],
+        is_available: false,
+      }),
+    ]);
+
+    const result = await executeAdminTool("get_menu_catalog", {}, runtime);
+    const items = result.response.data.items;
+
+    assert.deepEqual(items[0].labels, ["veg"]);
+    assert.deepEqual(items[1].labels, ["non-veg", "jain", "86"]);
+    assert.deepEqual(result.response.data.labels_in_menu, ["86", "jain", "non-veg", "veg"]);
+  });
+
+  it("filters by a spoken diet label", async () => {
+    const runtime = makeRuntime([
+      dish(),
+      dish({ menu_item_id: "dish-2", name: "Tandoori Roti", diet_tags: ["jain"] }),
+      dish({ menu_item_id: "dish-3", name: "Chicken Curry", vegetarian: false, diet_tags: ["halal"] }),
+    ]);
+
+    const jain = await executeAdminTool("get_menu_catalog", { diet: "jain" }, runtime);
+    assert.equal(jain.response.data.count, 1);
+    assert.equal(jain.response.data.items[0].name, "Tandoori Roti");
+
+    const nonVeg = await executeAdminTool("get_menu_catalog", { diet: "non-veg" }, runtime);
+    assert.equal(nonVeg.response.data.count, 1);
+    assert.equal(nonVeg.response.data.items[0].name, "Chicken Curry");
+
+    const veg = await executeAdminTool("get_menu_catalog", { diet: "veg" }, runtime);
+    assert.equal(veg.response.data.count, 2);
+  });
+
+  it("lists only the 86'd dishes on request", async () => {
+    const runtime = makeRuntime([
+      dish(),
+      dish({ menu_item_id: "dish-2", name: "Masala Chai", is_available: false }),
+    ]);
+
+    const result = await executeAdminTool("get_menu_catalog", { only_86: true }, runtime);
+    assert.equal(result.response.data.count, 1);
+    assert.equal(result.response.data.items[0].name, "Masala Chai");
+    assert.ok(result.response.data.items[0].labels.includes("86"));
+  });
+
+  it("never claims a dish is halal when the label is not recorded", async () => {
+    const runtime = makeRuntime([dish()]);
+    const result = await executeAdminTool("get_menu_catalog", { diet: "halal" }, runtime);
+
+    assert.equal(result.response.data.count, 0);
+    assert.match(result.response.data.note, /not recorded/i);
+  });
 });

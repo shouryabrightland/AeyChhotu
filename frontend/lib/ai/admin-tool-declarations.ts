@@ -71,10 +71,16 @@ export const ADMIN_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   ),
   fn(
     "get_menu_catalog",
-    "The real dish catalogue with ingredients, allergens, spice level, diet tags, portion, description and price. Use for 'what's in the paneer butter masala', 'which dishes have peanuts', 'what can I offer a vegan', 'which dishes are 86'd'.",
+    "The real dish catalogue: every dish with its description, price, veg / non-veg label, diet labels (jain, vegan, halal, eggitarian), ingredients, allergens, spice level, portion, 86 status and stock. Each item carries a `labels` array (e.g. ['veg','jain','86']). Use for 'what's in the paneer butter masala', 'which dishes have peanuts', 'show me veg dishes', 'anything jain?', 'which dishes are 86'd', 'describe the burger'.",
     {
-      query: text("Free text matched against name, category, description, ingredients, allergens and diet tags (e.g. 'paneer', 'peanut', 'vegan')."),
+      query: text("Free text matched against name, category, description, ingredients, allergens, diet labels and 86 status (e.g. 'paneer', 'peanut', 'veg', '86')."),
       category: text("Only dishes whose category contains this text."),
+      diet: {
+        type: Type.STRING,
+        enum: ["any", "veg", "non-veg", "jain", "vegan", "halal", "eggitarian"],
+        description: "Only dishes carrying this label. 'veg'/'non-veg' come from the menu flag; jain, vegan, halal and eggitarian come from recorded diet tags. Defaults to 'any'.",
+      },
+      only_86: flag("When true, only dishes that are switched off (86'd) right now."),
       available_only: flag("When true, only dishes currently on the menu (not 86'd)."),
     },
   ),

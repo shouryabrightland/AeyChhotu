@@ -63,6 +63,44 @@ function clamped(value: number | null, fallback: number, min: number, max: numbe
   return Math.min(max, Math.max(min, value));
 }
 
+/* What a manager hears as a “label”: veg / non-veg, the diet tags the kitchen
+   recorded (jain, vegan, halal, eggitarian) and the 86 switch. Derived here so
+   every tool answer speaks the same vocabulary as the menu screen instead of
+   making the model read raw booleans out loud. */
+function labelsFor(item: AdminCatalogItem): string[] {
+  const labels = [item.vegetarian ? "veg" : "non-veg"];
+  /* "vegetarian" duplicates the flag, so it is folded into veg/non-veg
+     instead of being spoken as a second, different label. */
+  const covered = new Set(["vegetarian", "veg", "non-vegetarian", "non-veg", "nonveg"]);
+  for (const tag of item.diet_tags) {
+    const clean = tag.trim().toLowerCase();
+    if (clean && !covered.has(clean) && !labels.includes(clean)) labels.push(clean);
+  }
+  if (!item.is_available) labels.push("86");
+  return labels;
+}
+
+/** One spoken label → the dish fields that carry it. `halal`/`vegan` come only
+ *  from `diet_tags`: the kitchen either recorded them or they are unrecorded. */
+function matchesDietLabel(item: AdminCatalogItem, wanted: string): boolean {
+  switch (wanted) {
+    case "veg":
+    case "vegetarian":
+      return item.vegetarian;
+    case "non-veg":
+    case "non_veg":
+    case "nonvegetarian":
+      return !item.vegetarian;
+    case "jain":
+    case "vegan":
+    case "halal":
+    case "eggitarian":
+      return item.diet_tags.some((tag) => tag.trim().toLowerCase() === wanted);
+    default:
+      return true;
+  }
+}
+
 /** Percent change, or null when there is no baseline to compare against. */
 function delta(current: number, previous: number): number | null {
   if (previous <= 0) return null;
@@ -240,14 +278,20 @@ export async function executeAdminTool(
       const query = asString(args.query)?.toLowerCase() ?? null;
       const category = asString(args.category)?.toLowerCase() ?? null;
       const availableOnly = asBoolean(args.available_only);
+      const only86 = asBoolean(args.only_86);
+      const diet = (asString(args.diet)?.toLowerCase() ?? "any").replace(/\s+/g, "-");
 
       const filtered = items.filter((item) => {
         if (availableOnly && !item.is_available) return false;
+        if (only86 && item.is_available) return false;
+        if (diet !== "any" && !matchesDietLabel(item, diet)) return false;
         if (category && !item.category.toLowerCase().includes(category)) return false;
         if (!query) return true;
 
-        /* Structured metadata, so "which dishes have peanuts" is a real query
-           rather than a guess from a description. */
+        /* Structured metadata, so "which dishes have peanuts" and "what is
+           veg / jain / 86" are real queries rather than guesses from a
+           description. The labels are searchable too: "jain", "non-veg",
+           "86". */
         const haystack = [
           item.name,
           item.category,
@@ -256,6 +300,7 @@ export async function executeAdminTool(
           ...item.ingredients,
           ...item.allergens,
           ...item.diet_tags,
+          ...labelsFor(item),
         ]
           .join(" ")
           .toLowerCase();
@@ -263,15 +308,21 @@ export async function executeAdminTool(
         return haystack.includes(query);
       });
 
+      const withLabels = filtered.map((item) => ({ ...item, labels: labelsFor(item) }));
+      const unrecorded = diet !== "any" && filtered.length === 0 ? diet : null;
+
       return ok(
         {
           total: items.length,
           count: filtered.length,
-          items: filtered,
+          items: withLabels,
+          labels_in_menu: [...new Set(items.flatMap(labelsFor))].sort(),
           note:
             filtered.length === 0
-              ? "Nothing in the catalogue matches that. Say so instead of improvising a dish."
-              : "Ingredients, allergens, spice and diet tags are the kitchen's own records. Never add an ingredient that is not listed; if a field is empty, say it is not recorded.",
+              ? unrecorded
+                ? `No dish carries the "${unrecorded}" label. That means the kitchen has not recorded it — say it is not recorded, never that the dish is unsuitable.`
+                : "Nothing in the catalogue matches that. Say so instead of improvising a dish."
+              : "`labels` on each dish is what the menu screen shows (veg / non-veg, jain, vegan, halal, eggitarian) plus `86` when the dish is switched off. Ingredients, allergens, spice and labels are the kitchen's own records: never add one that is not listed, and say a label is not recorded when it is absent.",
         },
         [{ kind: "info", label: `${filtered.length} of ${items.length} dishes`, ok: true }],
       );
