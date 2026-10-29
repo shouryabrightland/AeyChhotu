@@ -915,6 +915,8 @@ export interface AnalyticsTrendPoint {
   hour: string;
   revenue: number;
   orders_served: number;
+  /** Average tables open during that hour; the current hour reads live. */
+  active_tables: number;
 }
 
 export interface AnalyticsSummary {
@@ -967,7 +969,12 @@ export async function topSellingAnalytics(): Promise<AnalyticsSummary> {
     /* 24 clock hours ending at the current one. generate_series supplies the
        empty buckets (a quiet hour must plot as zero, not vanish), and the
        left join reads the hourly rollup (sql/013). */
-    pool.query<{ hour: Date; orders_served: number; revenue: string }>(
+    pool.query<{
+      hour: Date;
+      orders_served: number;
+      revenue: string;
+      active_tables: string;
+    }>(
       `WITH hours AS (
          SELECT generate_series(
                   date_trunc('hour', now()) - interval '23 hours',
@@ -977,9 +984,22 @@ export async function topSellingAnalytics(): Promise<AnalyticsSummary> {
        )
        SELECT h.hour,
               COALESCE(sh.orders_served, 0)::int AS orders_served,
-              COALESCE(sh.revenue, 0)::numeric(10,2) AS revenue
+              COALESCE(sh.revenue, 0)::numeric(10,2) AS revenue,
+              CASE
+                /* "Now" must be live, not the last 5-minute sample. */
+                WHEN h.hour = date_trunc('hour', now()) THEN (
+                  SELECT count(*)::int
+                    FROM restaurant_tables
+                   WHERE deleted_at IS NULL AND status = 'active'
+                )
+                ELSE COALESCE(
+                  ROUND(ta.active_total::numeric / NULLIF(ta.samples, 0), 1),
+                  0
+                )
+              END AS active_tables
          FROM hours h
          LEFT JOIN sales_hour sh ON sh.hour = h.hour
+         LEFT JOIN table_activity_hour ta ON ta.hour = h.hour
         ORDER BY h.hour`,
     ),
   ]);
@@ -999,8 +1019,32 @@ export async function topSellingAnalytics(): Promise<AnalyticsSummary> {
       hour: iso(row.hour),
       revenue: Number(row.revenue),
       orders_served: row.orders_served,
+      active_tables: Number(row.active_tables),
     })),
   };
+}
+
+/* One reading for the 24-hour Active Tables line (sql/014). The API process
+   calls this every few minutes; each call adds to the current hour's running
+   total so the graph plots an hourly average rather than whichever instant
+   the sampler happened to land on.
+
+   Deliberately silent on failure: a metrics write must never take the server
+   down, and the caller logs the error. */
+export async function recordTableActivitySample(): Promise<void> {
+  await pool.query(
+    `INSERT INTO table_activity_hour (hour, samples, active_total)
+          VALUES (
+            date_trunc('hour', now()),
+            1,
+            (SELECT count(*)::int
+               FROM restaurant_tables
+              WHERE deleted_at IS NULL AND status = 'active')
+          )
+     ON CONFLICT (hour) DO UPDATE
+       SET samples      = table_activity_hour.samples + 1,
+           active_total = table_activity_hour.active_total + EXCLUDED.active_total`,
+  );
 }
 
 /** Exposed so a script or test can assert the shape without inventing one. */

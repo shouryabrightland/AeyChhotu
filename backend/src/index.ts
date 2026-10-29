@@ -2,6 +2,7 @@ import { createApp } from "./app.js";
 import { env } from "./config/env.js";
 import { pool } from "./db/pool.js";
 import { logEvent } from "./observability/logger.js";
+import { recordTableActivitySample } from "./services/admin.service.js";
 import { checkAndAutoReleaseTable } from "./services/sessions.service.js";
 
 /* App entry. Importing config/env.js validates required env vars and exits
@@ -52,6 +53,33 @@ async function sweepPaidTables(): Promise<void> {
 const sweepTimer = setInterval(() => void sweepPaidTables(), AUTO_RELEASE_SWEEP_MS);
 sweepTimer.unref();
 
+/* Floor-activity sampler (sql/014).
+
+   The console's Active Tables card draws a 24-hour average, and there is no
+   event that means "one more table is open" — tables drain and are cleared
+   at arbitrary moments. A cheap periodic count is the honest source. Five
+   minutes gives twelve readings an hour: enough to shape the line without
+   writing on every request. The first reading is taken at boot so a freshly
+   started server contributes immediately. */
+const TABLE_ACTIVITY_SAMPLE_MS = 5 * 60_000;
+
+async function sampleTableActivity(): Promise<void> {
+  try {
+    await recordTableActivitySample();
+  } catch (err) {
+    logEvent("error", "table_activity_sample_failed", {
+      error_message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+void sampleTableActivity();
+const activityTimer = setInterval(
+  () => void sampleTableActivity(),
+  TABLE_ACTIVITY_SAMPLE_MS,
+);
+activityTimer.unref();
+
 /* Graceful shutdown. Render/Fly/Kubernetes kill with SIGTERM and expect the
    process to finish in-flight requests before exiting; a hard kill mid-order
    is how a diner's fire turns into a 502. Sequence:
@@ -68,6 +96,7 @@ function shutdown(signal: "SIGTERM" | "SIGINT"): void {
   logEvent("info", "shutdown_begin", { signal });
 
   clearInterval(sweepTimer);
+  clearInterval(activityTimer);
 
   server.close(async () => {
     try {

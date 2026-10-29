@@ -545,6 +545,8 @@ export interface AdminAnalyticsTrendPoint {
   hour: string;
   revenue: number;
   orders_served: number;
+  /** Average tables open that hour; the current hour is the live count. */
+  active_tables: number;
 }
 
 /** GET /api/v1/admin/analytics/top-selling */

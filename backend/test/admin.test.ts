@@ -475,6 +475,7 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
       assert.match(point.hour, /Z$/, "buckets use the API's Z timestamps");
       assert.ok(point.revenue >= 0);
       assert.ok(point.orders_served >= 0);
+      assert.ok(point.active_tables >= 0, "every bucket carries a table count");
     }
     assert.ok(
       analytics.trend.reduce((sum, point) => sum + point.revenue, 0) >= quantity * unitPrice,
@@ -488,6 +489,30 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
     // Leaderboard is ordered by units sold, descending.
     const sold = analytics.items.map((item) => item.total_sold);
     assert.deepEqual(sold, [...sold].sort((a, b) => b - a));
+  });
+
+  it("samples the live table count into the current hour", async () => {
+    const read = () =>
+      pool.query<{ samples: number; active_total: number }>(
+        `SELECT samples, active_total
+           FROM table_activity_hour
+          WHERE hour = date_trunc('hour', now())`,
+      );
+
+    const before = (await read()).rows[0];
+    await admin.recordTableActivitySample();
+    const after = (await read()).rows[0];
+
+    assert.ok(after, "the sampler must create the current hour's row");
+    assert.equal(
+      after.samples,
+      (before?.samples ?? 0) + 1,
+      "one reading added to this hour's running total",
+    );
+    assert.ok(
+      after.active_total >= (before?.active_total ?? 0),
+      "the active count is a real, non-negative reading",
+    );
   });
 
   it("treats an unknown id as 404 on every mutation", async () => {

@@ -233,12 +233,6 @@ function AdminGate({ onUnlocked }: { onUnlocked: () => void }) {
 const ALL_SLICES = ["analytics", "tables", "menu"] as const;
 type ConsoleSlice = (typeof ALL_SLICES)[number];
 
-/* How often the Active Tables card records a live sample. It matches the
-   console's poll, so one point per refresh; 60 points keep the card readable
-   (15 minutes) without growing forever. */
-const ACTIVE_SAMPLE_MS = 15_000;
-const ACTIVE_SAMPLE_LIMIT = 60;
-
 function AdminConsole({ onLock }: { onLock: () => void }) {
   const { toast } = useToast();
   const [tab, setTab] = useState<AdminTab>("analytics");
@@ -254,19 +248,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const refreshDoneTimer = useRef<number | null>(null);
   const [clearingId, setClearingId] = useState<string | null>(null);
   const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
-
-  /* The Active Tables card has no stored history to read: nothing records how
-     many tables were open an hour ago. It therefore plots THIS console's own
-     polls. The buffer lives here rather than in the tab so switching tabs
-     does not restart the line. */
-  const [activeSeries, setActiveSeries] = useState<number[]>([]);
-  const tablesRef = useRef<AdminTable[]>([]);
-
-  // Mirrored in an effect (not during render) so the sampler below can read
-  // the latest grid without restarting its interval on every poll.
-  useEffect(() => {
-    tablesRef.current = tables;
-  }, [tables]);
 
   /* ---- Per-slice loading ---------------------------------------------
      The console used to reload all four datasets after every save and put
@@ -508,21 +489,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
      settle on the floor cannot re-render an open menu editor, and an 86
      cannot re-render the tables grid. The read is still soft (no skeletons)
      and still guarded by the per-slice equality check. */
-  /* One live point per poll for the Active Tables sparkline. Reads the table
-     list through a ref so the timer does not restart on every poll. */
-  useEffect(() => {
-    if (phase !== "success") return;
-
-    const sample = () => {
-      const count = tablesRef.current.filter((table) => table.status === "active").length;
-      setActiveSeries((current) => [...current, count].slice(-ACTIVE_SAMPLE_LIMIT));
-    };
-
-    sample();
-    const timer = window.setInterval(sample, ACTIVE_SAMPLE_MS);
-    return () => window.clearInterval(timer);
-  }, [phase]);
-
   useEffect(() => {
     if (phase !== "success") return;
 
@@ -746,7 +712,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
           <AnalyticsTab
             analytics={analytics}
             tables={tables}
-            activeSeries={activeSeries}
             deactivatingId={deactivatingId}
             onDeactivate={(table) => void deactivateTable(table)}
           />
@@ -778,13 +743,11 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 function AnalyticsTab({
   analytics,
   tables,
-  activeSeries,
   deactivatingId,
   onDeactivate,
 }: {
   analytics: AdminAnalytics | null;
   tables: AdminTable[];
-  activeSeries: number[];
   deactivatingId: string | null;
   onDeactivate: (table: AdminTable) => void;
 }) {
@@ -793,6 +756,12 @@ function AnalyticsTab({
   }
 
   const activeTables = tables.filter((table) => table.status === "active").length;
+
+  /* The peak gives each sparkline a y-scale: a shape alone cannot tell an
+     operator whether an hour of ₹0 is "quiet" or "closed". */
+  const revenuePeak = Math.max(0, ...analytics.trend.map((point) => point.revenue));
+  const ordersPeak = Math.max(0, ...analytics.trend.map((point) => point.orders_served));
+  const tablesPeak = Math.max(0, ...analytics.trend.map((point) => point.active_tables));
 
   /* The same signal the floor uses, expressed from the console's row: a live
      session with no phone heartbeating and no open ticket is a table nobody
@@ -812,21 +781,21 @@ function AnalyticsTab({
           value={money(analytics.total_revenue)}
           hint="Served tickets only"
           values={analytics.trend.map((point) => point.revenue)}
-          windowLabel="Last 24h"
+          peakLabel={`peak ${money(revenuePeak)}/hr`}
         />
         <Stat
           label="Orders completed"
           value={String(analytics.total_orders_served)}
           hint="Tickets marked served"
           values={analytics.trend.map((point) => point.orders_served)}
-          windowLabel="Last 24h"
+          peakLabel={`peak ${ordersPeak}/hr`}
         />
         <Stat
           label="Active tables"
           value={String(activeTables)}
           hint="Sessions open right now"
-          values={activeSeries.length > 0 ? activeSeries : [activeTables]}
-          windowLabel="Live"
+          values={analytics.trend.map((point) => point.active_tables)}
+          peakLabel={`peak ${tablesPeak}`}
         />
       </div>
 
@@ -963,32 +932,38 @@ function Stat({
   value,
   hint,
   values,
-  windowLabel,
+  peakLabel,
 }: {
   label: string;
   value: string;
   hint: string;
   /** The series drawn where the old icon tile sat. */
   values: number[];
-  /** "Last 24h" (server history) or "Live" (sampled by this console). */
-  windowLabel: string;
+  /** y-scale reference: the busiest hour in the window. */
+  peakLabel: string;
 }) {
   return (
     <div className="rounded-xl border border-line bg-surface p-5">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-baseline justify-between gap-3">
         <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.14em] text-ink-subtle uppercase">
           <span
             aria-hidden
             className="size-1.5 rounded-pill bg-ember motion-safe:animate-pulse"
           />
-          {windowLabel}
+          Last 24h
         </span>
+        <span className="text-[10px] font-medium text-ink-subtle tabular-nums">{peakLabel}</span>
       </div>
       <Sparkline
         values={values}
-        label={`${label} trend, ${windowLabel}`}
+        label={`${label} trend, last 24 hours`}
         className="mt-2 h-10 w-full"
       />
+      {/* The time scale, written out: without it a sparkline is just a shape. */}
+      <div className="mt-1 flex items-center justify-between text-[10px] text-ink-subtle">
+        <span>24h ago</span>
+        <span>now</span>
+      </div>
       <p className="mt-3 text-label text-ink-subtle uppercase">{label}</p>
       <p className="mt-1 font-display text-3xl font-semibold text-ink tabular-nums">{value}</p>
       <p className="mt-1 text-xs text-ink-subtle">{hint}</p>
@@ -1021,11 +996,28 @@ function Sparkline({
   const yOf = (value: number) =>
     max > 0 ? HEIGHT - PAD - (value / max) * (HEIGHT - PAD * 2) : HEIGHT - PAD;
 
-  const line = series
-    .map(
-      (value, index) =>
-        `${index === 0 ? "M" : "L"} ${(index * step).toFixed(2)} ${yOf(value).toFixed(2)}`,
-    )
+  /* Catmull-Rom → cubic Bézier. The old straight segments gave a 24-point
+     series a saw-tooth edge; this rounds every joint while still passing
+     through each real reading. Tangents are clamped to the box so the curve
+     cannot bulge outside the card. */
+  const points = series.map((value, index) => ({ x: index * step, y: yOf(value) }));
+  const clampY = (value: number) => Math.min(HEIGHT, Math.max(0, value));
+  const line = points
+    .map((point, index) => {
+      if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+
+      const p1 = points[index - 1];
+      if (!p1) return "";
+      const p0 = points[index - 2] ?? p1;
+      const p3 = points[index + 1] ?? point;
+
+      const cp1x = p1.x + (point.x - p0.x) / 6;
+      const cp1y = clampY(p1.y + (point.y - p0.y) / 6);
+      const cp2x = point.x - (p3.x - p1.x) / 6;
+      const cp2y = clampY(point.y - (p3.y - p1.y) / 6);
+
+      return `C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+    })
     .join(" ");
   const area = `${line} L ${WIDTH} ${HEIGHT} L 0 ${HEIGHT} Z`;
 
@@ -1044,11 +1036,24 @@ function Sparkline({
         </linearGradient>
       </defs>
       <path d={area} fill={`url(#${gradientId})`} />
+      {/* A wide, faint copy under the line is the soft halo — cheaper than an
+          SVG blur filter and it never clips against the card edge. */}
       <path
         d={line}
         fill="none"
         stroke="currentColor"
-        strokeWidth="1.6"
+        strokeWidth="3.5"
+        strokeOpacity="0.12"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        vectorEffect="non-scaling-stroke"
+      />
+      <path
+        d={line}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeOpacity="0.95"
         strokeLinecap="round"
         strokeLinejoin="round"
         vectorEffect="non-scaling-stroke"
@@ -1222,21 +1227,13 @@ function TablesTab({
                   )}
                 </div>
 
-                <p className="text-xs text-ink-subtle">
-                  {table.has_session && table.session_started_at
-                    ? `Session since ${formatIstDateTime(table.session_started_at)}`
-                    : "No session — the next scan claims it."}
-                </p>
+                {table.has_session && table.session_started_at ? (
+                  <p className="text-xs text-ink-subtle">
+                    Session since {formatIstDateTime(table.session_started_at)}
+                  </p>
+                ) : null}
 
                 <div className="mt-auto flex flex-wrap gap-2">
-                  <Button
-                    variant="soft"
-                    size="sm"
-                    onClick={() => setQrTarget({ code: table.code, name: table.name })}
-                    leftIcon={<QrCode className="size-3.5" aria-hidden />}
-                  >
-                    Show QR
-                  </Button>
                   <Button
                     variant="soft"
                     size="sm"
