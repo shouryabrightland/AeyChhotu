@@ -1,6 +1,6 @@
 "use client";
 
-import { Flame, Pencil, Receipt } from "lucide-react";
+import { Flame, Loader2, Pencil, Receipt } from "lucide-react";
 import { useState } from "react";
 import { QuantityStepper } from "@/components/diner/quantity-stepper";
 import { Button } from "@/components/ui/button";
@@ -35,7 +35,7 @@ export function TableCart({
   billRequested = false,
   className,
 }: TableCartProps) {
-  const { cart, menuIndex, totals, soldOutInCart, updateLine, removeLine } = live;
+  const { cart, menuIndex, totals, soldOutInCart, syncing, updateLine, removeLine } = live;
   const [busyLineId, setBusyLineId] = useState<string | null>(null);
 
   async function changeQuantity(cartItemId: string, nextQuantity: number, delta: number) {
@@ -59,8 +59,20 @@ export function TableCart({
             {formatPrice(totals.total)}
           </p>
         </div>
-        <span className="shrink-0 rounded-pill bg-sand px-3 py-1.5 text-xs font-semibold text-ink-muted tabular-nums">
-          {totals.itemCount} {totals.itemCount === 1 ? "item" : "items"}
+        {/* The count is the one place the cart admits to a write still in
+            flight: an add paints instantly, and until the server has been read
+            back this pill says "Syncing" instead of a number that may change. */}
+        <span
+          aria-live="polite"
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1.5 rounded-pill px-3 py-1.5 text-xs font-semibold tabular-nums transition-colors duration-[var(--duration-fast)]",
+            syncing ? "bg-ember-soft text-ember" : "bg-sand text-ink-muted",
+          )}
+        >
+          {syncing ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
+          {syncing
+            ? "Syncing"
+            : `${totals.itemCount} ${totals.itemCount === 1 ? "item" : "items"}`}
         </span>
       </div>
 

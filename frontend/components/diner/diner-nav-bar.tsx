@@ -1,9 +1,8 @@
 "use client";
 
-import { Activity, Pencil, QrCode, Receipt, UserRound, Wallet } from "lucide-react";
+import { Activity, Pencil, QrCode, Receipt, RefreshCw, UserRound } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import type { BillScope } from "@/components/diner/bill-drawer";
 import { Container } from "@/components/ui/container";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { LiveTableValue } from "@/hooks/use-live-table";
@@ -16,19 +15,23 @@ export interface DinerNavBarProps {
   live: LiveTableValue;
   displayName: string;
   onDisplayNameChange: (name: string) => void;
-  /** Opens the bill breakdown panel on the requested slice. */
-  onOpenBill: (scope: BillScope) => void;
+  /** Opens the bill panel: the table's total and each guest's share, in one. */
+  onOpenBill: () => void;
   /** Opens this table's PIN + QR pass. Absent in the offline demo, where
       there is no real session to hand out. */
   onOpenPass?: () => void;
+  /** Re-reads menu, cart and orders on demand — the manual backup for when a
+      realtime socket goes quiet. */
+  onRefresh: () => void;
 }
 
 /* The charcoal band is this surface's whole navigation. Who you are sits on
    the left — editable, because the table reads that name beside every line
-   you add — and the three things a guest reaches for sit on the right: the
-   live tracker and the two running bills. Amounts stay in tooltips so the
-   band reads as three quiet icons rather than a dashboard. Its colours are
-   the marketing header's own, so the two navbars read as one product. */
+   you add — and what a guest reaches for sits on the right: the live tracker
+   and the one bill (its total and this guest's share are the same panel, so
+   there is one icon, not two). Amounts stay in the tooltip so the band reads
+   as quiet icons rather than a dashboard. Its colours are the marketing
+   header's own, so the two navbars read as one product. */
 export function DinerNavBar({
   tableToken,
   live,
@@ -36,6 +39,7 @@ export function DinerNavBar({
   onDisplayNameChange,
   onOpenBill,
   onOpenPass,
+  onRefresh,
 }: DinerNavBarProps) {
   const { menuIndex, orders, cart, activeOrder } = live;
   const headerRef = useRef<HTMLElement>(null);
@@ -57,15 +61,27 @@ export function DinerNavBar({
 
   /* Matches the landing page's navbar exactly: transparent and lineless at
      the top of the scroll, then a blurred canvas wash once content passes
-     underneath it. */
+     underneath it.
+
+     Read from BOTH scrollers: globals.css locks html/body to 100dvh with
+     `overflow-x: hidden`, which makes <body> the element that actually
+     scrolls. `window.scrollY` therefore stays 0 for the whole page, a
+     window-only listener never fires, and the band keeps NO background while
+     the menu scrolls visibly behind "Ordering as". Scroll events do not
+     bubble, so document needs the capture flag. */
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 16);
-    onScroll();
+    const read = () => setScrolled((window.scrollY || document.body.scrollTop || 0) > 16);
 
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+    read();
+    document.addEventListener("scroll", read, { capture: true, passive: true });
+    window.addEventListener("scroll", read, { passive: true });
+
+    return () => {
+      document.removeEventListener("scroll", read, true);
+      window.removeEventListener("scroll", read);
+    };
   }, []);
 
   /* Publish the band's height so the sticky menu search can dock beneath it
@@ -143,25 +159,26 @@ export function DinerNavBar({
             </Link>
           </Tooltip>
 
-          <Tooltip label="Total bill" side="bottom">
+          {/* The bill is the one action with a number on it, so it is a pill
+              rather than a bare glyph. The amount is the table's total; a
+              phone's band has no room for it next to the identity, so below
+              `sm` the pill collapses back to its icon (the tooltip and the
+              panel still carry both numbers). */}
+          <Tooltip
+            label={`Bill · ${formatPrice(totalBill)} table · your part ${formatPrice(myBill)}`}
+            side="bottom"
+            className="max-w-56"
+          >
             <button
               type="button"
-              onClick={() => onOpenBill("total")}
-              aria-label="Total bill"
-              className={actionClass}
+              onClick={onOpenBill}
+              aria-label={`Open the bill: ${formatPrice(totalBill)} for the table, your part ${formatPrice(myBill)}`}
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center gap-2 rounded-pill border border-ink/12 bg-sand/70 text-ink transition-colors duration-[var(--duration-fast)] ease-gentle hover:border-ink/20 hover:bg-sand focus-visible:border-ink/25 focus-visible:bg-sand focus-visible:outline-none sm:h-10 sm:w-auto sm:px-3.5"
             >
-              <Receipt className="size-5" aria-hidden />
-            </button>
-          </Tooltip>
-
-          <Tooltip label={`Your part · ${formatPrice(myBill)}`} side="bottom">
-            <button
-              type="button"
-              onClick={() => onOpenBill("mine")}
-              aria-label={`Open your part of the bill: ${formatPrice(myBill)}`}
-              className={actionClass}
-            >
-              <Wallet className="size-5" aria-hidden />
+              <Receipt className="size-5 shrink-0" aria-hidden />
+              <span className="hidden text-sm font-semibold tabular-nums sm:inline">
+                {formatPrice(totalBill)}
+              </span>
             </button>
           </Tooltip>
 
@@ -177,6 +194,20 @@ export function DinerNavBar({
               </button>
             </Tooltip>
           ) : null}
+
+          {/* Deliberately last of the five: it is the utility, not the job.
+              Realtime normally keeps this table current on its own; this is
+              the tap that proves the app right when it does not. */}
+          <Tooltip label="Refresh menu and cart" side="bottom">
+            <button
+              type="button"
+              onClick={onRefresh}
+              aria-label="Refresh menu and cart"
+              className={actionClass}
+            >
+              <RefreshCw className="size-5" aria-hidden />
+            </button>
+          </Tooltip>
         </div>
       </Container>
     </header>

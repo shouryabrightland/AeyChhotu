@@ -2,7 +2,7 @@
 
 import { CircleCheckBig } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { acknowledgeSettlement, requestBill } from "@/lib/api/bill";
 import { BillDrawer, type BillScope } from "@/components/diner/bill-drawer";
 import { CartModal } from "@/components/diner/cart-modal";
@@ -41,8 +41,8 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
   const { table, menu, quantities, totals, itemErrors } = live;
 
   const [cartOpen, setCartOpen] = useState(false);
-  // The bill drawer is open whenever a scope is set, so the icon that opened
-  // it also decides which slice shows first.
+  // One bill entry point, two tabs inside: the whole table, or just this guest.
+  // The nav icon opens the table's tab; the switch narrows it from there.
   const [billScope, setBillScope] = useState<BillScope | null>(null);
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
   // The Table Pass sheet: this device's PIN plus the QR that carries the
@@ -65,6 +65,52 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
   const settledAt = bills[tableToken]?.settled_at ?? null;
 
   usePresence(tableToken);
+
+  /* In-app notice for a cart change that came from ANOTHER device.
+
+     useLiveTable raises `cartNotice` only for reloads this device did not ask
+     for, so a guest is never told about their own tap — this effect just turns
+     the first sighting of each id into one toast. The ref guard matters because
+     `menuIndex` changes whenever the menu reloads, and a re-run must not
+     announce the same change twice. */
+  const cartNotice = live.cartNotice;
+  const menuIndex = live.menuIndex;
+  const handledNoticeRef = useRef(0);
+
+  useEffect(() => {
+    if (!cartNotice || cartNotice.id === handledNoticeRef.current) return;
+    handledNoticeRef.current = cartNotice.id;
+
+    const dishName = (menuItemId: string) => menuIndex.get(menuItemId)?.name ?? "a dish";
+    const [firstAdded, ...moreAdded] = cartNotice.added;
+
+    if (firstAdded) {
+      toast({
+        title: `${firstAdded.added_by} added ${dishName(firstAdded.menu_item_id)}`,
+        description: moreAdded.length
+          ? `${moreAdded.length + 1} dishes are now in the table's cart.`
+          : "It's in the table's shared cart for everyone.",
+      });
+      return;
+    }
+
+    const bumped = cartNotice.increased[0];
+    if (bumped) {
+      toast({
+        title: `${dishName(bumped.line.menu_item_id)} × ${bumped.line.quantity}`,
+        description: `Someone at the table added ${bumped.delta} more.`,
+      });
+      return;
+    }
+
+    const takenOff = cartNotice.removed[0];
+    if (takenOff) {
+      toast({
+        title: "The table's cart changed",
+        description: `${dishName(takenOff.menu_item_id)} was taken off by someone at the table.`,
+      });
+    }
+  }, [cartNotice, menuIndex, toast]);
 
   useEffect(() => {
     storeTableToken(tableToken);
@@ -174,8 +220,9 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
         live={live}
         displayName={displayName}
         onDisplayNameChange={handleDisplayNameChange}
-        onOpenBill={(scope) => setBillScope(scope)}
+        onOpenBill={() => setBillScope("total")}
         onOpenPass={session ? () => setPassOpen(true) : undefined}
+        onRefresh={() => void live.refresh()}
       />
 
       {/* The heading block is gone on purpose: "Ready to order?" now lives on
@@ -200,8 +247,6 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
             pendingItemId={pendingItemId}
             itemErrors={itemErrors}
             onAdd={(item) => void handleAdd(item)}
-            onReview={() => setCartOpen(true)}
-            cartItemCount={totals.itemCount}
             stickyTopClass="top-[var(--diner-nav-h,3.75rem)]"
           />
         )}
@@ -222,13 +267,16 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
         itemCount={totals.itemCount}
         total={totals.total}
         onView={() => setCartOpen(true)}
+        billRequested={Boolean(bills[tableToken])}
+        onRequestBill={() => void handleRequestBill()}
+        syncing={live.syncing}
       />
 
       <BillDrawer
         open={billScope !== null}
         onClose={() => setBillScope(null)}
         scope={billScope ?? "total"}
-        onScopeChange={(scope) => setBillScope(scope)}
+        onScopeChange={setBillScope}
         live={live}
         displayName={displayName}
       />
@@ -259,6 +307,8 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
           tableName={session.name || session.code}
           pin={session.session_pin}
           secret={session.session_secret}
+          live={live}
+          displayName={displayName}
         />
       ) : null}
 

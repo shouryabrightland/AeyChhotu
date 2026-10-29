@@ -8,6 +8,7 @@ import {
   EyeOff,
   HandCoins,
   Lock,
+  RefreshCw,
   ShieldAlert,
   WifiOff,
 } from "lucide-react";
@@ -286,6 +287,18 @@ export function FloorView({ onLock }: FloorViewProps) {
         }
         actions={
           <>
+            {/* Backup refresh: realtime keeps the board current, but a wall
+                tablet whose socket died would otherwise sit on stale tables
+                all night. */}
+            <IconButton
+              label="Refresh floor"
+              tone="ghost"
+              size="md"
+              onClick={() => void refresh()}
+            >
+              <RefreshCw className="size-4" aria-hidden />
+            </IconButton>
+
             <IconButton
               label="Quick 86"
               tone="soft"

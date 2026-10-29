@@ -39,10 +39,11 @@ function initial(name: string): string {
   return (name.trim().slice(0, 1) || "G").toUpperCase();
 }
 
-/* The running bill, opened from the two icons in the nav band. It is one
-   drawer with a scope switch: the whole table's tab, or just this guest's.
-   Fired rounds are grouped by ticket (so the guest sees which round a dish
-   came from), and whatever is still staged sits under its own heading. */
+/* The running bill, opened from the one bill icon in the nav band. It is one
+   drawer with a scope switch: the whole table's tab, or just this guest's —
+   the icon no longer picks a slice, the tab inside does. Fired rounds are
+   grouped by ticket (so the guest sees which round a dish came from), and
+   whatever is still staged sits under its own heading. */
 export function BillDrawer({
   open,
   onClose,
@@ -214,7 +215,7 @@ export function BillDrawer({
                 is already the guest's own. */}
             {!mineOnly && split.length > 0 ? (
               <section className="flex flex-col border-t border-line pt-5">
-                <header className="flex items-baseline justify-between gap-3 border-b border-dashed border-line-strong pb-2">
+                <header className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-dashed border-line-strong pb-2">
                   <span className="text-label text-ink-subtle uppercase">Split by person</span>
                   <span className="text-xs text-ink-subtle">
                     {split.length} {split.length === 1 ? "guest" : "guests"}

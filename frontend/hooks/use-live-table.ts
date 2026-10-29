@@ -51,6 +51,49 @@ import type { CartLine, MenuItem, Order, RestaurantTable } from "@/lib/api/types
 
 export type LivePhase = "loading" | "error" | "success";
 
+/** Which device caused a cart reload — it decides whether the result is news. */
+type CartSyncSource = "local" | "external";
+
+/**
+ * A change to the shared cart that this device did NOT make itself.
+ *
+ * Raised by an incoming realtime event or by the REST safety net below, and
+ * only when the reloaded cart actually differs from what is on screen — a
+ * poll that finds nothing new stays silent.
+ */
+export interface CartChangeNotice {
+  /** Monotonic id: consumers raise one toast per id, never per payload. */
+  id: number;
+  /** Lines another device put on the table. */
+  added: CartLine[];
+  /** Lines another device took off. */
+  removed: CartLine[];
+  /** Lines another device bumped, with how many they added. */
+  increased: { line: CartLine; delta: number }[];
+}
+
+/** Empty ⇒ nothing happened, so no notice is raised. */
+function diffCart(
+  previous: CartLine[],
+  next: CartLine[],
+): Omit<CartChangeNotice, "id"> | null {
+  const before = new Map(previous.map((line) => [line.id, line]));
+  const after = new Set(next.map((line) => line.id));
+
+  const added = next.filter((line) => !before.has(line.id));
+  const removed = previous.filter((line) => !after.has(line.id));
+  const increased: { line: CartLine; delta: number }[] = [];
+  for (const line of next) {
+    const prior = before.get(line.id);
+    if (prior && line.quantity > prior.quantity) {
+      increased.push({ line, delta: line.quantity - prior.quantity });
+    }
+  }
+
+  if (added.length === 0 && removed.length === 0 && increased.length === 0) return null;
+  return { added, removed, increased };
+}
+
 /** Normalized failure the cart modal renders (contract envelope aware). */
 export interface FireFailure {
   code: string;
@@ -91,6 +134,9 @@ interface Snapshot {
 
 const LIST_LIMIT = 100;
 
+/** Safety-net cadence for the cart while realtime is unavailable. */
+const CART_POLL_MS = 5_000;
+
 export interface LiveTableValue {
   phase: LivePhase;
   /** Non-null only in the error phase (real backend/contract failure). */
@@ -115,6 +161,14 @@ export interface LiveTableValue {
 
   /** Per-item add failures keyed by menu item id → inline row messages. */
   itemErrors: Record<string, string>;
+
+  /** A cart change that arrived from ANOTHER device (realtime event or the
+      REST safety net). Null until the first one lands. */
+  cartNotice: CartChangeNotice | null;
+
+  /** True while this device has a cart write in flight. The cart badge shows
+      "Syncing" from it, so a tap reads as instant instead of unanswered. */
+  syncing: boolean;
 
   addToCart: (item: MenuItem, addedBy: string) => Promise<{ ok: boolean; message?: string }>;
   updateLine: (
@@ -146,7 +200,28 @@ export function useLiveTable(tableToken: string): LiveTableValue {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [itemErrors, setItemErrors] = useState<Record<string, string>>({});
+  const [cartNotice, setCartNotice] = useState<CartChangeNotice | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+
+  /* Adds this device has sent but not been answered for yet, keyed by dish.
+     They are painted on top of the server cart, so a tap lands in the cart
+     panel in the same frame — the round trip happens behind it. Each entry is
+     dropped the moment the server's own cart (reconciled right after the
+     write) contains the dish, so nothing is ever counted twice. */
+  const [pendingAdds, setPendingAdds] = useState<
+    Record<string, { quantity: number; added_by: string }>
+  >({});
+  /** A write is in flight: the cart badge says "Syncing" instead of lying
+      about being finished. A counter, because taps can overlap. */
+  const [syncing, setSyncing] = useState(false);
+  const syncsInFlightRef = useRef(0);
+
+  /** Mirror of `cart`, so an async reload diffs against what is ON SCREEN
+      rather than a stale closure. Server truth only, never the optimistic
+      overlay — a notice about "someone else's change" must not be raised by
+      this device's own tap. */
+  const cartRef = useRef<CartLine[]>([]);
+  const noticeSeqRef = useRef(0);
 
   const tableCodeRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
@@ -163,7 +238,9 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     // Deferred so the effect body itself never writes state synchronously.
     const timer = window.setTimeout(() => {
       if (!mountedRef.current) return;
+      cartRef.current = [];
       setCart([]);
+      setPendingAdds({});
       setOrders([]);
       setItemErrors({});
     }, 0);
@@ -181,8 +258,46 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     if (!mountedRef.current) return;
     setTable(snapshot.table);
     setMenu(snapshot.menu);
+    cartRef.current = snapshot.cart;
     setCart(snapshot.cart);
     setOrders(snapshot.orders);
+  }, []);
+
+  /* ---- Optimistic cart writes ----------------------------------------
+     The cart panel must answer a tap, not a round trip: an add is painted
+     immediately (`pendingAdds`) while its write is still in flight, and the
+     badge reads "Syncing" from `syncing` until the server's own cart has been
+     read back into `cart`. */
+  const beginSync = useCallback(() => {
+    syncsInFlightRef.current += 1;
+    if (mountedRef.current) setSyncing(true);
+  }, []);
+
+  const endSync = useCallback(() => {
+    syncsInFlightRef.current = Math.max(0, syncsInFlightRef.current - 1);
+    if (syncsInFlightRef.current === 0 && mountedRef.current) setSyncing(false);
+  }, []);
+
+  const pushPendingAdd = useCallback((menuItemId: string, addedBy: string) => {
+    setPendingAdds((current) => ({
+      ...current,
+      [menuItemId]: {
+        quantity: (current[menuItemId]?.quantity ?? 0) + 1,
+        added_by: addedBy,
+      },
+    }));
+  }, []);
+
+  const popPendingAdd = useCallback((menuItemId: string) => {
+    setPendingAdds((current) => {
+      const existing = current[menuItemId];
+      if (!existing) return current;
+
+      const next = { ...current };
+      if (existing.quantity <= 1) delete next[menuItemId];
+      else next[menuItemId] = { ...existing, quantity: existing.quantity - 1 };
+      return next;
+    });
   }, []);
 
   /* This hook does NOT authenticate. The session gate has already claimed or
@@ -228,16 +343,38 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     setPhase("error");
   }, []);
 
-  const reloadCart = useCallback(async () => {
-    try {
-      const rows = await fetchAllPages((page) =>
-        apiGetCartItems(tableToken, { page, limit: LIST_LIMIT }),
-      );
-      if (mountedRef.current) setCart(rows.map(toCartLine));
-    } catch (err) {
-      fail(err);
-    }
-  }, [tableToken, fail]);
+  /* `external` marks a reload this device did NOT ask for — an incoming
+     realtime event or the REST safety net. Only those can be news: the
+     mutations below refresh on purpose, and telling a guest about their own
+     tap is noise. `silent` keeps the safety net from throwing the screen into
+     its error phase over one dropped read. */
+  const reloadCart = useCallback(
+    async (source: CartSyncSource = "local", silent = false) => {
+      try {
+        const rows = await fetchAllPages((page) =>
+          apiGetCartItems(tableToken, { page, limit: LIST_LIMIT }),
+        );
+        if (!mountedRef.current) return;
+
+        const next = rows.map(toCartLine);
+
+        if (source === "external") {
+          const change = diffCart(cartRef.current, next);
+          if (change) {
+            noticeSeqRef.current += 1;
+            setCartNotice({ id: noticeSeqRef.current, ...change });
+          }
+        }
+
+        cartRef.current = next;
+        setCart(next);
+      } catch (err) {
+        if (silent) return;
+        fail(err);
+      }
+    },
+    [tableToken, fail],
+  );
 
   const reloadOrders = useCallback(async () => {
     try {
@@ -305,9 +442,27 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     if (phase !== "success" || !table) return;
 
     return subscribeTableCart(table.id, tableToken, () => {
-      void reloadCart();
+      void reloadCart("external");
     });
   }, [phase, table, tableToken, reloadCart]);
+
+  /* REST safety net for the cart — the fallback this file's header promises.
+
+     With Supabase unconfigured every subscription above is a NO-OP
+     (getSupabase() → null), and unlike useLiveFloor there was no poll behind
+     them, so a guest who never touched their own screen watched a frozen cart
+     forever. 5 s is the cadence the floor board already uses; a failed read is
+     swallowed because one dropped safety-net request must not flip the whole
+     screen into its error phase. */
+  useEffect(() => {
+    if (phase !== "success") return;
+
+    const timer = window.setInterval(() => {
+      void reloadCart("external", true);
+    }, CART_POLL_MS);
+
+    return () => window.clearInterval(timer);
+  }, [phase, reloadCart]);
 
   // ---- Realtime D2: restaurant_tables (bill requests, settles, release) --
   /* Three different things arrive on this one channel, and each has its own
@@ -337,7 +492,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         settleBill(table.code);
       }
 
-      void reloadCart();
+      void reloadCart("external");
       void reloadOrders();
     });
   }, [phase, table, tableToken, reloadCart, reloadOrders, router]);
@@ -377,19 +532,53 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     });
   }, [phase, activeOrderId, activeOrderStatus, tableToken]);
 
+  /* What the cart surfaces render: the server's cart plus this device's
+     unconfirmed adds, merged onto the line each dish already has. */
+  const visibleCart = useMemo<CartLine[]>(() => {
+    const pendingIds = Object.keys(pendingAdds);
+    if (pendingIds.length === 0) return cart;
+
+    const lines = cart.map((line) => ({ ...line }));
+    for (const menuItemId of pendingIds) {
+      const pending = pendingAdds[menuItemId];
+      if (!pending) continue;
+
+      const existing = lines.find((line) => line.menu_item_id === menuItemId);
+
+      if (existing) {
+        existing.quantity += pending.quantity;
+        continue;
+      }
+
+      lines.push({
+        // Not a server id: this tail is replaced by the real row as soon as
+        // the write is reconciled. Nothing keyed off it is sent back upstream.
+        id: `pending:${menuItemId}`,
+        table_id: table?.id ?? "",
+        menu_item_id: menuItemId,
+        quantity: pending.quantity,
+        request_note: "",
+        allergy_note: "",
+        added_by: pending.added_by,
+      });
+    }
+
+    return lines;
+  }, [cart, pendingAdds, table]);
+
   // ---- Derived matrix (identical math to the old useTableData) ----------
   const menuIndex = useMemo(() => new Map(menu.map((item) => [item.id, item])), [menu]);
 
   const quantities = useMemo(() => {
     const map: Record<string, number> = {};
-    for (const line of cart) {
+    for (const line of visibleCart) {
       map[line.menu_item_id] = (map[line.menu_item_id] ?? 0) + line.quantity;
     }
     return map;
-  }, [cart]);
+  }, [visibleCart]);
 
   const totals = useMemo(() => {
-    return cart.reduce(
+    return visibleCart.reduce(
       (accumulator, line) => ({
         lineCount: accumulator.lineCount + 1,
         itemCount: accumulator.itemCount + line.quantity,
@@ -397,14 +586,14 @@ export function useLiveTable(tableToken: string): LiveTableValue {
       }),
       { lineCount: 0, itemCount: 0, total: 0 },
     );
-  }, [cart, menuIndex]);
+  }, [visibleCart, menuIndex]);
 
   const soldOutInCart = useMemo(
     () =>
-      cart
+      visibleCart
         .map((line) => menuIndex.get(line.menu_item_id))
         .filter((item): item is MenuItem => item !== undefined && !item.is_available),
-    [cart, menuIndex],
+    [visibleCart, menuIndex],
   );
 
   const retry = useCallback(() => {
@@ -427,6 +616,13 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         return next;
       });
 
+      /* Optimistic first, then the write: the add shows up in every cart
+         surface in this frame, the badge says "Syncing", and the overlay is
+         dropped once the server's cart contains the dish. A failure rolls the
+         overlay back, so a refused add never looks like it landed. */
+      pushPendingAdd(item.id, addedBy);
+      beginSync();
+
       try {
         await apiUpsertCartItem({
           table_token: tableToken,
@@ -435,8 +631,10 @@ export function useLiveTable(tableToken: string): LiveTableValue {
           added_by: addedBy,
         });
         await reloadCart();
+        popPendingAdd(item.id);
         return { ok: true };
       } catch (err) {
+        popPendingAdd(item.id);
         if (err instanceof ApiError) {
           setItemErrors((current) => ({ ...current, [item.id]: err.message }));
           if (err.error === "ITEM_UNAVAILABLE" || err.error === "MENU_ITEM_NOT_FOUND") {
@@ -454,9 +652,11 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         }
         fail(err);
         return { ok: false, message: "The dish could not be added." };
+      } finally {
+        endSync();
       }
     },
-    [tableToken, reloadCart, fail],
+    [tableToken, reloadCart, fail, pushPendingAdd, popPendingAdd, beginSync, endSync],
   );
 
   const updateLine = useCallback(
@@ -469,6 +669,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         allergy_note?: string;
       },
     ) => {
+      beginSync();
       try {
         await apiUpdateCartItem(cartItemId, { table_token: tableToken, ...patch });
         await reloadCart();
@@ -480,22 +681,27 @@ export function useLiveTable(tableToken: string): LiveTableValue {
           return;
         }
         fail(err);
+      } finally {
+        endSync();
       }
     },
-    [tableToken, reloadCart, fail],
+    [tableToken, reloadCart, fail, beginSync, endSync],
   );
 
   const removeLine = useCallback(
     async (cartItemId: string) => {
+      beginSync();
       try {
         await apiRemoveCartItem({ table_token: tableToken, cart_item_id: cartItemId });
         await reloadCart();
       } catch (err) {
         if (err instanceof ApiError && err.status !== 0) return;
         fail(err);
+      } finally {
+        endSync();
       }
     },
-    [tableToken, reloadCart, fail],
+    [tableToken, reloadCart, fail, beginSync, endSync],
   );
 
   const fire = useCallback(async (): Promise<{ ok: true } | { ok: false; failure: FireFailure }> => {
@@ -661,7 +867,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     refresh,
     table,
     menu,
-    cart,
+    cart: visibleCart,
     orders,
     menuIndex,
     quantities,
@@ -671,6 +877,8 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     deniedOrder,
     deniedRetryPlan,
     itemErrors,
+    cartNotice,
+    syncing,
     addToCart,
     updateLine,
     removeLine,

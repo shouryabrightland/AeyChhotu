@@ -25,10 +25,16 @@ export interface DishCardProps {
   /** API validation / inventory message rendered under the description. */
   error?: string;
   onAdd: (item: MenuItem) => void;
-  /** Only the deck has a queue to skip through. */
+  /** Only a swipe surface has a queue to skip through. */
   onSkip?: (item: MenuItem) => void;
-  /** Fired once the card has finished leaving, so the deck can advance. */
-  onExited?: () => void;
+  /** Fired once the card has finished leaving, with the direction it went
+      (+1 added, -1 skipped) so the caller can advance the queue — or, in a
+      grid, drop a skipped card out of the row. */
+  onExited?: (direction: SwipeDirection) => void;
+  /** Grid mode: an ADD flicks the card out and then brings it back to its own
+      cell (with the "in cart" badge), because a grid has no next card to
+      advance to. Skips still leave for good. */
+  returnAfterAdd?: boolean;
   /** "deck" is the swipe surface; "grid" is the plain browse card. */
   variant?: "deck" | "grid";
   sizes?: string;
@@ -50,6 +56,7 @@ export function DishCard({
   onAdd,
   onSkip,
   onExited,
+  returnAfterAdd = false,
   variant = "deck",
   sizes = "(min-width: 1024px) 28rem, 100vw",
   className,
@@ -64,20 +71,38 @@ export function DishCard({
   const [leaving, setLeaving] = useState<SwipeDirection | null>(null);
   const unavailable = !item.is_available;
   const isDeck = variant === "deck";
-  const interactive = isDeck && !unavailable && leaving === null;
+  /* Draggability no longer depends on availability: a sold-out dish has no
+     Add button, so WITHOUT the swipe (and the Skip button below) a guest
+     would be stranded on a card they cannot order. */
+  const interactive = isDeck && leaving === null;
+  const canAdd = interactive && !unavailable;
 
   function decide(direction: SwipeDirection) {
-    if (!isDeck || leaving !== null || unavailable) return;
+    if (!isDeck || leaving !== null) return;
+
+    /* A sold-out dish cannot be added, so BOTH directions skip it: swiping
+       right on it still moves the deck on rather than dead-ending. */
+    const commit: SwipeDirection = unavailable ? -1 : direction;
 
     // The existing handler runs first: the cart is already updated while the
     // card is still on its way out.
-    if (direction === 1) onAdd(item);
+    if (commit === 1) onAdd(item);
     else onSkip?.(item);
 
     setLeaving(direction);
 
+    /* The card comes back to its cell only after an ADD: it has to be home
+       before the guest can add a second portion, and the badge that fades in
+       behind it is what tells them the tap landed. */
+    const restore = () => {
+      setLeaving(null);
+      dragX.set(0);
+      void animate(opacity, 1, { duration: 0.18, ease: easeGentle });
+    };
+
     if (reduceMotion) {
-      onExited?.();
+      onExited?.(commit);
+      if (commit === 1 && returnAfterAdd) restore();
       return;
     }
 
@@ -86,12 +111,17 @@ export function DishCard({
        last wins. Waiting a frame lets the exit animation be the one that
        owns the value instead of being cancelled by the spring. */
     requestAnimationFrame(() => {
-      const slide = animate(dragX, direction * EXIT_DISTANCE, {
+      // Leaves the way the guest pushed it — or the OPPOSITE way when the
+      // dish was sold out and a right-swipe was answered with a skip.
+      const slide = animate(dragX, commit * EXIT_DISTANCE, {
         duration: 0.24,
         ease: easeGentle,
       });
       void Promise.resolve(slide).then(() => {
-        animate(opacity, 0, { duration: 0.12 }).then(() => onExited?.());
+        animate(opacity, 0, { duration: 0.12 }).then(() => {
+          onExited?.(commit);
+          if (commit === 1 && returnAfterAdd) restore();
+        });
       });
     });
   }
@@ -140,8 +170,9 @@ export function DishCard({
           ) : null}
 
           {/* Swipe stamps. They fade in with travel, so the card answers the
-              gesture before the guest lets go. */}
-          {interactive ? (
+              gesture before the guest lets go. A sold-out dish shows neither:
+              there is nothing to "Add", and the stamp would lie. */}
+          {canAdd ? (
             <>
               <motion.span
                 aria-hidden
@@ -163,7 +194,7 @@ export function DishCard({
           ) : null}
         </div>
 
-        <div className="flex flex-1 flex-col p-5 pt-3 sm:p-6 sm:pt-4">
+        <div className="flex flex-1 flex-col p-4 pt-3">
           <h3
             className={cn(
               "font-display text-subheading",
@@ -181,18 +212,29 @@ export function DishCard({
             </p>
           ) : null}
 
-          <div className="mt-auto flex items-end justify-between gap-4 pt-6">
+          {/* Price and actions are deliberately TWO rows. At the three-across
+              laptop width a single row needs ~248px inside a 213px card, and
+              the card's own overflow-hidden was slicing the Add button off —
+              which is what made the grid look broken. flex-wrap is the last
+              resort: if a card ever gets narrower than its buttons, they stack
+              instead of being cut. */}
+          <div className="mt-auto flex flex-col gap-3 pt-4">
             <span className="font-display text-xl font-semibold text-ink tabular-nums">
               {formatPrice(item.price)}
             </span>
 
             {/* Buttons keep their taps: a press that starts on them is not a
-                drag, so nobody adds a dish by accident while swiping. */}
+                drag, so nobody adds a dish by accident while swiping.
+
+                justify-between puts Skip on the left edge and Add on the
+                right edge of the card — the row spans the card instead of
+                huddling in the corner with dead space beside it. flex-wrap
+                stays as the guard for any card narrower than both buttons. */}
             <div
               onPointerDownCapture={(event) => event.stopPropagation()}
-              className="flex items-center gap-2"
+              className="flex flex-wrap items-center justify-between gap-2"
             >
-              {isDeck && onSkip && !unavailable ? (
+              {isDeck && onSkip ? (
                 <Button
                   variant="ghost"
                   size="md"

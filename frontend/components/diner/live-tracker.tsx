@@ -10,6 +10,7 @@ import {
   Clock,
   Flame,
   ListPlus,
+  RefreshCw,
   RotateCcw,
   ShieldX,
   ShoppingBasket,
@@ -178,6 +179,20 @@ export function LiveTracker({ tableToken }: LiveTrackerProps) {
 
         <div className="flex items-center gap-3">
           <ActiveDinersBadge tableToken={table.code} />
+
+          {/* Backup refresh — the same quiet icon treatment as the link below.
+              Channel C streams the status flips; this is for the socket that
+              stops streaming and says nothing about it. */}
+          <button
+            type="button"
+            onClick={() => void live.refresh()}
+            aria-label="Refresh order status"
+            title="Refresh order status"
+            className="inline-flex size-9 items-center justify-center rounded-md text-ink-muted transition-colors duration-[var(--duration-fast)] ease-gentle hover:bg-sand hover:text-ink"
+          >
+            <RefreshCw className="size-4" aria-hidden />
+          </button>
+
           {/* Minimal icon rather than a labelled button: the guest is one tap
               from the menu, and the screen stays quiet. */}
           <Link

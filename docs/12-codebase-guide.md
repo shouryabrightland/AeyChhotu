@@ -255,12 +255,12 @@ button, field or overlay looks.
 | `table-session-gate.tsx` | **The one door into a table.** On mount: reconnect with a stored pass → otherwise PIN pad → or, if flagged, the locked gate. Owns the three-attempt logic and the "session ended" state. |
 | `table-pin-pad.tsx` | Hand-built 2-digit keypad (never an `<input>`): big thumb targets, auto-submit on the second digit. |
 | `table-locked-gate.tsx` | The flagged table: keypad withdrawn, only a Table Pass can re-open it. |
-| `table-pass-modal.tsx` | The Table Pass: the PIN and the QR for the same session, plus copy/share. |
+| `table-pass-modal.tsx` | The Table Pass: the PIN and the QR for the same session, then the table's own card — guest count and names (with "you" marked), dishes ordered, rounds fired, the running total and what is still staged. Two columns from `sm`, so the whole pass fits without scrolling. |
 | `in-app-qr-scanner.tsx` | `getUserMedia` + `jsQR` frame decoding — no file picker, no OS camera handoff. |
-| `diner-table-screen.tsx` | The menu screen itself: nav bar, search/stage, deck or grid, cart column/strip, bill drawers, tracker hand-off. |
-| `diner-nav-bar.tsx` | The charcoal band: editable "ordering as" name, tracker, bill, table pass. |
-| `menu-browser.tsx` | Two-stage menu (cuisine → section → dishes) with search-as-filter. |
-| `dish-deck.tsx`, `dish-card.tsx` | The swipeable ordering round: drag right to add, press Add, or skip. |
+| `diner-table-screen.tsx` | The menu screen itself: nav bar, search/stage, responsive card grid, cart column/strip, bill drawers, tracker hand-off. |
+| `diner-nav-bar.tsx` | The charcoal band: editable "ordering as" name, tracker, one bill pill (carrying the table total; it collapses to its icon below `sm` where the band has no room for the amount) and the table pass. |
+| `menu-browser.tsx` | The menu as a wall of folders: one deck per `menu_categories` folder, with search and the diet filter as views over the same decks. |
+| `dish-card.tsx`, `dish-deck.tsx` | `dish-card` is one swipeable dish (drag right to add, left to skip, or press the buttons). `dish-deck` stacks one folder's cards into a pile — next two peeking behind, `1 / n` progress, "Up next", skipped chips and **Start again** when the folder runs out. Decks are 1-up on a phone, 2-up on a tablet, back to 1-up from `lg` (the cart aside takes 21rem out of the menu column) and 2-up from `xl`. |
 | `dish-photo.tsx` | The single plate treatment (4:3, warm wash while loading, palette tile on failure). |
 | `discovery-card.tsx` | One whole-card button used by the cuisine/section pickers. |
 | `quantity-stepper.tsx` | −/+ with the minus becoming a bin at 1. |
@@ -311,7 +311,7 @@ button, field or overlay looks.
 
 | File | What it is |
 | --- | --- |
-| `use-live-table.ts` | Diner runtime: menu, cart, fire, status. Realtime channels plus REST polling underneath; a failure is a real error state, never seeded data. |
+| `use-live-table.ts` | Diner runtime: menu, cart, fire, status. Realtime channels plus REST polling underneath; cart writes are optimistic (an add is painted immediately and the badge reads `syncing` until the server's cart is read back); a failure is a real error state, never seeded data. |
 | `use-live-kds.ts` | Kitchen runtime: tickets, per-ticket busy map (the double-tap guard), status/prune writes, new-ticket chime. |
 | `use-live-floor.ts` | Floor runtime: table summaries, settle, realtime refresh, slow-poll fallback. |
 | `use-staff-menu-catalog.ts` | Discovers a real menu for the 86 drawer by asking the floor view for a live table code (the menu endpoint is table-scoped). |

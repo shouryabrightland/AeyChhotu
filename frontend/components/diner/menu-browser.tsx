@@ -3,7 +3,6 @@
 import { Search } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useMemo, useState } from "react";
-import { DishCard } from "@/components/diner/dish-card";
 import { DishDeck } from "@/components/diner/dish-deck";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -23,34 +22,40 @@ export interface MenuBrowserProps {
   /** Per-item API validation messages rendered inline on the card. */
   itemErrors?: Record<string, string>;
   onAdd: (item: MenuItem) => void;
-  /** Opens the existing review-and-fire surface. */
-  onReview: () => void;
-  /** Existing shared cart size, so the deck can offer the final step. */
-  cartItemCount: number;
   /** Sticky offset for the search bar — the diner nav band docks above it. */
   stickyTopClass?: string;
 }
 
-/* The menu, laid out exactly as the manager organised it.
+/* One deck's worth of images, at the width a deck actually renders at. */
+const DECK_SIZES = "(min-width: 640px) 25rem, 100vw";
 
-   Every section is a folder from the admin catalogue (menu_categories), in
-   the folder order the admin set, with child folders nested one step in.
-   Inside a section sits the one-card deck: swipe right to add, left to skip,
-   and the next two dishes peek out from behind so the rail reads as a row
-   that continues rather than a single card.
+/* No deck is ever wider than this: past ~400px the plate and the copy stop
+   reading as a card and start reading as a poster. A capped deck is centred in
+   its cell rather than pinned to the left edge. Kept in one place because the
+   grid cells, the search deck and the image hints all have to agree. */
+const DECK_MAX = "mx-auto max-w-[400px]";
+
+/* The menu as a wall of folders.
+
+   Every section is a folder from the admin catalogue (menu_categories), in the
+   folder order the admin set. One folder is one DECK — its dishes sit stacked
+   in a single pile, and the guest works down it a card at a time (drag right to
+   add, left to skip, or the buttons). The piles are laid out on a responsive
+   grid: one per row on a phone, two on a tablet. From `lg` the menu column
+   shares its row with the 21rem cart aside, so the count drops back to one and
+   only widens to two from `xl` — a deck needs room for a photo, a description
+   and a price/action row to look like a card rather than a column of text.
 
    The admin tree can fail to load (older API, flaky network). When it does,
    `buildMenuSections` falls back to the dishes' own category labels, so the
    table never loses its menu because a grouping convenience failed. Search is
-   still a flat filter over everything, independent of the sections. */
+   still a flat filter over everything, and its matches arrive as one deck too. */
 export function MenuBrowser({
   menu,
   quantities,
   pendingItemId,
   itemErrors,
   onAdd,
-  onReview,
-  cartItemCount,
   stickyTopClass = "top-0",
 }: MenuBrowserProps) {
   const [query, setQuery] = useState("");
@@ -77,14 +82,28 @@ export function MenuBrowser({
     };
   }, []);
 
-  /* The filter narrows the menu BEFORE the sections are built, so a section
-     only ever describes dishes the guest can order under the active diet. */
+  /* The filter narrows the menu BEFORE the sections are built, so a folder
+     only ever holds dishes the guest can order under the active diet. */
   const visibleMenu = useMemo(() => menu.filter((item) => matchesDiet(item, diet)), [menu, diet]);
   const matches = useMemo(() => searchMenu(visibleMenu, query), [visibleMenu, query]);
   const sections = useMemo(
     () => buildMenuSections(visibleMenu, categories),
     [visibleMenu, categories],
   );
+
+  /* The grid has no indentation to show nesting, so a child folder carries its
+     parent's name as a small line above its own — the hierarchy survives the
+     flat layout. Sections arrive depth-first, so a stack of the last section
+     seen at each depth is enough. */
+  const folders = useMemo(() => {
+    const ancestors: (string | undefined)[] = [];
+    return sections.map((section) => {
+      ancestors.length = section.depth;
+      const parentName = section.depth > 0 ? ancestors[section.depth - 1] : undefined;
+      ancestors[section.depth] = section.name;
+      return { section, parentName };
+    });
+  }, [sections]);
 
   const searching = query.trim().length > 0;
 
@@ -93,10 +112,15 @@ export function MenuBrowser({
       {/* Sticky so search and the diet filter stay reachable while the guest
           scrolls a long menu. The offset is `--diner-nav-h`, published by the
           navbar's ResizeObserver, so the two bands dock together instead of
-          the search sliding under the header. */}
+          the search sliding under the header.
+
+          z-30, deliberately ABOVE the dish cards' own z-20: a card scrolling
+          past sits later in the DOM, so at equal z-index it painted over the
+          search box and the diet tabs. The band still sits under the nav
+          (z-40), so every layer has exactly one job. */}
       <div
         className={cn(
-          "sticky z-20 -mx-1 rounded-lg bg-canvas/90 px-1 py-1.5 backdrop-blur-md",
+          "sticky z-30 -mx-1 rounded-lg bg-canvas/90 px-1 py-1.5 backdrop-blur-md",
           stickyTopClass,
         )}
       >
@@ -140,7 +164,7 @@ export function MenuBrowser({
       </div>
 
       <motion.div
-        key={searching ? "search" : `rails:${diet}`}
+        key={searching ? "search" : `decks:${diet}`}
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={transitionBase}
@@ -169,16 +193,21 @@ export function MenuBrowser({
             />
           ) : (
             <section className="flex flex-col gap-5">
-              <h2 className="font-display text-heading text-ink">
-                {matches.length} {matches.length === 1 ? "dish" : "dishes"} match
-                <span className="text-ember"> “{query.trim()}”</span>
-              </h2>
-              <DishGrid
+              <StageHeading
+                title={`${matches.length} ${matches.length === 1 ? "dish" : "dishes"} match “${query.trim()}”`}
+                description="Swipe right to add, left to skip — or use the buttons."
+              />
+              <DishDeck
+                /* Remount when the result set changes, so a skipped list can
+                   never hold a dish that is no longer in the deck. */
+                key={`search:${matches.map((item) => item.id).join(",")}`}
                 items={matches}
                 quantities={quantities}
                 pendingItemId={pendingItemId}
                 itemErrors={itemErrors}
                 onAdd={onAdd}
+                sizes={DECK_SIZES}
+                className={cn("w-full", DECK_MAX)}
               />
             </section>
           )
@@ -188,48 +217,34 @@ export function MenuBrowser({
               title="Today’s menu"
               description={`${visibleMenu.length} ${
                 visibleMenu.length === 1 ? "dish" : "dishes"
-              } in ${sections.length} ${sections.length === 1 ? "section" : "sections"} · swipe right to add, left to skip.`}
+              } in ${sections.length} ${sections.length === 1 ? "folder" : "folders"} · pick a deck, then swipe right to add, left to skip.`}
             />
 
-            {sections.map((section) => (
-              <section
-                key={section.id}
-                className={cn(
-                  "flex flex-col gap-4",
-                  // Child folders read as one step in, like a nested menu.
-                  section.depth > 0 && "border-l border-line pl-4 sm:pl-6",
-                )}
-              >
-                <header className="flex flex-wrap items-baseline justify-between gap-2">
-                  <h3
-                    className={cn(
-                      "font-display text-ink",
-                      section.depth === 0 ? "text-heading" : "text-subheading",
-                    )}
-                  >
-                    {section.name}
-                  </h3>
-                  <span className="text-xs font-medium text-ink-subtle tabular-nums">
-                    {section.items.length} {section.items.length === 1 ? "dish" : "dishes"}
-                  </span>
-                </header>
-
-                <DishDeck
-                  /* Remount when the section's dish set changes (86'ing,
-                     re-filtering), so the queue can never hold a stale dish. */
-                  key={`${section.id}:${diet}:${section.items.map((item) => item.id).join(",")}`}
-                  items={section.items}
-                  quantities={quantities}
-                  pendingItemId={pendingItemId}
-                  itemErrors={itemErrors}
-                  onAdd={onAdd}
-                  stageLabel={section.name}
-                  cartItemCount={cartItemCount}
-                  onReview={onReview}
-                  className="w-full"
-                />
-              </section>
-            ))}
+            {/* One folder, one deck. Phone 1-up, tablet 2-up; then the cart
+                aside appears at `lg` and takes 21rem out of the menu column,
+                so a laptop drops back to a single deck (a 584px column split
+                in two gave 280px cards, too cramped) and only reaches two
+                across from `xl`. Each deck is capped at 400px in every case. */}
+            <ul className="grid grid-cols-1 items-start gap-5 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+              {folders.map(({ section, parentName }) => (
+                <li key={section.id} className="min-w-0">
+                  <DishDeck
+                    /* Remount when the folder's dish set changes (86'ing,
+                       re-filtering), so the deck always starts where it should. */
+                    key={`${section.id}:${diet}:${section.items.map((item) => item.id).join(",")}`}
+                    items={section.items}
+                    quantities={quantities}
+                    pendingItemId={pendingItemId}
+                    itemErrors={itemErrors}
+                    onAdd={onAdd}
+                    label={section.name}
+                    eyebrow={parentName}
+                    sizes={DECK_SIZES}
+                    className={cn("w-full", DECK_MAX)}
+                  />
+                </li>
+              ))}
+            </ul>
           </div>
         )}
       </motion.div>
@@ -244,37 +259,5 @@ function StageHeading({ title, description }: { title: string; description?: str
       {description ? <p className="text-sm text-ink-muted">{description}</p> : null}
       <span aria-hidden className="absolute -bottom-px left-0 h-0.5 w-12 bg-ember" />
     </div>
-  );
-}
-
-function DishGrid({
-  items,
-  quantities,
-  pendingItemId,
-  itemErrors,
-  onAdd,
-}: {
-  items: MenuItem[];
-  quantities: Record<string, number>;
-  pendingItemId: string | null;
-  itemErrors?: Record<string, string>;
-  onAdd: (item: MenuItem) => void;
-}) {
-  return (
-    <ul className="grid gap-5 sm:grid-cols-2">
-      {items.map((item) => (
-        <li key={item.id} className="h-full">
-          <DishCard
-            variant="grid"
-            item={item}
-            quantityInCart={quantities[item.id] ?? 0}
-            pending={pendingItemId === item.id}
-            error={itemErrors?.[item.id]}
-            onAdd={onAdd}
-            sizes="(min-width: 1024px) 24rem, (min-width: 640px) 45vw, 100vw"
-          />
-        </li>
-      ))}
-    </ul>
   );
 }

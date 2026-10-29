@@ -16,12 +16,22 @@ export function SiteHeader() {
   const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
+  /* Same body-scroller gotcha as the table session's nav band: globals.css
+     locks html/body to 100dvh with `overflow-x: hidden`, so <body> is what
+     scrolls and `window.scrollY` never leaves 0 — a window-only listener
+     leaves this band permanently see-through with the page running behind
+     the logo. Capture on document, because scroll events do not bubble. */
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 16);
+    const onScroll = () => setScrolled((window.scrollY || document.body.scrollTop || 0) > 16);
     onScroll();
 
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
     window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+
+    return () => {
+      document.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("scroll", onScroll);
+    };
   }, []);
 
   return (
