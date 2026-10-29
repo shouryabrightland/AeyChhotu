@@ -1,8 +1,9 @@
 "use client";
 
 import type { GoogleGenAI } from "@google/genai";
-import { Check, Loader2, Mic, Send, Sparkles, TriangleAlert } from "lucide-react";
+import { Check, Loader2, Mic, Send, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ChhotuAvatar } from "@/components/brand/chhotu-avatar";
 import { DishPhoto } from "@/components/diner/dish-photo";
 import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
@@ -309,7 +310,7 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
           className ?? "bottom-24 lg:bottom-6",
         )}
       >
-        <Sparkles className="size-4" aria-hidden />
+        <ChhotuAvatar size="sm" />
         <span>Ask Chhotu</span>
       </button>
 
@@ -441,20 +442,26 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
 }
 
 function MessageBubble({ message, live = false }: { message: ChhotuMessage; live?: boolean }) {
+  const fromChhotu = message.role === "assistant";
+
   return (
-    <li className={cn("flex flex-col gap-1.5", message.role === "user" ? "items-end" : "items-start")}>
-      <div
-        className={cn(
-          "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
-          message.role === "user"
-            ? "border border-ember/20 bg-ember-soft text-ink"
-            : "border border-line bg-paper text-ink",
-        )}
-      >
-        {message.text}
-        {live ? (
-          <span aria-hidden className="ml-1 inline-block size-1.5 animate-pulse-soft rounded-pill bg-ember align-middle" />
-        ) : null}
+    <li className={cn("flex flex-col gap-1.5", fromChhotu ? "items-start" : "items-end")}>
+      <div className={cn("flex w-full items-start gap-2", fromChhotu ? "justify-start" : "justify-end")}>
+        {fromChhotu ? <ChhotuAvatar size="sm" className="mt-0.5" /> : null}
+
+        <div
+          className={cn(
+            "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
+            fromChhotu
+              ? "border border-line bg-paper text-ink"
+              : "border border-ember/20 bg-ember-soft text-ink",
+          )}
+        >
+          {message.text}
+          {live ? (
+            <span aria-hidden className="ml-1 inline-block size-1.5 animate-pulse-soft rounded-pill bg-ember align-middle" />
+          ) : null}
+        </div>
       </div>
 
       {message.actions && message.actions.length > 0 ? (

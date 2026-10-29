@@ -1,8 +1,9 @@
 "use client";
 
 import type { GoogleGenAI } from "@google/genai";
-import { Check, Loader2, Mic, Send, Sparkles, TriangleAlert } from "lucide-react";
+import { Check, Loader2, Mic, Send, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ChhotuAvatar } from "@/components/brand/chhotu-avatar";
 import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
@@ -291,7 +292,7 @@ export function AdminAssistant() {
         aria-label="Ask the console assistant"
         className="fixed right-5 bottom-5 z-40 inline-flex cursor-pointer items-center gap-2 rounded-pill bg-ink px-4 py-3 font-sans text-sm font-semibold text-ink-inverse shadow-lg transition-transform duration-[var(--duration-fast)] ease-gentle hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ink/20"
       >
-        <Sparkles className="size-4" aria-hidden />
+        <ChhotuAvatar size="sm" />
         <span>Ask Chhotu</span>
       </button>
 
@@ -375,13 +376,23 @@ export function AdminAssistant() {
               >
                 <div
                   className={cn(
-                    "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
-                    message.role === "user"
-                      ? "border border-ember/20 bg-ember-soft text-ink"
-                      : "border border-line bg-paper text-ink",
+                    "flex w-full items-start gap-2",
+                    message.role === "user" ? "justify-end" : "justify-start",
                   )}
                 >
-                  {message.text}
+                  {message.role === "assistant" ? (
+                    <ChhotuAvatar size="sm" className="mt-0.5" />
+                  ) : null}
+                  <div
+                    className={cn(
+                      "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
+                      message.role === "user"
+                        ? "border border-ember/20 bg-ember-soft text-ink"
+                        : "border border-line bg-paper text-ink",
+                    )}
+                  >
+                    {message.text}
+                  </div>
                 </div>
                 {message.actions && message.actions.length > 0 ? (
                   <ul className="flex flex-wrap gap-1.5">

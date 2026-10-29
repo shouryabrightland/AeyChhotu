@@ -1,7 +1,8 @@
 "use client";
 
-import { Loader2, Mic, Sparkles, Square } from "lucide-react";
+import { Loader2, Mic, Square } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ChhotuAvatar } from "@/components/brand/chhotu-avatar";
 import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
 import { buildKitchenSystemPrompt } from "@/lib/ai/kitchen-system-prompt";
@@ -467,7 +468,7 @@ export function KitchenVoice({
             <MicLevel level={level} listening={listening} />
           </span>
         ) : (
-          <Sparkles className="size-4" aria-hidden />
+          <ChhotuAvatar size="sm" />
         )}
         <span>{enabled ? "Voice on" : "Ask Chhotu"}</span>
       </button>
@@ -558,13 +559,23 @@ export function KitchenVoice({
               >
                 <div
                   className={cn(
-                    "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
-                    line.role === "user"
-                      ? "border border-ember/20 bg-ember-soft text-ink"
-                      : "border border-line bg-paper text-ink",
+                    "flex w-full items-start gap-2",
+                    line.role === "user" ? "justify-end" : "justify-start",
                   )}
                 >
-                  {line.text}
+                  {line.role === "assistant" ? (
+                    <ChhotuAvatar size="sm" className="mt-0.5" />
+                  ) : null}
+                  <div
+                    className={cn(
+                      "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
+                      line.role === "user"
+                        ? "border border-ember/20 bg-ember-soft text-ink"
+                        : "border border-line bg-paper text-ink",
+                    )}
+                  >
+                    {line.text}
+                  </div>
                 </div>
                 {line.actions && line.actions.length > 0 ? (
                   <ul className="flex flex-wrap gap-1.5">
