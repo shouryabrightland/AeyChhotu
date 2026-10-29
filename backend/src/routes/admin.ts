@@ -1,4 +1,5 @@
 import { Router, raw } from "express";
+import { env } from "../config/env.js";
 import { AppError } from "../errors/app-error.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import {
@@ -27,6 +28,14 @@ import {
   removeMenuItemImage,
   replaceMenuItemImage,
 } from "../services/menu-image.service.js";
+import {
+  bestSellingDishes,
+  dailySalesSummary,
+  inventoryStatus,
+  listFeedback,
+  pendingOrders,
+  tableOccupancy,
+} from "../services/insights.service.js";
 import {
   adminCategoryParamsSchema,
   adminCreateCategorySchema,
@@ -222,4 +231,60 @@ adminRouter.delete("/menu/:menu_item_id/image", async (req, res) => {
 adminRouter.get("/analytics/top-selling", async (_req, res) => {
   const data = await topSellingAnalytics();
   res.status(200).json({ success: true, data });
+});
+
+/* ---- Console insights (Module 6) -------------------------------------
+ *
+ * The reads behind the manager console's assistant. They sit on the SAME
+ * router, so requireAuth + requireRole("admin") already applies: a diner
+ * table token cannot reach them and a kitchen/floor shift token gets 403.
+ *
+ * Query parameters are clamped here rather than trusted: `days` and `limit`
+ * come from a language model, and an unbounded window would scan the whole
+ * rollup table on a demo box. */
+
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
+adminRouter.get("/insights/sales", async (_req, res) => {
+  const data = await dailySalesSummary();
+  res.status(200).json({ success: true, data });
+});
+
+adminRouter.get("/insights/best-selling", async (req, res) => {
+  const days = clampInt(req.query.days, 1, 1, 90);
+  const limit = clampInt(req.query.limit, 5, 1, 20);
+  const data = await bestSellingDishes(limit, days);
+  res.status(200).json({ success: true, data: { days, limit, items: data } });
+});
+
+adminRouter.get("/insights/pending-orders", async (_req, res) => {
+  const data = await pendingOrders();
+  res.status(200).json({ success: true, data: { count: data.length, orders: data } });
+});
+
+adminRouter.get("/insights/tables", async (_req, res) => {
+  const data = await tableOccupancy();
+  res.status(200).json({ success: true, data });
+});
+
+adminRouter.get("/insights/inventory", async (_req, res) => {
+  const data = await inventoryStatus();
+  res.status(200).json({ success: true, data });
+});
+
+adminRouter.get("/insights/feedback", async (req, res) => {
+  const limit = clampInt(req.query.limit, 10, 1, 50);
+  const data = await listFeedback(limit);
+  res.status(200).json({ success: true, data: { count: data.length, feedback: data } });
+});
+
+/* The assistant's own key, released to an ADMIN session only. It is the same
+   restricted key the diner side hands out with a table grant; this endpoint
+   exists so the console can voice-answer without a table session. */
+adminRouter.get("/assistant/key", (_req, res) => {
+  res.status(200).json({ success: true, data: { gemini_api_key: env.geminiApiKey } });
 });

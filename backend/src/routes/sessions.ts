@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { z } from "zod";
 import {
   activeCheck,
   getTableState,
@@ -11,6 +12,7 @@ import {
   removeHeartbeat,
   requestTableBill,
 } from "../services/sessions.service.js";
+import { recordFeedback } from "../services/insights.service.js";
 import {
   activeCheckParamsSchema,
   heartbeatSchema,
@@ -123,4 +125,20 @@ sessionsRouter.delete("/:table_token/heartbeat", async (req, res) => {
   const body = parseOrThrow(heartbeatSchema, req.body);
   const data = await removeHeartbeat(params.table_token, body.device_id);
   res.status(200).json({ success: true, data });
+});
+
+/* POST /api/v1/sessions/:table_token/feedback — the diner rates the visit.
+   Written from the TABLE capability (the guest who ate is the guest who
+   rates); read only by the admin console. One row per submission, no edit or
+   delete path: a rating is a record, not a field. */
+const feedbackSchema = z.object({
+  rating: z.coerce.number().int().min(1).max(5),
+  comment: z.string().trim().max(500).optional().default(""),
+});
+
+sessionsRouter.post("/:table_token/feedback", async (req, res) => {
+  const params = parseOrThrow(sessionTableParamsSchema, req.params);
+  const body = parseOrThrow(feedbackSchema, req.body);
+  const data = await recordFeedback(params.table_token, body);
+  res.status(201).json({ success: true, data });
 });

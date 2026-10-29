@@ -46,9 +46,10 @@ import {
  *      is remembered on the device, and a device that already holds this
  *      table's pass reconnects with it silently — a refresh never re-asks.
  *   1. Does this device already hold the pass for THIS table?
- *      → POST /sessions/reconnect. No keypad, no flash. A 403 means the
- *        table was settled or the secret was replaced, so storage is
- *        dropped and the guest starts at step 2.
+ *      → POST /sessions/reconnect. No keypad, no flash. STALE_SESSION (the
+ *        page predates a clear) goes home; SESSION_ENDED (this device's pass
+ *        is dead) drops the pass and continues to step 2. Both are 403, but
+ *        only one of them means "you cannot start a session here now".
  *   2. Otherwise scan: POST /sessions/initialize. An EMPTY table is claimed
  *      by the first device and the gate opens. A LIVE table answers
  *      `locked`, and the guest must join.
@@ -195,10 +196,11 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
       }
 
       /* 1. This device already belongs to the table? A refresh must never
-            show the keypad again. A rejection means the session is GONE —
-            the table was settled or cleared — and per the stale-refresh rule
-            the right move is home with clean storage, not claiming the next
-            party's table by initializing it. */
+            show the keypad again, so the stored pass is tried first. If the
+            server refuses it, the KIND of refusal decides what happens:
+            STALE_SESSION (page older than the last clear) goes home, while
+            SESSION_ENDED (a dead pass) is dropped and step 2 runs — a guest
+            who just entered the code must still be able to start a session. */
       const stored = readStoredSession(tableToken);
 
       if (stored) {
@@ -213,30 +215,39 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
         } catch (err) {
           if (cancelled) return;
 
-          if (
-            err instanceof ApiError &&
-            (err.error === "SESSION_ENDED" || err.error === "STALE_SESSION")
-          ) {
+          /* A page that was opened BEFORE the table was cleared must not
+             linger: its scan_time is older than last_cleared_at, so nothing
+             it does can be trusted. Home, with clean storage. */
+          if (err instanceof ApiError && err.error === "STALE_SESSION") {
             exitToHome();
             return;
           }
 
-          if (err instanceof ApiError && err.error === "TABLE_NOT_FOUND") {
+          if (err instanceof ApiError && err.error === "SESSION_ENDED") {
+            /* This device's pass is dead — the table was settled, cleared or
+               its secret rotated. Drop the pass and FALL THROUGH to a fresh
+               scan instead of redirecting home: someone who typed the table
+               code right now was being bounced straight back to "/" whenever
+               an old pass for that table was still in storage. Falling
+               through is safe, because an occupied table answers `locked`
+               and still demands the PIN. */
+            clearStoredSession(tableToken);
+          } else if (err instanceof ApiError && err.error === "TABLE_NOT_FOUND") {
             /* docs/14 #26 — a code that is not a table is NOT a settled
                table: saying "the bill was settled" for a typo was worse than
                saying nothing. */
             clearStoredSession(tableToken);
             setPhase("missing");
             return;
+          } else {
+            setErrorMessage(
+              err instanceof ApiError
+                ? err.message
+                : "Something went wrong reopening this table.",
+            );
+            setPhase("error");
+            return;
           }
-
-          setErrorMessage(
-            err instanceof ApiError
-              ? err.message
-              : "Something went wrong reopening this table.",
-          );
-          setPhase("error");
-          return;
         }
       }
 

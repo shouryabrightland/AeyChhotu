@@ -52,6 +52,17 @@ function ok(data: Record<string, unknown>, actions: ChhotuAction[] = [], mutated
   return { response: { ok: true, data }, actions, mutated };
 }
 
+/** Read tools attach the dishes they just talked about, so the sheet can show
+ *  them as photo cards. The photos are resolved in the UI (`DishPhoto`), which
+ *  is why this passes the MenuItem through untouched. Capped because a card
+ *  strip stops being readable past a handful. */
+const MAX_CARDS = 6;
+
+function dishCards(items: MenuItem[], label: string): ChhotuAction[] {
+  if (items.length === 0) return [];
+  return [{ kind: "info", label, ok: true, dishes: items.slice(0, MAX_CARDS) }];
+}
+
 function fail(error: ToolError, actions: ChhotuAction[] = [], mutated = false): ToolExecution {
   return { response: { ok: false, error }, actions, mutated };
 }
@@ -221,20 +232,26 @@ export async function executeTool(
       if (vegetarian === true) dishes = dishes.filter((item) => item.vegetarian);
       if (maxPrice !== null) dishes = dishes.filter((item) => item.price <= maxPrice);
 
-      return ok({
-        count: dishes.length,
-        dishes: dishes.map((item) => ({
-          menu_item_id: item.id,
-          name: item.name,
-          price: item.price,
-          category: item.category,
-          vegetarian: item.vegetarian,
-          is_available: item.is_available,
-          spice_level: item.spice_level ?? 0,
-          spice_label: spiceLabel(item.spice_level ?? 0),
-          portion: item.portion_description ?? "",
-        })),
-      });
+      return ok(
+        {
+          count: dishes.length,
+          dishes: dishes.map((item) => ({
+            menu_item_id: item.id,
+            name: item.name,
+            price: item.price,
+            category: item.category,
+            vegetarian: item.vegetarian,
+            is_available: item.is_available,
+            spice_level: item.spice_level ?? 0,
+            spice_label: spiceLabel(item.spice_level ?? 0),
+            portion: item.portion_description ?? "",
+          })),
+        },
+        dishCards(
+          dishes,
+          dishes.length === 0 ? "Nothing left in that list" : `${dishes.length} on the menu`,
+        ),
+      );
     }
 
     case "get_dish_details": {
@@ -244,13 +261,16 @@ export async function executeTool(
       const resolved = resolveOrFail(runtime, query);
       if ("failure" in resolved) return resolved.failure;
 
-      return ok({
-        dish: publicDish(resolved.item),
-        allergy_caveat: ALLERGY_CAVEAT,
-        metadata_note: (resolved.item.ingredients?.length ?? 0) === 0 && (resolved.item.allergens?.length ?? 0) === 0
-          ? "The kitchen has not recorded ingredients or allergens for this dish. Do not guess them."
-          : "",
-      });
+      return ok(
+        {
+          dish: publicDish(resolved.item),
+          allergy_caveat: ALLERGY_CAVEAT,
+          metadata_note: (resolved.item.ingredients?.length ?? 0) === 0 && (resolved.item.allergens?.length ?? 0) === 0
+            ? "The kitchen has not recorded ingredients or allergens for this dish. Do not guess them."
+            : "",
+        },
+        dishCards([resolved.item], resolved.item.name),
+      );
     }
 
     case "recommend_dishes": {
@@ -268,12 +288,18 @@ export async function executeTool(
         party_size: partySize ?? undefined,
       });
 
-      return ok({
-        count: dishes.length,
-        criteria: { diet, spice_level: spice, max_price_per_person: budget, party_size: partySize },
-        dishes: dishes.map(publicDish),
-        note: dishes.length === 0 ? "Nothing on today's menu fits all of those constraints. Offer to relax one." : "",
-      });
+      return ok(
+        {
+          count: dishes.length,
+          criteria: { diet, spice_level: spice, max_price_per_person: budget, party_size: partySize },
+          dishes: dishes.map(publicDish),
+          note: dishes.length === 0 ? "Nothing on today's menu fits all of those constraints. Offer to relax one." : "",
+        },
+        dishCards(
+          dishes,
+          dishes.length === 1 ? "One dish fits" : `${dishes.length} dishes that fit`,
+        ),
+      );
     }
 
     case "compare_dishes": {
@@ -296,12 +322,15 @@ export async function executeTool(
         });
       }
 
-      return ok({
-        dishes: resolved.map(publicDish),
-        not_found: missing,
-        cheapest: resolved.reduce((best, item) => (item.price < best.price ? item : best)).name,
-        priciest: resolved.reduce((best, item) => (item.price > best.price ? item : best)).name,
-      });
+      return ok(
+        {
+          dishes: resolved.map(publicDish),
+          not_found: missing,
+          cheapest: resolved.reduce((best, item) => (item.price < best.price ? item : best)).name,
+          priciest: resolved.reduce((best, item) => (item.price > best.price ? item : best)).name,
+        },
+        dishCards(resolved, `Comparing ${resolved.length}`),
+      );
     }
 
     // ---- Cart -------------------------------------------------------
@@ -697,6 +726,27 @@ export async function executeTool(
       });
     }
 
+    // ---- Feedback ---------------------------------------------------
+    case "leave_feedback": {
+      const rating = asInteger(args.rating);
+      if (rating === null || rating < 1 || rating > 5) {
+        return fail({ code: "VALIDATION_ERROR", message: "Ask for a rating from 1 to 5 stars." });
+      }
+
+      const comment = (asString(args.comment) ?? "").slice(0, 500);
+
+      try {
+        const saved = await runtime.leaveFeedback({ rating, ...(comment ? { comment } : {}) });
+        return ok(
+          { feedback_id: saved.feedback_id, rating: saved.rating, comment },
+          [{ kind: "info", label: `Thanks — saved your ${rating}-star feedback`, ok: true }],
+          true,
+        );
+      } catch (err) {
+        return fail(errorFromException(err));
+      }
+    }
+
     default:
       return fail({ code: "UNKNOWN_TOOL", message: `Unknown tool "${name}".` });
   }
@@ -723,6 +773,7 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
     case "get_estimated_wait_time": return "Checking the kitchen queue…";
     case "get_order_status": return "Checking your order…";
     case "get_cart": return "Reading the table cart…";
+    case "leave_feedback": return "Saving your feedback…";
     default: return "Working on it…";
   }
 }

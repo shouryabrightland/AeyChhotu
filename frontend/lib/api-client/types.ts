@@ -576,3 +576,94 @@ export interface AdminAnalytics {
   /** Last 24 clock hours, oldest first, empty hours included as zeros. */
   trend: AdminAnalyticsTrendPoint[];
 }
+
+// ---- Admin insights + guest feedback (sql/016) ------------------------
+
+/** GET /api/v1/admin/insights/sales */
+export interface AdminSalesSummary {
+  day: string;
+  revenue_today: number;
+  orders_today: number;
+  items_sold_today: number;
+  average_ticket_today: number;
+  revenue_yesterday: number;
+  orders_yesterday: number;
+  revenue_7d: number;
+  orders_7d: number;
+}
+
+export interface AdminBestSeller {
+  menu_item_id: string;
+  name: string;
+  category: string;
+  units: number;
+  revenue: number;
+}
+
+export interface AdminPendingOrder {
+  order_id: string;
+  table_name: string;
+  table_code: string;
+  status: string;
+  total: number;
+  created_at: string;
+  age_minutes: number;
+}
+
+export interface AdminOccupancyRow {
+  table_id: string;
+  name: string;
+  code: string;
+  status: string;
+  bill_status: string;
+  devices: number;
+  guests: number;
+  open_orders: number;
+}
+
+/** GET /api/v1/admin/insights/tables */
+export interface AdminOccupancy {
+  total: number;
+  occupied: number;
+  free: number;
+  tables: AdminOccupancyRow[];
+}
+
+export type AdminStockState = "out" | "low" | "ok" | "untracked";
+
+export interface AdminInventoryItem {
+  menu_item_id: string;
+  name: string;
+  category: string;
+  price: number;
+  is_available: boolean;
+  /** NULL means "not tracked" — never read it as zero. */
+  stock_quantity: number | null;
+  low_stock_threshold: number;
+  state: AdminStockState;
+}
+
+/** GET /api/v1/admin/insights/inventory */
+export interface AdminInventory {
+  tracked: number;
+  out: number;
+  low: number;
+  untracked: number;
+  items: AdminInventoryItem[];
+}
+
+export interface AdminFeedback {
+  feedback_id: string;
+  rating: number;
+  comment: string;
+  created_at: string;
+  table_name: string;
+  table_code: string;
+}
+
+/** POST /api/v1/sessions/:table_token/feedback */
+export interface TableFeedbackResult {
+  feedback_id: string;
+  rating: number;
+  created_at: string;
+}

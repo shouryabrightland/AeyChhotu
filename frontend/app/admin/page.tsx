@@ -24,6 +24,7 @@ import {
 import Image from "next/image";
 import QRCode from "qrcode";
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { AdminAssistant } from "@/components/admin/admin-assistant";
 import { Logo } from "@/components/brand/logo";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -550,6 +551,9 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
   return (
     <main id="main" className="min-h-dvh bg-canvas pb-20">
+      {/* Rendered only after the PIN gate: a diner cannot reach this screen,
+          and the insight endpoints re-check the admin role server-side. */}
+      <AdminAssistant />
       <header className="sticky top-0 z-30 border-b border-line bg-canvas/90 backdrop-blur-md">
         <Container className="flex flex-wrap items-center gap-x-4 gap-y-3 py-3">
           {/* The same lockup as the home header: the app's own mark and the

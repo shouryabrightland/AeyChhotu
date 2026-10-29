@@ -20,28 +20,56 @@
    (deprecated but universally available) and playback queues
    AudioBufferSourceNodes so chunks butt together without gaps. */
 
-import { Modality, type FunctionCall, type LiveServerMessage, type Session } from "@google/genai";
+import {
+  Modality,
+  type FunctionCall,
+  type FunctionDeclaration,
+  type LiveServerMessage,
+  type Session,
+} from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
-import { buildChhotuSystemPrompt } from "./system-prompt";
-import { TOOL_DECLARATIONS } from "./tool-declarations";
-import { describeToolCall, executeTool } from "./tools";
-import type { ChhotuAction, ChhotuRuntime } from "./types";
+import type { ChhotuAction, ToolExecution } from "./types";
 
-/** The only model this app talks to: Gemini 3.8 Live with extended thinking
- *  (verified present in the Models API for this key). It is a native-audio
+/** The only model this app talks to: Gemini 3.8 Live. It is a native-audio
  *  Live model, so the same session takes speech and text.
  *
- *  Override per deployment with NEXT_PUBLIC_CHHOTU_LIVE_MODEL if Google
- *  publishes a newer Live model — but never point it at a text-only model:
- *  the sheet has no path for one. */
+ *  WHY NOT `gemini-3.8-live-extended-thinking`: it is listed by the Models
+ *  API, but a direct probe of the same config used here never completed the
+ *  handshake (the connect promise stayed unsettled — no setup, no error).
+ *  `gemini-3.8-live` answers with audio and a transcript, so that is what
+ *  ships. Override per deployment with NEXT_PUBLIC_CHHOTU_LIVE_MODEL if a
+ *  newer Live model is verified — never point this at a text-only model, the
+ *  sheet has no path for one. */
 export const CHHOTU_LIVE_MODEL =
-  process.env.NEXT_PUBLIC_CHHOTU_LIVE_MODEL?.trim() || "gemini-3.8-live-extended-thinking";
+  process.env.NEXT_PUBLIC_CHHOTU_LIVE_MODEL?.trim() || "gemini-3.8-live";
 
-/** A warm, mid-range prebuilt voice that suits a waiter. */
-const CHHOTU_VOICE = "Aoede";
+/* Voices are chosen per surface, not globally: the diner's waiter is a warm
+   male voice (Puck), the manager console keeps Aoede. Both are prebuilt
+   Gemini voices, so nothing has to be trained or hosted. */
 
 const MIC_SAMPLE_RATE = 16_000;
 const OUTPUT_SAMPLE_RATE = 24_000;
+
+/** A Live handshake that has not answered by now is not going to: an
+ *  unsupported model or a blocked socket leaves `connect()` pending forever,
+ *  which looked to the guest like a sheet stuck on "Opening the voice line". */
+const CONNECT_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(message));
+      },
+    );
+  });
+}
 
 export type ChhotuPhase =
   | "idle"
@@ -62,6 +90,9 @@ export interface ChhotuLiveCallbacks {
   onTurnComplete?: () => void;
   onActivity?: (label: string | null) => void;
   onActions?: (actions: ChhotuAction[]) => void;
+  /** 0–1 loudness of the guest's microphone, ~12 times a second, so the sheet
+      can show that the mic is actually hearing something. */
+  onMicLevel?: (level: number) => void;
   /** A tool wrote to the server; the caller should refresh live state. */
   onMutated?: () => void;
   onError?: (message: string) => void;
@@ -69,10 +100,17 @@ export interface ChhotuLiveCallbacks {
 
 export interface ChhotuLiveOptions {
   client: GoogleGenAI;
-  /** Built per tool call so the menu/cart snapshot is never stale. */
-  getRuntime: () => ChhotuRuntime;
-  guestName: string;
-  tableCode: string;
+  /** The persona. The diner sheet and the manager console each bring one. */
+  systemInstruction: string;
+  /** Exactly the functions this surface may call — nothing shared. */
+  tools: FunctionDeclaration[];
+  /** Runs one call in this browser. The table/admin credential is bound in
+      the caller's closure and is never model-supplied. */
+  execute: (name: string, args: Record<string, unknown>) => Promise<ToolExecution>;
+  /** Activity label for the sheet while a tool is running. */
+  describe?: (name: string, args: Record<string, unknown>) => string;
+  /** Prebuilt voice name (Puck, Aoede, Kore…). Chosen per surface. */
+  voiceName: string;
   callbacks?: ChhotuLiveCallbacks;
 }
 
@@ -132,6 +170,7 @@ export class ChhotuLiveSession {
   private playingUntil = 0;
 
   private closed = false;
+  private lastLevelAt = 0;
 
   constructor(options: ChhotuLiveOptions) {
     this.options = options;
@@ -142,9 +181,9 @@ export class ChhotuLiveSession {
     if (this.session) return;
     this.emitPhase("connecting");
 
-    const { client, guestName, tableCode, callbacks } = this.options;
+    const { client, callbacks } = this.options;
 
-    this.session = await client.live.connect({
+    const connect = client.live.connect({
       model: CHHOTU_LIVE_MODEL,
       callbacks: {
         onmessage: (message: LiveServerMessage) => {
@@ -161,17 +200,28 @@ export class ChhotuLiveSession {
       },
       config: {
         responseModalities: [Modality.AUDIO],
-        systemInstruction: buildChhotuSystemPrompt(guestName, tableCode),
-        tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
+        systemInstruction: this.options.systemInstruction,
+        tools: [{ functionDeclarations: this.options.tools }],
         // Captions for both sides, so the sheet can show what was heard.
         inputAudioTranscription: {},
         outputAudioTranscription: {},
         speechConfig: {
           languageCode: "en-IN",
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: CHHOTU_VOICE } },
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: this.options.voiceName } },
         },
       },
     });
+
+    try {
+      this.session = await withTimeout(
+        connect,
+        CONNECT_TIMEOUT_MS,
+        "The voice line did not open in time.",
+      );
+    } catch (error) {
+      this.emitPhase("error");
+      throw error instanceof Error ? error : new Error("The voice line did not open.");
+    }
 
     this.emitPhase("ready");
   }
@@ -216,6 +266,22 @@ export class ChhotuLiveSession {
     processor.onaudioprocess = (event) => {
       if (!this.session) return;
       const channel = event.inputBuffer.getChannelData(0);
+
+      /* Level for the UI: RMS of this block, throttled to ~12 fps so the
+         sheet re-renders a handful of times a second, not 60. */
+      const now = Date.now();
+      if (now - this.lastLevelAt > 80) {
+        this.lastLevelAt = now;
+        let sum = 0;
+        for (let index = 0; index < channel.length; index += 1) {
+          const sample = channel[index] as number;
+          sum += sample * sample;
+        }
+        const rms = Math.sqrt(sum / Math.max(1, channel.length));
+        // Speech sits around 0.05–0.3 RMS; scale it into a usable 0–1.
+        this.options.callbacks?.onMicLevel?.(Math.min(1, rms * 5));
+      }
+
       const pcm = toPcm16(downsample(channel, context.sampleRate, MIC_SAMPLE_RATE));
       this.session.sendRealtimeInput({
         audio: {
@@ -250,6 +316,7 @@ export class ChhotuLiveSession {
     this.micContext = null;
 
     this.session?.sendRealtimeInput({ audioStreamEnd: true });
+    this.options.callbacks?.onMicLevel?.(0);
     if (this.session) this.emitPhase("thinking");
   }
 
@@ -309,16 +376,15 @@ export class ChhotuLiveSession {
 
   /** Execute every requested function, then answer the socket with results. */
   private async runTools(calls: FunctionCall[]): Promise<void> {
-    const { callbacks } = this.options;
-    const runtime = this.options.getRuntime();
+    const { callbacks, describe } = this.options;
     const collected: ChhotuAction[] = [];
     let mutated = false;
 
     for (const call of calls) {
       const name = call.name ?? "";
-      callbacks?.onActivity?.(describeToolCall(name, call.args ?? {}));
+      if (describe) callbacks?.onActivity?.(describe(name, call.args ?? {}));
 
-      const execution = await executeTool(name, call.args ?? {}, runtime);
+      const execution = await this.options.execute(name, call.args ?? {});
       collected.push(...execution.actions);
       mutated = mutated || execution.mutated;
 

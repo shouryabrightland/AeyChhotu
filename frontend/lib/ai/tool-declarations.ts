@@ -139,4 +139,13 @@ export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
     },
     ["dishes", "reported_allergies"],
   ),
+  fn(
+    "leave_feedback",
+    "Save the guest's rating of their visit (1–5 stars) with their comment in their own words. Only when the guest actually offers feedback.",
+    {
+      rating: { type: Type.INTEGER, description: "1–5 stars, where 5 is excellent." },
+      comment: dish("What the guest said, in their words. Omit if they only gave a rating."),
+    },
+    ["rating"],
+  ),
 ];

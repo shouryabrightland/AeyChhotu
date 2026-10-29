@@ -1,24 +1,30 @@
 "use client";
 
 import type { GoogleGenAI } from "@google/genai";
-import { Check, Loader2, Mic, MicOff, Send, Sparkles, TriangleAlert } from "lucide-react";
+import { Check, Loader2, Mic, Send, Sparkles, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { DishPhoto } from "@/components/diner/dish-photo";
 import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
 import type { LiveTableValue } from "@/hooks/use-live-table";
 import { getChhotuClient, isChhotuConfigured } from "@/lib/ai/gemini-client";
 import { ChhotuLiveSession, type ChhotuPhase } from "@/lib/ai/live-session";
+import { buildChhotuSystemPrompt } from "@/lib/ai/system-prompt";
+import { TOOL_DECLARATIONS } from "@/lib/ai/tool-declarations";
+import { describeToolCall, executeTool } from "@/lib/ai/tools";
 import type { ChhotuAction, ChhotuMessage, ChhotuRuntime } from "@/lib/ai/types";
 import {
   fireTableOrder as apiFireOrder,
   removeCartItem as apiRemoveCartItem,
   requestTableBill as apiRequestTableBill,
+  submitTableFeedback as apiSubmitTableFeedback,
   updateCartItem as apiUpdateCartItem,
   upsertCartItem as apiUpsertCartItem,
 } from "@/lib/api-client";
 import { getStoredDisplayName } from "@/lib/api/session";
 import { getGrantedSession } from "@/lib/api/table-session";
+import { formatPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /* Chhotu — the floating waiter, now voice-to-voice.
@@ -85,6 +91,7 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
   const [phase, setPhase] = useState<ChhotuPhase>("idle");
   const [activity, setActivity] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [micLevel, setMicLevel] = useState(0);
 
   const sessionRef = useRef<ChhotuLiveSession | null>(null);
   const pendingRef = useRef<Promise<ChhotuLiveSession | null> | null>(null);
@@ -154,12 +161,17 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
     const guestName = nameRef.current || (displayName || getStoredDisplayName()).trim();
 
     const connect = (async () => {
+      const tableCode = liveRef.current.table?.code ?? tableToken;
       const session = new ChhotuLiveSession({
         client: ai,
-        guestName,
-        tableCode: liveRef.current.table?.code ?? tableToken,
+        systemInstruction: buildChhotuSystemPrompt(guestName, tableCode),
+        // A warm male waiter voice; the console keeps Aoede.
+        voiceName: "Puck",
+        tools: TOOL_DECLARATIONS,
+        describe: describeToolCall,
         // Fresh snapshot per tool call, so an 86 or a tablemate's edit is seen.
-        getRuntime: () => buildRuntime(liveRef.current, tableToken, guestName),
+        execute: (name, args) =>
+          executeTool(name, args, buildRuntime(liveRef.current, tableToken, guestName)),
         callbacks: {
           onPhase: setPhase,
           onUserSpeech: (delta) => {
@@ -176,6 +188,7 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
             actionsRef.current = [...actionsRef.current, ...next];
             setActions(actionsRef.current);
           },
+          onMicLevel: setMicLevel,
           onMutated: () => {
             void liveRef.current.refresh();
           },
@@ -206,6 +219,7 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
     setAssistantDraft("");
     setActions([]);
     setActivity(null);
+    setMicLevel(0);
     setPhase("idle");
   }, []);
 
@@ -234,7 +248,17 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
       return;
     }
 
-    const session = await ensureSession();
+    let session: ChhotuLiveSession | null = null;
+    try {
+      session = await ensureSession();
+    } catch {
+      push({
+        role: "assistant",
+        text: "I couldn't open the voice line. Check your connection and try again — nothing was changed.",
+      });
+      return;
+    }
+
     if (!session) {
       push({ role: "assistant", text: "Chhotu isn't available right now. Please order from the menu." });
       return;
@@ -256,7 +280,14 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
       return;
     }
 
-    const session = await ensureSession();
+    let session: ChhotuLiveSession | null = null;
+    try {
+      session = await ensureSession();
+    } catch {
+      setError("The voice line could not be opened. Check your connection and try again.");
+      return;
+    }
+
     if (!session) return;
 
     if (session.micActive) session.stopMic();
@@ -326,10 +357,8 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
                 aria-pressed={listening}
                 onClick={() => void toggleMic()}
                 disabled={connecting}
-                className="h-12 shrink-0 px-3"
-                leftIcon={
-                  listening ? <MicOff className="size-4" aria-hidden /> : <Mic className="size-4" aria-hidden />
-                }
+                className={cn("h-12 shrink-0 px-3", listening && "ring-2 ring-ember/40")}
+                leftIcon={<MicLevelIcon listening={listening} level={micLevel} />}
               >
                 <span className="sr-only">{listening ? "Stop listening" : "Voice"}</span>
               </Button>
@@ -429,25 +458,46 @@ function MessageBubble({ message, live = false }: { message: ChhotuMessage; live
       </div>
 
       {message.actions && message.actions.length > 0 ? (
-        <ul className="flex flex-wrap gap-1.5">
-          {message.actions.map((action, index) => (
-            <li
-              key={`${message.id}-action-${index}`}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-xs font-medium",
-                action.ok
-                  ? "border-ready/35 bg-ready-surface text-ready"
-                  : "border-alert/35 bg-alert-surface text-alert",
-              )}
-            >
-              {action.ok ? (
-                <Check className="size-3" aria-hidden />
-              ) : (
-                <TriangleAlert className="size-3" aria-hidden />
-              )}
-              {action.label}
-            </li>
-          ))}
+        <ul className="flex w-full flex-wrap gap-1.5">
+          {message.actions.map((action, index) =>
+            action.dishes && action.dishes.length > 0 ? (
+              /* A dish result is shown, not just announced: the same plate
+                 treatment the menu uses, so a recommendation reads like the
+                 menu instead of a list of names. */
+              <li key={`${message.id}-dishes-${index}`} className="w-full">
+                <p className="mb-1.5 text-xs font-medium text-ink-muted">{action.label}</p>
+                <ul className="flex gap-2 overflow-x-auto pb-1">
+                  {action.dishes.map((dish) => (
+                    <li key={dish.id} className="w-32 shrink-0">
+                      <DishPhoto item={dish} sizes="128px" muted={!dish.is_available} />
+                      <p className="mt-1 truncate font-display text-xs text-ink">{dish.name}</p>
+                      <p className="text-[11px] text-ink-subtle">
+                        {formatPrice(dish.price)}
+                        {dish.is_available ? "" : " · ran out"}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ) : (
+              <li
+                key={`${message.id}-action-${index}`}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-xs font-medium",
+                  action.ok
+                    ? "border-ready/35 bg-ready-surface text-ready"
+                    : "border-alert/35 bg-alert-surface text-alert",
+                )}
+              >
+                {action.ok ? (
+                  <Check className="size-3" aria-hidden />
+                ) : (
+                  <TriangleAlert className="size-3" aria-hidden />
+                )}
+                {action.label}
+              </li>
+            ),
+          )}
         </ul>
       ) : null}
     </li>
@@ -469,7 +519,25 @@ function buildRuntime(live: LiveTableValue, tableToken: string, userName: string
       apiRemoveCartItem({ table_token: tableToken, cart_item_id: cartItemId }),
     fireOrder: () => apiFireOrder(tableToken),
     requestBill: () => apiRequestTableBill(tableToken),
+    leaveFeedback: (input) => apiSubmitTableFeedback(tableToken, input),
     refresh: () => live.refresh(),
     now: Date.now,
   };
+}
+
+/** The mic's own feedback: three bars that move with the guest's voice, so it
+    is obvious the phone is hearing them. Minimal by design — no waveform. */
+function MicLevelIcon({ listening, level }: { listening: boolean; level: number }) {
+  if (!listening) return <Mic className="size-4" aria-hidden />;
+  return (
+    <span aria-hidden className="flex h-4 items-end gap-[3px]">
+      {[0.45, 1, 0.7].map((scale, index) => (
+        <span
+          key={index}
+          className="w-[3px] rounded-pill bg-current transition-[height] duration-75 ease-out"
+          style={{ height: `${4 + Math.min(1, level * 2.2) * 12 * scale}px` }}
+        />
+      ))}
+    </span>
+  );
 }

@@ -105,3 +105,5 @@ export {
 } from "./normalize";
 export { fetchAllPages, MAX_PAGE_FETCHES, type PagedResult } from "./paginate";
 export { setRealtimeAuth, getRealtimeAuth } from "./realtime-auth";
+
+export * from "./insights";

@@ -226,6 +226,17 @@ describe("recommend_dishes", () => {
     const picks = recommendDishes([{ ...DOSA, is_available: false }], { diet: "any" });
     assert.deepEqual(picks, []);
   });
+
+  it("hands the sheet the matching dishes so it can show their photos", async () => {
+    const { runtime } = makeRuntime();
+    const result = await executeTool("recommend_dishes", { diet: "vegetarian" }, runtime);
+
+    const card = result.actions.find((action) => (action.dishes ?? []).length > 0);
+    assert.ok(card, "a recommendation must carry dishes, not just a label");
+    assert.ok(card.dishes.every((dish) => typeof dish.name === "string" && typeof dish.price === "number"));
+    // The card carries a real catalogue item, which is what DishPhoto resolves.
+    assert.ok(card.dishes.some((dish) => dish.id === DOSA.id));
+  });
 });
 
 describe("tool argument parsing", () => {

@@ -20,6 +20,12 @@ export interface ChhotuAction {
   kind: "cart" | "order" | "bill" | "info";
   label: string;
   ok: boolean;
+  /** Dishes to show as photo cards under the reply. These stay in the
+      browser — they are for the SHEET, not part of the functionResponse — so
+      the sheet reuses the product's one plate treatment (curated photo,
+      uploaded photo, designed fallback) instead of inventing an image.
+      Read tools only: a write never needs a catalogue. */
+  dishes?: MenuItem[];
 }
 
 /** The API surface a tool may use. Built by the sheet from `useLiveTable` +
@@ -50,6 +56,11 @@ export interface ChhotuRuntime {
   removeCartItem(cartItemId: string): Promise<CartRemovalResult>;
   fireOrder(): Promise<FiredOrder>;
   requestBill(): Promise<BillRequest>;
+  /** Records a 1–5 rating the guest gave out loud, against this table. */
+  leaveFeedback(input: { rating: number; comment?: string }): Promise<{
+    feedback_id: string;
+    rating: number;
+  }>;
   /** Re-read menu/cart/orders after a mutation (requirement #4). */
   refresh(): Promise<void>;
   /** Injectable clock so wait-time maths is testable. */
