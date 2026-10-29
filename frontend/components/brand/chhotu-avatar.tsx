@@ -24,11 +24,11 @@ export function ChhotuAvatar({ size = "md", className }: ChhotuAvatarProps) {
   return (
     <span
       aria-hidden
-      className={cn("relative inline-flex shrink-0", sizes[size], className)}
+      className={cn("relative inline-flex shrink-0 rounded-pill", sizes[size], className)}
     >
-      {/* The bubble body and its tail, drawn behind the portrait. */}
+      {/* One thin ember ring behind the portrait — no tail: a rotated square
+          poking out of a circular avatar reads as a stray element on screen. */}
       <span className="absolute inset-0 rounded-pill bg-ember-soft ring-1 ring-ember/25" />
-      <span className="absolute bottom-0 left-1.5 size-2 rotate-45 rounded-[2px] bg-ember-soft ring-1 ring-ember/25" />
 
       <span className="relative m-[2px] overflow-hidden rounded-pill">
         <Image
