@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Modal } from "@/components/ui/modal";
 import type { LiveTableValue } from "@/hooks/use-live-table";
+import { getTableMembers } from "@/lib/api-client";
 import { encodePassPayload } from "@/lib/diner/table-pass";
 import { formatPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -107,21 +108,50 @@ export function TablePassModal({
 
   const drawing = qr?.key === payloadKey ? qr : null;
 
-  /* Who the table knows about. The API names a guest on every cart line and
-     every fired line, so those names ARE the table's membership as far as the
-     kitchen is concerned — plus this device, which is here whether or not it
-     has ordered yet. A refused round is still shown as a round the table
-     placed, but it never contributes food or money. */
+  /* The ROSTER is read from the server (docs/14 #16): table_members records
+     every guest who joined, including one who has not ordered yet. It is
+     refreshed while the pass is open, so a tablemate who joins now appears.
+     If the read fails the derived names (from order/cart attribution) are
+     still shown — the pass must not go blank because one request failed. */
+  const [roster, setRoster] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    let cancelled = false;
+
+    const load = () => {
+      getTableMembers(tableToken)
+        .then((rows) => {
+          if (cancelled) return;
+          setRoster(rows.map((row) => row.name.trim() || "Guest"));
+        })
+        .catch(() => {
+          /* keep the derived fallback that is already on screen */
+        });
+    };
+
+    load();
+    const timer = window.setInterval(load, 15_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [open, tableToken]);
+
+  /* A refused round is still shown as a round the table placed, but it never
+     contributes food or money. */
   const { orders, cart, menuIndex } = live;
   const billable = orders.filter((order) => order.status !== "denied");
 
-  const names = new Set<string>([displayName]);
+  const derivedNames = new Set<string>();
   let orderedDishes = 0;
   let runningTotal = 0;
 
   for (const order of billable) {
     for (const item of order.items) {
-      names.add(ownerName(item.added_by));
+      derivedNames.add(ownerName(item.added_by));
       orderedDishes += item.quantity;
       runningTotal += item.price * item.quantity;
     }
@@ -129,12 +159,17 @@ export function TablePassModal({
 
   let stagedDishes = 0;
   for (const line of cart) {
-    names.add(ownerName(line.added_by));
+    derivedNames.add(ownerName(line.added_by));
     stagedDishes += line.quantity;
     runningTotal += (menuIndex.get(line.menu_item_id)?.price ?? 0) * line.quantity;
   }
 
-  const members = [displayName, ...[...names].filter((name) => name !== displayName).sort()];
+  const knownNames = new Set<string>(roster && roster.length > 0 ? roster : derivedNames);
+  knownNames.add(displayName);
+  const members = [
+    displayName,
+    ...[...knownNames].filter((name) => name !== displayName).sort(),
+  ];
   const rounds = billable.length;
 
   return (
@@ -235,22 +270,28 @@ export function TablePassModal({
             })}
           </ul>
           <p className="text-xs leading-relaxed text-ink-subtle">
-            Joins this list as soon as they add a dish.
+            Everyone who has joined this table, whether they have ordered yet or not.
           </p>
 
           {/* Rows, not a three-across strip: the details column is narrow, and
               "Rs. 310.00" wrapping onto two lines reads as a broken number. */}
           <dl className="flex flex-col gap-1.5 rounded-lg border border-line bg-surface-sunken/60 px-3 py-2.5">
             <div className="flex items-baseline justify-between gap-3">
-              <dt className="text-xs text-ink-muted">Dishes ordered</dt>
+              <dt className="text-xs text-ink-muted">
+                {rounds === 0 ? "Dishes chosen" : "Dishes ordered"}
+              </dt>
               <dd className="text-sm font-semibold text-ink tabular-nums">
                 {orderedDishes + stagedDishes}
               </dd>
             </div>
-            <div className="flex items-baseline justify-between gap-3">
-              <dt className="text-xs text-ink-muted">Rounds fired</dt>
-              <dd className="text-sm font-semibold text-ink tabular-nums">{rounds}</dd>
-            </div>
+            {/* docs/14 #20 — "3 dishes / 0 rounds" read as a contradiction.
+                An unfired cart simply has no rounds row. */}
+            {rounds > 0 ? (
+              <div className="flex items-baseline justify-between gap-3">
+                <dt className="text-xs text-ink-muted">Rounds fired</dt>
+                <dd className="text-sm font-semibold text-ink tabular-nums">{rounds}</dd>
+              </div>
+            ) : null}
             <div className="flex items-baseline justify-between gap-3">
               <dt className="text-xs text-ink-muted">Running total</dt>
               <dd className="font-display text-sm font-semibold text-ink tabular-nums">
@@ -260,8 +301,9 @@ export function TablePassModal({
           </dl>
             {stagedDishes > 0 ? (
               <p className="text-xs text-ember">
-                {stagedDishes} {stagedDishes === 1 ? "dish is" : "dishes are"} still in the cart, not
-                fired yet.
+                {rounds === 0
+                  ? `${stagedDishes} ${stagedDishes === 1 ? "dish" : "dishes"} ordered, none sent to the kitchen yet.`
+                  : `${stagedDishes} ${stagedDishes === 1 ? "dish is" : "dishes are"} still in the cart, not fired yet.`}
               </p>
             ) : null}
           </section>

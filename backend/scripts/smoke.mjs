@@ -127,10 +127,15 @@ try {
   let sessionSecret = null;
   let sessionTableId = null;
 
+  /* Every session entry point now requires a name (the gate collects one
+     before it calls anything), so the smoke run identifies itself like a real
+     guest instead of relying on a "Guest" fallback. */
+  const GUEST = { user_id: "smoke-device", name: "Smoke Tester" };
+
   {
     const r = await api("/api/v1/sessions/initialize", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN },
+      body: { table_token: TABLE_TOKEN, ...GUEST },
     });
     const data = r.body?.data ?? {};
     sessionPin = data.session_pin ?? null;
@@ -151,7 +156,7 @@ try {
     // The same table QR, scanned by a second phone: no credentials, no data.
     const again = await api("/api/v1/sessions/initialize", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN },
+      body: { table_token: TABLE_TOKEN, ...GUEST },
     });
     const locked = again.body?.data ?? {};
     check("E1 second scan of a live table → locked", locked.status === "locked", `got ${locked.status}`);
@@ -162,16 +167,31 @@ try {
 
     const bad = await api("/api/v1/sessions/initialize", {
       method: "POST",
-      body: { table_token: "zzzz" },
+      body: { table_token: "zzzz", ...GUEST },
     });
     check("E1 unknown token → 404 TABLE_NOT_FOUND", bad.body?.error?.code === "TABLE_NOT_FOUND");
 
     const malformed = await api("/api/v1/sessions/initialize", {
       method: "POST",
-      body: { table_token: "BAD TOKEN!" },
+      body: { table_token: "BAD TOKEN!", ...GUEST },
     });
     check("E1 malformed token → 400 VALIDATION_ERROR", malformed.body?.error?.code === "VALIDATION_ERROR");
     check("E1 validation carries error.fields", Boolean(malformed.body?.error?.fields));
+
+    // The name is part of the contract now: an unnamed guest is refused, so a
+    // ticket can never be created without someone to attribute it to.
+    const unnamed = await api("/api/v1/sessions/initialize", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN },
+    });
+    check("E1 without a name → 400 VALIDATION_ERROR", unnamed.body?.error?.code === "VALIDATION_ERROR", `got ${unnamed.body?.error?.code}`);
+    check("E1 name error names the field", Boolean(unnamed.body?.error?.fields?.name), JSON.stringify(unnamed.body?.error?.fields ?? {}));
+
+    const blankName = await api("/api/v1/sessions/initialize", {
+      method: "POST",
+      body: { table_token: TABLE_TOKEN, user_id: "smoke-device", name: "   " },
+    });
+    check("E1 whitespace-only name → 400", blankName.body?.error?.code === "VALIDATION_ERROR", `got ${blankName.body?.error?.code}`);
   }
 
   {
@@ -180,14 +200,14 @@ try {
 
     const first = await api("/api/v1/sessions/join-pin", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, pin: wrongPin },
+      body: { table_token: TABLE_TOKEN, pin: wrongPin, ...GUEST },
     });
     check("E1b wrong PIN → 401 INVALID_SESSION_PIN", first.body?.error?.code === "INVALID_SESSION_PIN", `got ${first.body?.error?.code}`);
     check("E1b wrong PIN reports 2 attempts left", first.body?.error?.attempts_remaining === 2, `got ${first.body?.error?.attempts_remaining}`);
 
     const second = await api("/api/v1/sessions/join-pin", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, pin: wrongPin },
+      body: { table_token: TABLE_TOKEN, pin: wrongPin, ...GUEST },
     });
     check("E1b second wrong PIN → 401", second.body?.error?.code === "INVALID_SESSION_PIN");
     check("E1b second wrong PIN reports 1 attempt left", second.body?.error?.attempts_remaining === 1, `got ${second.body?.error?.attempts_remaining}`);
@@ -195,7 +215,7 @@ try {
     // The 3rd wrong PIN IS the lock (confirmed product decision).
     const third = await api("/api/v1/sessions/join-pin", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, pin: wrongPin },
+      body: { table_token: TABLE_TOKEN, pin: wrongPin, ...GUEST },
     });
     check("E1b third wrong PIN → 423 TABLE_PIN_LOCKED", third.body?.error?.code === "TABLE_PIN_LOCKED", `got ${third.body?.error?.code}`);
     check("E1b the lock reports 0 attempts left", third.body?.error?.attempts_remaining === 0, `got ${third.body?.error?.attempts_remaining}`);
@@ -203,19 +223,19 @@ try {
     // Even the CORRECT PIN is refused while the table is flagged.
     const correctWhileLocked = await api("/api/v1/sessions/join-pin", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, pin: sessionPin },
+      body: { table_token: TABLE_TOKEN, pin: sessionPin, ...GUEST },
     });
     check("E1b correct PIN while flagged → 423", correctWhileLocked.body?.error?.code === "TABLE_PIN_LOCKED", `got ${correctWhileLocked.body?.error?.code}`);
 
     const flagged = await api("/api/v1/sessions/initialize", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN },
+      body: { table_token: TABLE_TOKEN, ...GUEST },
     });
     check("E1 initialize reports the table flagged", flagged.body?.data?.pin_locked === true);
 
     const badShape = await api("/api/v1/sessions/join-pin", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, pin: "7" },
+      body: { table_token: TABLE_TOKEN, pin: "7", ...GUEST },
     });
     check("E1b one-digit PIN → 400 VALIDATION_ERROR", badShape.body?.error?.code === "VALIDATION_ERROR", `got ${badShape.body?.error?.code}`);
 
@@ -223,45 +243,45 @@ try {
     const wrongPass = sessionSecret === "A".repeat(20) ? "B".repeat(20) : "A".repeat(20);
     const rejected = await api("/api/v1/sessions/join-pass", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, secret: wrongPass },
+      body: { table_token: TABLE_TOKEN, secret: wrongPass, ...GUEST },
     });
     check("E1c wrong pass → 401 INVALID_SESSION_SECRET", rejected.body?.error?.code === "INVALID_SESSION_SECRET", `got ${rejected.body?.error?.code}`);
 
     const shortPass = await api("/api/v1/sessions/join-pass", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, secret: "too-short" },
+      body: { table_token: TABLE_TOKEN, secret: "too-short", ...GUEST },
     });
     check("E1c 9-character pass → 400 VALIDATION_ERROR", shortPass.body?.error?.code === "VALIDATION_ERROR", `got ${shortPass.body?.error?.code}`);
 
     const pass = await api("/api/v1/sessions/join-pass", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, secret: sessionSecret },
+      body: { table_token: TABLE_TOKEN, secret: sessionSecret, ...GUEST },
     });
     check("E1c correct pass → 200 active", pass.status === 200 && pass.body?.data?.status === "active", `got ${pass.status} / ${pass.body?.data?.status}`);
     check("E1c pass returns the table's PIN", pass.body?.data?.session_pin === sessionPin);
 
     const unflagged = await api("/api/v1/sessions/initialize", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN },
+      body: { table_token: TABLE_TOKEN, ...GUEST },
     });
     check("E1c the pass resets the 3-strike flag", unflagged.body?.data?.pin_locked === false);
 
     const afterUnlock = await api("/api/v1/sessions/join-pin", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, pin: sessionPin },
+      body: { table_token: TABLE_TOKEN, pin: sessionPin, ...GUEST },
     });
     check("E1b correct PIN after an unlock → 200", afterUnlock.body?.data?.status === "active", `got ${afterUnlock.body?.error?.code ?? afterUnlock.body?.data?.status}`);
 
     // ---- Reconnect: a refresh must not re-prompt -----------------------
     const reconnect = await api("/api/v1/sessions/reconnect", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, secret: sessionSecret },
+      body: { table_token: TABLE_TOKEN, secret: sessionSecret, ...GUEST },
     });
     check("E1d reconnect with the pass → 200", reconnect.status === 200 && reconnect.body?.data?.status === "active", `got ${reconnect.status}`);
 
     const stale = await api("/api/v1/sessions/reconnect", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN, secret: wrongPass },
+      body: { table_token: TABLE_TOKEN, secret: wrongPass, ...GUEST },
     });
     check("E1d reconnect with a stale pass → 403 SESSION_ENDED", stale.body?.error?.code === "SESSION_ENDED", `got ${stale.body?.error?.code}`);
   }
@@ -399,6 +419,23 @@ try {
 
     const dupe = await api("/api/v1/orders/fire", { method: "POST", body: { table_token: TABLE_TOKEN } });
     check("E8 duplicate fire → 409 DUPLICATE_ORDER", dupe.body?.error?.code === "DUPLICATE_ORDER", `got ${dupe.body?.error?.code}`);
+
+    /* E16 is scoped to the CURRENT seating, and the frozen bill must be on it
+       while the party is still sitting there (docs/14 #21). */
+    const seating = await api(`/api/v1/orders?table_token=${TABLE_TOKEN}&limit=100`);
+    const seatingRow = (seating.body?.data ?? []).find((o) => o.order_id === orderId);
+    const seatingLine = seatingRow?.items?.[0];
+    check("E16 history has this seating's order", Boolean(seatingRow));
+    check(
+      "E16 history carries the fire-time unit price",
+      seatingLine?.unit_price === target.price,
+      `got ${seatingLine?.unit_price} expected ${target.price}`,
+    );
+    check(
+      "E16 frozen total equals qty x unit price",
+      seatingRow?.total === (seatingLine?.quantity ?? 0) * target.price,
+      `got total ${seatingRow?.total} for qty ${seatingLine?.quantity} @ ${target.price}`,
+    );
     check("E8 duplicate carries error.order_id", dupe.body?.error?.order_id === orderId);
 
     const active = await api(`/api/v1/sessions/${TABLE_TOKEN}/active-check`);
@@ -586,7 +623,7 @@ try {
     // The next party's scan starts from a genuinely fresh credential pair.
     const fresh = await api("/api/v1/sessions/initialize", {
       method: "POST",
-      body: { table_token: TABLE_TOKEN },
+      body: { table_token: TABLE_TOKEN, ...GUEST },
     });
     check("E1 next scan claims the released table", fresh.body?.data?.status === "active", `got ${fresh.body?.data?.status}`);
     check(
@@ -612,23 +649,15 @@ try {
     check("E17 returns all 5 tables", (floor.body?.data ?? []).length === 5, `got ${(floor.body?.data ?? []).length}`);
     check("E17 table exposes cart_line_count", "cart_line_count" in (floor.body?.data?.[0] ?? {}));
 
+    /* The auto-release above handed this table to its next party. Orders die
+       with the seating (docs/14 #21), so a freshly-scanned table must show an
+       EMPTY history — never the previous party's food. Revenue survives in
+       the sales rollup that admin analytics reads (sql/012). */
     const history = await api(`/api/v1/orders?table_token=${TABLE_TOKEN}&limit=100`);
-    check("E16 history contains the served order", (history.body?.data ?? []).some((o) => o.order_id === orderId));
-    check("E16 newest-first ordering", (history.body?.data?.[0]?.order_id ?? null) === orderId);
-
-    // The frozen bill must survive on history too, and equal quantity × the
-    // charged unit price (2 + 1 merged + 2 delta = qty 5 in this run).
-    const hist = (history.body?.data ?? []).find((o) => o.order_id === orderId);
-    const histLine = hist?.items?.[0];
     check(
-      "E16 history carries the fire-time unit price",
-      histLine?.unit_price === target.price,
-      `got ${histLine?.unit_price} expected ${target.price}`,
-    );
-    check(
-      "E16 frozen total equals qty x unit price",
-      hist?.total === (histLine?.quantity ?? 0) * target.price,
-      `got total ${hist?.total} for qty ${histLine?.quantity} @ ${target.price}`,
+      "E16 after a clear returns no previous-party orders",
+      (history.body?.data ?? []).length === 0,
+      `got ${(history.body?.data ?? []).length} row(s)`,
     );
 
     const shift = await api("/api/v1/kds/shift/activate", {

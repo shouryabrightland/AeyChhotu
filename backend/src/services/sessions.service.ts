@@ -67,11 +67,13 @@ const SESSION_COLUMNS =
   "id, code, name, status, session_pin, session_secret, failed_pin_attempts, session_started_at, bill_status, last_cleared_at";
 
 /* The identity a device registers at the table (sql/011 table_members).
-   Anonymous and optional: a client that does not send one still joins, it
-   just does not appear on the roster. */
+
+   `name` is required by the API schemas — every session entry point carries
+   the name the gate collected. `user_id` stays optional so a payload without
+   a device id still joins; it just does not get a roster row. */
 export interface TableMemberInput {
   user_id?: string;
-  name?: string;
+  name: string;
 }
 
 /** Extra context every session entry point accepts. */
@@ -229,21 +231,20 @@ function assertFreshSession(table: SessionRow, scanTime: string | undefined): vo
 /* Registers (or refreshes) one person at the table. Called on every path
    that GRANTS a session, so the roster always matches who actually joined.
    ON CONFLICT makes a reconnect an update, never a duplicate member. */
+const MEMBER_UPSERT_SQL = `INSERT INTO table_members (table_id, user_id, name)
+      VALUES ($1, $2, $3)
+ ON CONFLICT (table_id, user_id)
+   DO UPDATE SET name = EXCLUDED.name`;
+
 async function upsertTableMember(
   client: PoolClient,
   tableId: string,
   member: TableMemberInput | undefined,
 ): Promise<void> {
   const userId = member?.user_id?.trim();
-  if (!userId) return;
+  if (!userId || !member) return;
 
-  await client.query(
-    `INSERT INTO table_members (table_id, user_id, name)
-          VALUES ($1, $2, $3)
-     ON CONFLICT (table_id, user_id)
-       DO UPDATE SET name = EXCLUDED.name`,
-    [tableId, userId, member?.name?.trim() || "Guest"],
-  );
+  await client.query(MEMBER_UPSERT_SQL, [tableId, userId, member.name]);
 }
 
 /* E1 — POST /api/v1/sessions/initialize.
@@ -519,7 +520,7 @@ export async function joinWithPass(input: {
 export async function reconnectSession(input: {
   table_token: string;
   secret: string;
-} & Pick<SessionEntryOptions, "scan_time">): Promise<GrantedSession> {
+} & Pick<SessionEntryOptions, "scan_time" | "member">): Promise<GrantedSession> {
   const table = await requireSessionRow(input.table_token);
 
   assertFreshSession(table, input.scan_time);
@@ -531,6 +532,17 @@ export async function reconnectSession(input: {
     // Deliberately the SAME code as a settled table: a stale secret must not
     // be able to tell an attacker "close, but the session is still live".
     throw new AppError(403, "SESSION_ENDED", SESSION_ENDED_MESSAGE);
+  }
+
+  /* A refresh is also the moment a returning guest can fix their name: the
+     same upsert refreshes table_members, so the roster and the pass sheet
+     stop showing an older spelling. Best-effort by design — a roster write
+     must never turn a valid reconnect into a failure. */
+  const userId = input.member?.user_id?.trim();
+  if (userId && input.member?.name) {
+    await pool
+      .query(MEMBER_UPSERT_SQL, [table.id, userId, input.member.name])
+      .catch(() => undefined);
   }
 
   return grantedSession(table);
@@ -646,10 +658,19 @@ export async function checkAndAutoReleaseTable(tableId: string): Promise<AutoRel
 }
 
 /* Shared cleanup for every path that hands a table to its next party:
-   auto-release, a staff clear, and an admin override. Orders are history and
-   are never deleted; the session credentials, cart, roster and presence all
-   die, and `last_cleared_at` records WHEN — that timestamp is what makes a
-   long-cached phone page answer STALE_SESSION instead of seating a stranger. */
+   auto-release, a staff clear, and an admin override.
+
+   DECISION (docs/14 #21): the ORDERS die with the seating. A table belongs to
+   one party at a time, and a new party must never inherit the previous one's
+   running total, tracker or "split by person" list. Sales are not lost: the
+   moment a ticket reaches `served` the database rolls it up into `sales_day`
+   / `sales_rollup` (sql/012), which is what the admin analytics reads. Open
+   tickets are blocked from reaching this function by the callers, so the rows
+   removed here are already served/denied.
+
+   `last_cleared_at` records WHEN the hand-over happened — that timestamp is
+   what makes a long-cached phone page answer STALE_SESSION instead of seating
+   a stranger. */
 async function clearTableRows(client: PoolClient, tableId: string): Promise<void> {
   await client.query(
     `UPDATE restaurant_tables
@@ -670,6 +691,8 @@ async function clearTableRows(client: PoolClient, tableId: string): Promise<void
   await client.query("DELETE FROM cart_items WHERE table_id = $1", [tableId]);
   await client.query("DELETE FROM table_members WHERE table_id = $1", [tableId]);
   await client.query("DELETE FROM table_device_presence WHERE table_id = $1", [tableId]);
+  // order_items cascade with their order. Rolled up first (sql/012 trigger).
+  await client.query("DELETE FROM orders WHERE table_id = $1", [tableId]);
 }
 
 export type ClearTableOutcome = "cleared" | "not_found" | "active_orders" | "unpaid";
@@ -850,6 +873,112 @@ export async function requestTableBill(tableToken: string): Promise<BillRequestR
     bill_status: current.bill_status,
     bill_requested_at: current.bill_requested_at ? iso(current.bill_requested_at) : null,
   };
+}
+
+/* GET /api/v1/sessions/:table_token — the diner's own table state.
+
+   Why this exists (docs/14 #3 and #5): without Supabase a diner's phone had
+   no way to learn that the floor settled the bill or cleared the table, and
+   the bill itself lived in a browser-local store. This is the REST read the
+   diner's poll uses, so `bill_status` and `status` are SERVER truth on every
+   device. It is scoped by the table token, exactly like bill-request, and
+   returns no credentials. */
+export interface TableStateResult {
+  table_id: string;
+  code: string;
+  name: string;
+  status: "active" | "empty";
+  bill_status: BillStatus;
+  bill_requested_at: string | null;
+  bill_paid_at: string | null;
+  session_started_at: string | null;
+  /** Devices that beat inside the release window. */
+  active_devices: number;
+  /** pending / preparing / ready tickets on this seating. */
+  active_orders: number;
+}
+
+export async function getTableState(tableToken: string): Promise<TableStateResult> {
+  const res = await pool.query<{
+    id: string;
+    code: string;
+    name: string;
+    status: string;
+    bill_status: BillStatus;
+    bill_requested_at: Date | null;
+    bill_paid_at: Date | null;
+    session_started_at: Date | null;
+    active_devices: number;
+    active_orders: number;
+  }>(
+    `SELECT t.id,
+            t.code,
+            t.name,
+            t.status,
+            t.bill_status,
+            t.bill_requested_at,
+            t.bill_paid_at,
+            t.session_started_at,
+            (SELECT count(*)::int
+               FROM table_device_presence p
+              WHERE p.table_id = t.id
+                AND p.last_seen > now() - ($2 || ' seconds')::interval) AS active_devices,
+            (SELECT count(*)::int
+               FROM orders o
+              WHERE o.table_id = t.id
+                AND o.status IN ('pending', 'preparing', 'ready')) AS active_orders
+       FROM restaurant_tables t
+      WHERE t.code = $1 AND t.deleted_at IS NULL`,
+    [tableToken, RELEASE_PRESENCE_WINDOW_SECONDS],
+  );
+
+  const row = res.rows[0];
+  if (!row) {
+    throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table token parsed.");
+  }
+
+  return {
+    table_id: row.id,
+    code: row.code,
+    name: row.name,
+    status: row.status === "active" ? "active" : "empty",
+    bill_status: row.bill_status,
+    bill_requested_at: row.bill_requested_at ? iso(row.bill_requested_at) : null,
+    bill_paid_at: row.bill_paid_at ? iso(row.bill_paid_at) : null,
+    session_started_at: row.session_started_at ? iso(row.session_started_at) : null,
+    active_devices: row.active_devices,
+    active_orders: row.active_orders,
+  };
+}
+
+export interface TableMember {
+  user_id: string;
+  name: string;
+  joined_at: string;
+}
+
+/* GET /api/v1/sessions/:table_token/members — the real roster (docs/14 #16).
+
+   `upsertTableMember` has always recorded who joined; nothing exposed it, so
+   the Table Pass had to infer names from order/cart `added_by` and a guest
+   who joined without ordering was invisible. Capability-scoped by the table
+   token, credentials never returned. */
+export async function listTableMembers(tableToken: string): Promise<TableMember[]> {
+  const table = await requireTable(tableToken);
+
+  const res = await pool.query<{ user_id: string; name: string; joined_at: Date }>(
+    `SELECT user_id, name, joined_at
+       FROM table_members
+      WHERE table_id = $1
+      ORDER BY joined_at, id`,
+    [table.id],
+  );
+
+  return res.rows.map((row) => ({
+    user_id: row.user_id,
+    name: row.name,
+    joined_at: iso(row.joined_at),
+  }));
 }
 
 export interface HeartbeatResult {

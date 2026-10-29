@@ -65,22 +65,42 @@ export function MenuBrowser({
 
   /* The tree is decoration over the dishes: while it loads (or if it fails),
      the fallback grouping is what renders. An error is deliberately silent —
-     a guest should never be shown "category service unavailable". */
+     a guest should never be shown "category service unavailable".
+
+     docs/14 #7: a renamed / new folder must reach an open diner screen, so
+     the tree is re-read whenever the menu reloads (an 86, a realtime menu
+     event, the soft refresh). A failed read retries on its own instead of
+     leaving the flat fallback in place for the whole visit. */
+  const [categoryRetry, setCategoryRetry] = useState(0);
+
   useEffect(() => {
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     getMenuCategories()
       .then((rows) => {
-        if (!cancelled) setCategories(rows);
+        if (cancelled) return;
+        // Identical tree ⇒ keep the old array; nothing needs re-rendering.
+        setCategories((current) =>
+          JSON.stringify(current) === JSON.stringify(rows) ? current : rows,
+        );
       })
       .catch(() => {
-        if (!cancelled) setCategories([]);
+        if (cancelled) return;
+        // Keep whatever is on screen (fallback or the last good tree); try
+        // again shortly instead of giving up for the rest of the visit.
+        setCategories((current) => current ?? []);
+        retryTimer = setTimeout(() => {
+          if (!cancelled) setCategoryRetry((count) => count + 1);
+        }, 10_000);
       });
 
     return () => {
       cancelled = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
     };
-  }, []);
+    // `menu` is a fresh array on every menu reload — that is the trigger.
+  }, [menu, categoryRetry]);
 
   /* The filter narrows the menu BEFORE the sections are built, so a folder
      only ever holds dishes the guest can order under the active diet. */
@@ -198,8 +218,9 @@ export function MenuBrowser({
                 description="Swipe right to add, left to skip — or use the buttons."
               />
               <DishDeck
-                /* Remount when the result set changes, so a skipped list can
-                   never hold a dish that is no longer in the deck. */
+                /* Remount only when the RESULT SET changes; availability and
+                   price changes are reconciled inside the deck instead, so an
+                   86 does not reset the pile (docs/14 #25). */
                 key={`search:${matches.map((item) => item.id).join(",")}`}
                 items={matches}
                 quantities={quantities}

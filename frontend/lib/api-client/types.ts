@@ -116,11 +116,15 @@ export type TableScan = TableSessionGrant | TableSessionLocked;
     `scan_time` is when THIS page was opened. The backend refuses a session
     whose scan_time predates the table's last clear (STALE_SESSION), which is
     what stops a long-cached page from joining the previous party's table.
-    `user_id`/`name` register the device in table_members. */
+    `user_id`/`name` register the device in table_members.
+
+    `name` is REQUIRED: the server refuses an unnamed guest, because an
+    unnamed diner becomes an anonymous "Guest" line on the ticket and in the
+    split bill. The gate collects it before any session call. */
 export interface SessionEntryPayload {
   scan_time?: string;
   user_id?: string;
-  name?: string;
+  name: string;
 }
 
 /** E9 anti-duplicate guardrail (discriminated union). */
@@ -255,10 +259,48 @@ export interface RequeuedDeniedOrder {
   omitted: string[];
 }
 
+/** POST /api/v1/orders/:order_id/retry — one atomic re-fire of a refused
+    round. The response describes the replacement ticket; `omitted` lists the
+    dishes the kitchen no longer has. */
+export interface RetriedDeniedOrder {
+  order_id: string;
+  table_id: string;
+  status: string;
+  created_at: string;
+  moved: number;
+  omitted: string[];
+}
+
 /** POST /api/v1/orders/:order_id/dismiss — the diner's "Cancel". */
 export interface DismissedDeniedOrder {
   order_id: string;
   dismissed: true;
+}
+
+/** GET /api/v1/sessions/:table_token — the diner's own server-side table
+    state. The REST half of the table/bill polling fallback (docs/14 #3,
+    #5): `bill_status` and `status` are the server columns, not a
+    browser-local store. */
+export interface TableState {
+  table_id: string;
+  code: string;
+  name: string;
+  status: TableStatus;
+  bill_status: BillStatus;
+  bill_requested_at: string | null;
+  bill_paid_at: string | null;
+  session_started_at: string | null;
+  /** Devices that beat inside the release window. */
+  active_devices: number;
+  /** pending / preparing / ready tickets on this seating. */
+  active_orders: number;
+}
+
+/** GET /api/v1/sessions/:table_token/members — the real roster. */
+export interface TableMember {
+  user_id: string;
+  name: string;
+  joined_at: string;
 }
 
 /** E7 response. */

@@ -9,16 +9,29 @@
       hook moves to its real `error` phase. The screen shows the API's own
       message and a Retry button. Nothing is ever served from a seeded local
       store: a guest looking at a menu must be looking at the kitchen's menu.
-   3. Realtime: `table_carts` streams cart mutations and `order_tracker` (via
-      watchOrderStatus) streams status flips, with REST polling underneath as
-      the WebSocket safety net.
+   3. Realtime: `table_carts` streams cart mutations, `order_tracker` streams
+      status flips and `restaurant_tables` streams bill/settle/clear. Every one
+      of them has a REST fallback underneath:
+        * cart     — 5 s poll
+        * table    — 5 s poll of `GET /sessions/:token` (bill + status)
+        * orders   — 15 s poll
+      so a deployment without Supabase is slower, never frozen.
 
    One instance powers the menu screen, the cart modal and the tracker, so
-   every view at a table observes exactly the same snapshot. */
+   every view at a table observes exactly the same snapshot.
+
+   HOUSE RULES THIS FILE KEEPS:
+   * `bill_status` comes from the SERVER (docs/14 #5). The old browser-local
+     bill store is gone from every live screen; two phones cannot disagree.
+   * Refreshing is SOFT (#1): it re-reads and swaps the snapshot in place, so
+     the menu, the deck position, skipped cards and scroll survive.
+   * Cart writes are optimistic (#4): an add, a ± tap and a remove all paint
+     first and reconcile after, with the badge reading "Syncing".
+   * A poll can never manufacture "someone else changed the cart" (#6): the
+     external diff is skipped whenever a local write overlapped the request. */
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useBills } from "@/hooks/use-bills";
 import {
   ApiError,
   dismissDeniedOrder as apiDismissDeniedOrder,
@@ -27,9 +40,12 @@ import {
   getCartItems as apiGetCartItems,
   getMenu as apiGetMenu,
   getOrders as apiGetOrders,
+  getTableState as apiGetTableState,
   checkActiveOrder,
   removeCartItem as apiRemoveCartItem,
+  requestTableBill as apiRequestTableBill,
   requeueDeniedOrder as apiRequeueDeniedOrder,
+  retryDeniedOrder as apiRetryDeniedOrder,
   subscribeMenuUpdates,
   subscribeTableCart,
   subscribeTableUpdates,
@@ -40,13 +56,10 @@ import {
   updateCartItem as apiUpdateCartItem,
   upsertCartItem as apiUpsertCartItem,
   watchOrderStatus,
+  type BillStatus,
 } from "@/lib/api-client";
-import { settleBill } from "@/lib/api/bill";
-import {
-  clearStoredSession,
-  forgetGrantedSession,
-  getGrantedSession,
-} from "@/lib/api/table-session";
+import { getStoredDisplayName } from "@/lib/api/session";
+import { clearStoredSession, forgetGrantedSession, getGrantedSession } from "@/lib/api/table-session";
 import type { CartLine, MenuItem, Order, RestaurantTable } from "@/lib/api/types";
 
 export type LivePhase = "loading" | "error" | "success";
@@ -130,12 +143,18 @@ interface Snapshot {
   menu: MenuItem[];
   cart: CartLine[];
   orders: Order[];
+  billStatus: BillStatus;
+  activeDevices: number;
 }
 
 const LIST_LIMIT = 100;
 
 /** Safety-net cadence for the cart while realtime is unavailable. */
 const CART_POLL_MS = 5_000;
+/** Table status + bill lifecycle (settle/clear) without realtime. */
+const TABLE_POLL_MS = 5_000;
+/** Order history/status without realtime (watchOrderStatus has its own 5 s). */
+const ORDERS_POLL_MS = 15_000;
 
 export interface LiveTableValue {
   phase: LivePhase;
@@ -143,6 +162,8 @@ export interface LiveTableValue {
   error: ApiError | null;
   retry: () => void;
   refresh: () => Promise<void>;
+  /** A soft re-read is in flight — the refresh icon spins, nothing unmounts. */
+  refreshing: boolean;
 
   table: RestaurantTable | null;
   menu: MenuItem[];
@@ -153,6 +174,13 @@ export interface LiveTableValue {
   totals: { lineCount: number; itemCount: number; total: number };
   activeOrder: Order | null;
   soldOutInCart: MenuItem[];
+
+  /** The server's bill lifecycle for this table (source of truth). */
+  billStatus: BillStatus;
+  /** A ticket is still pending/preparing/ready — food is in the kitchen. */
+  hasCookingOrders: boolean;
+  /** Devices heartbeating on this table (server registry). */
+  activeDevices: number;
 
   /** The newest refused round, or null. Drives the denied tracker screen. */
   deniedOrder: Order | null;
@@ -183,7 +211,10 @@ export interface LiveTableValue {
   removeLine: (cartItemId: string) => Promise<void>;
   fire: () => Promise<{ ok: true } | { ok: false; failure: FireFailure }>;
 
-  /** Retry: move the still-available lines back to the cart and fire again. */
+  /** Asks the server for the bill (idempotent on the server too). */
+  requestBill: () => Promise<{ ok: boolean; message?: string }>;
+
+  /** Retry: move the still-available lines and fire again, atomically. */
   retryDenied: () => Promise<DeniedActionResult>;
   /** Move to list: the same, but stop at the editable cart. */
   moveDeniedToCart: () => Promise<DeniedActionResult>;
@@ -199,8 +230,11 @@ export function useLiveTable(tableToken: string): LiveTableValue {
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [billStatus, setBillStatus] = useState<BillStatus>("unrequested");
+  const [activeDevices, setActiveDevices] = useState(0);
   const [itemErrors, setItemErrors] = useState<Record<string, string>>({});
   const [cartNotice, setCartNotice] = useState<CartChangeNotice | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
   /* Adds this device has sent but not been answered for yet, keyed by dish.
@@ -211,10 +245,18 @@ export function useLiveTable(tableToken: string): LiveTableValue {
   const [pendingAdds, setPendingAdds] = useState<
     Record<string, { quantity: number; added_by: string }>
   >({});
+  /* The same idea for a line that already exists: a ± tap or a remove paints
+     at once and is reconciled when the server's cart is read back (#4). */
+  const [lineAdjustments, setLineAdjustments] = useState<Record<string, number>>({});
+  const [removedLines, setRemovedLines] = useState<Record<string, true>>({});
+
   /** A write is in flight: the cart badge says "Syncing" instead of lying
       about being finished. A counter, because taps can overlap. */
   const [syncing, setSyncing] = useState(false);
   const syncsInFlightRef = useRef(0);
+  /** Monotonic write counter: a poll that overlapped a local write must not
+      diff its result into a "someone else changed the cart" notice (#6). */
+  const writeSeqRef = useRef(0);
 
   /** Mirror of `cart`, so an async reload diffs against what is ON SCREEN
       rather than a stale closure. Server truth only, never the optimistic
@@ -223,29 +265,13 @@ export function useLiveTable(tableToken: string): LiveTableValue {
   const cartRef = useRef<CartLine[]>([]);
   const noticeSeqRef = useRef(0);
 
+  const tableIdRef = useRef<string | null>(null);
   const tableCodeRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
-
-  /* A server settling this table's bill erases the session. The settle signal
-     is shared across the table's tabs; the live API has no settle endpoint of
-     its own, so this local frame is what makes the diner's screen come back
-     empty instead of showing a table that was just settled. Depend on the
-     timestamp alone so a request on ANOTHER table never wipes this cart. */
-  const settledAt = useBills()[tableToken]?.settled_at ?? null;
-
-  useEffect(() => {
-    if (!settledAt) return;
-    // Deferred so the effect body itself never writes state synchronously.
-    const timer = window.setTimeout(() => {
-      if (!mountedRef.current) return;
-      cartRef.current = [];
-      setCart([]);
-      setPendingAdds({});
-      setOrders([]);
-      setItemErrors({});
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [settledAt]);
+  const refreshingRef = useRef(false);
+  /** Real data has been on screen. A failed poll or realtime refetch must
+      keep it there instead of replacing the whole screen with an error. */
+  const hasDataRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -254,27 +280,52 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     };
   }, []);
 
+  /* A settled / released / rotated session is not a screen a guest can
+     usefully retry: drop the dead credentials and let the route show its
+     SessionEndedState. Kept in one place so realtime, the poll and a manual
+     refresh all end the visit the same way. */
+  const endSession = useCallback(() => {
+    clearStoredSession(tableToken);
+    forgetGrantedSession();
+    if (!mountedRef.current) return;
+    setError(
+      new ApiError(
+        403,
+        "SESSION_ENDED",
+        "This table session has ended. Scan the table's QR code to start a new one.",
+      ),
+    );
+    setPhase("error");
+  }, [tableToken]);
+
   const applySnapshot = useCallback((snapshot: Snapshot) => {
     if (!mountedRef.current) return;
+    hasDataRef.current = true;
+    tableIdRef.current = snapshot.table.id;
+    tableCodeRef.current = snapshot.table.code;
     setTable(snapshot.table);
     setMenu(snapshot.menu);
     cartRef.current = snapshot.cart;
     setCart(snapshot.cart);
     setOrders(snapshot.orders);
+    setBillStatus(snapshot.billStatus);
+    setActiveDevices(snapshot.activeDevices);
   }, []);
 
   /* ---- Optimistic cart writes ----------------------------------------
      The cart panel must answer a tap, not a round trip: an add is painted
-     immediately (`pendingAdds`) while its write is still in flight, and the
-     badge reads "Syncing" from `syncing` until the server's own cart has been
-     read back into `cart`. */
+     immediately (`pendingAdds`), a ± tap or remove paints over the matching
+     line (`lineAdjustments` / `removedLines`), and the badge reads
+     "Syncing" until the server's own cart has been read back into `cart`. */
   const beginSync = useCallback(() => {
     syncsInFlightRef.current += 1;
+    writeSeqRef.current += 1;
     if (mountedRef.current) setSyncing(true);
   }, []);
 
   const endSync = useCallback(() => {
     syncsInFlightRef.current = Math.max(0, syncsInFlightRef.current - 1);
+    writeSeqRef.current += 1;
     if (syncsInFlightRef.current === 0 && mountedRef.current) setSyncing(false);
   }, []);
 
@@ -300,12 +351,40 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     });
   }, []);
 
+  const bumpLineAdjustment = useCallback((cartItemId: string, delta: number) => {
+    setLineAdjustments((current) => {
+      const next = { ...current };
+      const value = (next[cartItemId] ?? 0) + delta;
+      if (value === 0) delete next[cartItemId];
+      else next[cartItemId] = value;
+      return next;
+    });
+  }, []);
+
+  const clearLineAdjustment = useCallback((cartItemId: string) => {
+    setLineAdjustments((current) => {
+      if (!(cartItemId in current)) return current;
+      const next = { ...current };
+      delete next[cartItemId];
+      return next;
+    });
+  }, []);
+
+  const clearRemovedLine = useCallback((cartItemId: string) => {
+    setRemovedLines((current) => {
+      if (!(cartItemId in current)) return current;
+      const next = { ...current };
+      delete next[cartItemId];
+      return next;
+    });
+  }, []);
+
   /* This hook does NOT authenticate. The session gate has already claimed or
      joined the table and left the granted credentials in the client store;
      reading them here is what makes "is this guest in?" a single decision in
      a single place, instead of a second initialize() call that would answer
      `locked` on every reload and wipe the screen. */
-  async function loadLive(): Promise<Snapshot> {
+  const loadLive = useCallback(async (): Promise<Snapshot> => {
     const session = getGrantedSession(tableToken);
     if (!session) {
       throw new ApiError(0, "SESSION_REQUIRED", "Join this table to see its menu.");
@@ -314,11 +393,24 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     // Menu + cart must be COMPLETE (dish 101 still has to render), so they
     // walk every page. Order history stays newest-first page 1: the active
     // order is always the newest row, so the tracker can never miss it.
-    const [menu, cart, orderPage] = await Promise.all([
+    const [menuRows, cartRows, orderPage, state] = await Promise.all([
       fetchAllPages((page) => apiGetMenu(tableToken, { page, limit: LIST_LIMIT })),
       fetchAllPages((page) => apiGetCartItems(tableToken, { page, limit: LIST_LIMIT })),
       apiGetOrders(tableToken, { limit: LIST_LIMIT }),
+      apiGetTableState(tableToken),
     ]);
+
+    /* A table can be cleared between the gate's reconnect and this read.
+       Answering with the empty shell would show a menu for a session that no
+       longer exists, so this is the same SESSION_ENDED the gate understands. */
+    if (state.status !== "active") {
+      throw new ApiError(
+        403,
+        "SESSION_ENDED",
+        "This table session has ended. Scan the table's QR code to start a new one.",
+      );
+    }
+
     return {
       table: toTable({
         table_id: session.table_id,
@@ -326,11 +418,13 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         name: session.name,
         status: "active",
       }),
-      menu: menu.map(toMenuItem),
-      cart: cart.map(toCartLine),
+      menu: menuRows.map(toMenuItem),
+      cart: cartRows.map(toCartLine),
       orders: orderPage.data.map((row) => toOrder(row, session.code)),
+      billStatus: state.bill_status,
+      activeDevices: state.active_devices,
     };
-  }
+  }, [tableToken]);
 
   /** Fails the screen honestly: real message, real Retry button. */
   const fail = useCallback((err: unknown) => {
@@ -347,9 +441,16 @@ export function useLiveTable(tableToken: string): LiveTableValue {
      realtime event or the REST safety net. Only those can be news: the
      mutations below refresh on purpose, and telling a guest about their own
      tap is noise. `silent` keeps the safety net from throwing the screen into
-     its error phase over one dropped read. */
+     its error phase over one dropped read.
+
+     Race guard (#6): a poll that was in flight while a local write finished
+     must not diff its (older) result against the fresh cart. The write
+     counter is captured before the request and compared after; any overlap
+     means the result is applied silently. */
   const reloadCart = useCallback(
     async (source: CartSyncSource = "local", silent = false) => {
+      const seqAtStart = writeSeqRef.current;
+
       try {
         const rows = await fetchAllPages((page) =>
           apiGetCartItems(tableToken, { page, limit: LIST_LIMIT }),
@@ -358,7 +459,14 @@ export function useLiveTable(tableToken: string): LiveTableValue {
 
         const next = rows.map(toCartLine);
 
-        if (source === "external") {
+        /* Nothing new ⇒ do not touch state. The 5 s poll then costs zero
+           renders on a quiet table instead of re-painting the whole menu. */
+        if (JSON.stringify(cartRef.current) === JSON.stringify(next)) return;
+
+        /* The DISH the other device changed is only news if no write of ours
+           overlapped this read and nothing is still in flight. */
+        const cleanRead = seqAtStart === writeSeqRef.current && syncsInFlightRef.current === 0;
+        if (source === "external" && cleanRead) {
           const change = diffCart(cartRef.current, next);
           if (change) {
             noticeSeqRef.current += 1;
@@ -370,24 +478,68 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         setCart(next);
       } catch (err) {
         if (silent) return;
+        // A refetch failure keeps the cart that is already on screen.
+        if (hasDataRef.current) {
+          console.warn("cart reload failed:", err);
+          return;
+        }
         fail(err);
       }
     },
     [tableToken, fail],
   );
 
-  const reloadOrders = useCallback(async () => {
-    try {
-      // Newest-first: page 1 always holds the active order. History beyond
-      // 100 rows is archival, so it is deliberately not walked (see loadLive).
-      const page = await apiGetOrders(tableToken, { limit: LIST_LIMIT });
-      if (mountedRef.current) {
-        setOrders(page.data.map((row) => toOrder(row, tableCodeRef.current ?? tableToken)));
+  const reloadOrders = useCallback(
+    async (silent = false) => {
+      try {
+        // Newest-first: page 1 always holds the active order. History beyond
+        // 100 rows is archival, so it is deliberately not walked (see loadLive).
+        const page = await apiGetOrders(tableToken, { limit: LIST_LIMIT });
+        if (mountedRef.current) {
+          const next = page.data.map((row) => toOrder(row, tableCodeRef.current ?? tableToken));
+          setOrders((current) =>
+            JSON.stringify(current) === JSON.stringify(next) ? current : next,
+          );
+        }
+      } catch (err) {
+        if (silent) return;
+        if (hasDataRef.current) {
+          console.warn("order reload failed:", err);
+          return;
+        }
+        fail(err);
       }
-    } catch (err) {
-      fail(err);
-    }
-  }, [tableToken, fail]);
+    },
+    [tableToken, fail],
+  );
+
+  /* The server's bill lifecycle + table status. This is what replaces the
+     browser-local bill store (#5) and the missing table poll (#3): a settle
+     or a clear reaches every phone in ~5 s even with no Supabase. */
+  const reloadTableState = useCallback(
+    async (silent = true) => {
+      try {
+        const state = await apiGetTableState(tableToken);
+        if (!mountedRef.current) return;
+
+        if (state.status !== "active") {
+          endSession();
+          return;
+        }
+
+        tableIdRef.current = state.table_id;
+        setBillStatus(state.bill_status);
+        setActiveDevices(state.active_devices);
+      } catch (err) {
+        if (err instanceof ApiError && (err.error === "SESSION_ENDED" || err.error === "SESSION_REQUIRED")) {
+          endSession();
+          return;
+        }
+        if (!silent) fail(err);
+      }
+    },
+    [tableToken, endSession, fail],
+  );
 
   /* An 86 or a replaced photo must reach this screen without a refresh: the
      kitchen flips availability on the menu channel and every open diner menu
@@ -398,13 +550,22 @@ export function useLiveTable(tableToken: string): LiveTableValue {
       const rows = await fetchAllPages((page) =>
         apiGetMenu(tableToken, { page, limit: LIST_LIMIT }),
       );
-      if (mountedRef.current) setMenu(rows.map(toMenuItem));
+      if (!mountedRef.current) return;
+      const next = rows.map(toMenuItem);
+      setMenu((current) =>
+        JSON.stringify(current) === JSON.stringify(next) ? current : next,
+      );
     } catch (err) {
+      // Keep the menu already on screen; the initial load owns the error state.
+      if (hasDataRef.current) {
+        console.warn("menu reload failed:", err);
+        return;
+      }
       fail(err);
     }
   }, [tableToken, fail]);
 
-  // ---- Initial load + every retry --------------------------------------
+  // ---- Initial load + every hard retry ---------------------------------
   useEffect(() => {
     let cancelled = false;
 
@@ -416,7 +577,6 @@ export function useLiveTable(tableToken: string): LiveTableValue {
       try {
         const snapshot = await loadLive();
         if (cancelled) return;
-        tableCodeRef.current = snapshot.table.code;
         applySnapshot(snapshot);
         setPhase("success");
       } catch (err) {
@@ -434,10 +594,45 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tableToken, reloadKey]);
+  }, [tableToken, reloadKey, loadLive, applySnapshot]);
 
-  // ---- Realtime A: table_carts ----------------------------------------
+  /* ---- Soft refresh (docs/14 #1) --------------------------------------
+     The refresh icon used to bump `reloadKey`, which put the page back into
+     `loading` and unmounted the menu — losing deck position, skipped cards,
+     scroll and any open sheet. A refresh now re-reads and swaps the snapshot
+     in place; only a hard Retry (from the error screen) resets `loading`. */
+  const refresh = useCallback(async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    if (mountedRef.current) setRefreshing(true);
+
+    try {
+      const snapshot = await loadLive();
+      if (!mountedRef.current) return;
+      applySnapshot(snapshot);
+      setPhase("success");
+      setError(null);
+      setItemErrors({});
+      // A full re-read supersedes any optimistic overlay (#9).
+      setPendingAdds({});
+      setLineAdjustments({});
+      setRemovedLines({});
+    } catch (err) {
+      if (err instanceof ApiError && (err.error === "SESSION_ENDED" || err.error === "SESSION_REQUIRED")) {
+        endSession();
+      } else if (err instanceof ApiError && err.error === "TABLE_NOT_FOUND") {
+        fail(err);
+      } else {
+        // A dropped refresh keeps the screen: the polls retry.
+        console.warn("refresh failed:", err);
+      }
+    } finally {
+      refreshingRef.current = false;
+      if (mountedRef.current) setRefreshing(false);
+    }
+  }, [loadLive, applySnapshot, endSession, fail]);
+
+  // ---- Realtime A: table_carts -----------------------------------------
   useEffect(() => {
     if (phase !== "success" || !table) return;
 
@@ -446,14 +641,11 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     });
   }, [phase, table, tableToken, reloadCart]);
 
-  /* REST safety net for the cart — the fallback this file's header promises.
-
-     With Supabase unconfigured every subscription above is a NO-OP
-     (getSupabase() → null), and unlike useLiveFloor there was no poll behind
-     them, so a guest who never touched their own screen watched a frozen cart
-     forever. 5 s is the cadence the floor board already uses; a failed read is
-     swallowed because one dropped safety-net request must not flip the whole
-     screen into its error phase. */
+  /* REST safety net for the cart. With Supabase unconfigured every
+     subscription above is a NO-OP (getSupabase() → null), so without this
+     poll a guest who never touched their own screen watched a frozen cart
+     forever. A failed read is swallowed because one dropped request must not
+     flip the whole screen into its error phase. */
   useEffect(() => {
     if (phase !== "success") return;
 
@@ -464,38 +656,59 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     return () => window.clearInterval(timer);
   }, [phase, reloadCart]);
 
-  // ---- Realtime D2: restaurant_tables (bill requests, settles, release) --
-  /* Three different things arrive on this one channel, and each has its own
-     correct reaction:
+  /* REST safety net for the TABLE ROW itself (docs/14 #3): a settle by the
+     floor or a clear by staff must land on a phone with no realtime. */
+  useEffect(() => {
+    if (phase !== "success") return;
 
-       * status → 'empty'  the table was cleared / archived: this device no
-         longer belongs to a session, so its credentials are wiped and it is
-         forced back to the home page instead of showing a dead menu.
-       * bill_status → 'paid'  someone else (the floor tablet) took payment.
-         The shared bill store is marked settled, which is what makes the
-         diner's "Thank you!" screen appear immediately — the cross-device
-         half of settlement.
-       * anything else     a bill request or a new session: re-read the cart
-         and ticket so the screen stays truthful. */
+    const timer = window.setInterval(() => {
+      void reloadTableState(true);
+    }, TABLE_POLL_MS);
+
+    return () => window.clearInterval(timer);
+  }, [phase, reloadTableState]);
+
+  /* REST safety net for the order list (the tracker's active order and the
+     denied-round panel). watchOrderStatus already polls the newest ticket
+     while its channel is down; this keeps the LIST fresh too. */
+  useEffect(() => {
+    if (phase !== "success") return;
+
+    const timer = window.setInterval(() => {
+      void reloadOrders(true);
+    }, ORDERS_POLL_MS);
+
+    return () => window.clearInterval(timer);
+  }, [phase, reloadOrders]);
+
+  // ---- Realtime D2: restaurant_tables (bill requests, settles, release) --
+  /* Three different things arrive on this one channel:
+       * status → 'empty'  the table was cleared: end the visit (credentials
+         are dead; the route shows its SessionEndedState).
+       * bill_status → 'paid'  the floor took payment. Nothing is wiped here
+         (docs/14 #22): if food is still cooking the guest keeps the tracker
+         and history and sees a "paid" banner; the thank-you screen appears
+         once no ticket is active.
+       * anything else  a bill request or a new session: re-read.
+     The handler also ignores rows for another table (#28), so a misconfigured
+     policy or a staff token can never end this table by accident. */
   useEffect(() => {
     if (phase !== "success" || !table) return;
 
     return subscribeTableUpdates((change) => {
+      if (change.table_id && switchToForeignTable(change.table_id, table.id)) return;
+      if (change.code && switchToForeignTable(change.code, table.code)) return;
+
       if (change.event === "DELETE" || change.status === "empty") {
-        clearStoredSession(tableToken);
-        forgetGrantedSession();
-        router.replace("/");
+        endSession();
         return;
       }
 
-      if (change.bill_status === "paid") {
-        settleBill(table.code);
-      }
-
+      void reloadTableState();
       void reloadCart("external");
       void reloadOrders();
     });
-  }, [phase, table, tableToken, reloadCart, reloadOrders, router]);
+  }, [phase, table, tableToken, endSession, reloadTableState, reloadCart, reloadOrders]);
 
   // ---- Realtime E: menu_items + menu_item_images ------------------------
   useEffect(() => {
@@ -507,10 +720,18 @@ export function useLiveTable(tableToken: string): LiveTableValue {
   }, [phase, reloadMenu]);
 
   // ---- Realtime C: order_tracker for the active order ------------------
+  /* `activeOrder` is the newest ticket that is actually IN the kitchen.
+     Served and DENIED are excluded (#8): a refused round no longer exists, so
+     it must not keep the nav's live dot pulsing. */
   const activeOrder = useMemo(() => {
     return (
       [...orders]
-        .filter((order) => order.status !== "served")
+        .filter(
+          (order) =>
+            order.status === "pending" ||
+            order.status === "preparing" ||
+            order.status === "ready",
+        )
         .sort((a, b) => b.created_at.localeCompare(a.created_at))
         .at(0) ?? null
     );
@@ -532,13 +753,26 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     });
   }, [phase, activeOrderId, activeOrderStatus, tableToken]);
 
-  /* What the cart surfaces render: the server's cart plus this device's
-     unconfirmed adds, merged onto the line each dish already has. */
+  /* What the cart surfaces render: the server's cart, minus lines this device
+     has just removed, plus its unconfirmed adds and ± adjustments. */
   const visibleCart = useMemo<CartLine[]>(() => {
     const pendingIds = Object.keys(pendingAdds);
-    if (pendingIds.length === 0) return cart;
+    const hasOverlay =
+      pendingIds.length > 0 ||
+      Object.keys(lineAdjustments).length > 0 ||
+      Object.keys(removedLines).length > 0;
 
-    const lines = cart.map((line) => ({ ...line }));
+    if (!hasOverlay) return cart;
+
+    const lines = cart
+      .filter((line) => !removedLines[line.id])
+      .map((line) => ({ ...line }));
+
+    for (const line of lines) {
+      const delta = lineAdjustments[line.id];
+      if (delta) line.quantity += delta;
+    }
+
     for (const menuItemId of pendingIds) {
       const pending = pendingAdds[menuItemId];
       if (!pending) continue;
@@ -564,7 +798,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     }
 
     return lines;
-  }, [cart, pendingAdds, table]);
+  }, [cart, pendingAdds, lineAdjustments, removedLines, table]);
 
   // ---- Derived matrix (identical math to the old useTableData) ----------
   const menuIndex = useMemo(() => new Map(menu.map((item) => [item.id, item])), [menu]);
@@ -601,14 +835,19 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     setError(null);
     setReloadKey((key) => key + 1);
   }, []);
-  const refresh = useCallback(async () => {
-    setReloadKey((key) => key + 1);
-  }, []);
 
   // ---- Mutations --------------------------------------------------------
 
   const addToCart = useCallback(
     async (item: MenuItem, addedBy: string): Promise<{ ok: boolean; message?: string }> => {
+      /* Attribution is never anonymous: a caller that has not yet hydrated its
+         name still has the confirmed one in storage. With neither, the write
+         is refused here rather than landing as a "Guest" line. */
+      const name = addedBy.trim() || getStoredDisplayName();
+      if (!name) {
+        return { ok: false, message: "Tell us your name at the table screen first." };
+      }
+
       setItemErrors((current) => {
         if (!(item.id in current)) return current;
         const next = { ...current };
@@ -620,7 +859,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
          surface in this frame, the badge says "Syncing", and the overlay is
          dropped once the server's cart contains the dish. A failure rolls the
          overlay back, so a refused add never looks like it landed. */
-      pushPendingAdd(item.id, addedBy);
+      pushPendingAdd(item.id, name);
       beginSync();
 
       try {
@@ -628,7 +867,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
           table_token: tableToken,
           menu_item_id: item.id,
           quantity: 1,
-          added_by: addedBy,
+          added_by: name,
         });
         await reloadCart();
         popPendingAdd(item.id);
@@ -669,11 +908,20 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         allergy_note?: string;
       },
     ) => {
+      /* Paint the ± tap immediately (#4). A note edit has no optimistic
+         representation (it lives on the line's text), so only the quantity
+         delta is overlaid. */
+      const optimisticDelta = patch.quantity_delta;
+      if (optimisticDelta !== undefined) bumpLineAdjustment(cartItemId, optimisticDelta);
+
       beginSync();
       try {
         await apiUpdateCartItem(cartItemId, { table_token: tableToken, ...patch });
         await reloadCart();
+        /* The overlay this call added is now inside the server's cart. */
+        if (optimisticDelta !== undefined) bumpLineAdjustment(cartItemId, -optimisticDelta);
       } catch (err) {
+        if (optimisticDelta !== undefined) bumpLineAdjustment(cartItemId, -optimisticDelta);
         if (err instanceof ApiError && err.status !== 0) {
           // Inline validation vector: the line keeps its old value and the
           // operator sees why in the console-level warning.
@@ -685,23 +933,29 @@ export function useLiveTable(tableToken: string): LiveTableValue {
         endSync();
       }
     },
-    [tableToken, reloadCart, fail, beginSync, endSync],
+    [tableToken, reloadCart, fail, beginSync, endSync, bumpLineAdjustment],
   );
 
   const removeLine = useCallback(
     async (cartItemId: string) => {
+      /* The line disappears in this frame; a failed remove puts it back. */
+      setRemovedLines((current) => ({ ...current, [cartItemId]: true }));
+
       beginSync();
       try {
         await apiRemoveCartItem({ table_token: tableToken, cart_item_id: cartItemId });
         await reloadCart();
+        clearRemovedLine(cartItemId);
+        clearLineAdjustment(cartItemId);
       } catch (err) {
+        clearRemovedLine(cartItemId);
         if (err instanceof ApiError && err.status !== 0) return;
         fail(err);
       } finally {
         endSync();
       }
     },
-    [tableToken, reloadCart, fail, beginSync, endSync],
+    [tableToken, reloadCart, fail, beginSync, endSync, clearRemovedLine, clearLineAdjustment],
   );
 
   const fire = useCallback(async (): Promise<{ ok: true } | { ok: false; failure: FireFailure }> => {
@@ -726,7 +980,11 @@ export function useLiveTable(tableToken: string): LiveTableValue {
       }
 
       await apiFire(tableToken);
-      // Success path: reset the table room cart state + pull a clean snapshot.
+      // Success path: the cart was drained server-side, so any optimistic
+      // overlay that was still on screen is stale (#9).
+      setPendingAdds({});
+      setLineAdjustments({});
+      setRemovedLines({});
       await Promise.all([reloadCart(), reloadOrders()]);
       return { ok: true };
     } catch (err) {
@@ -769,13 +1027,34 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     }
   }, [tableToken, reloadCart, reloadOrders, fail]);
 
+  const requestBill = useCallback(async (): Promise<{ ok: boolean; message?: string }> => {
+    if (billStatus !== "unrequested") return { ok: true };
+
+    try {
+      const result = await apiRequestTableBill(tableToken);
+      if (mountedRef.current) setBillStatus(result.bill_status);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.error === "SESSION_ENDED") {
+          endSession();
+          return { ok: false, message: err.message };
+        }
+        return { ok: false, message: err.message };
+      }
+      fail(err);
+      return { ok: false, message: "Could not request the bill." };
+    }
+  }, [billStatus, tableToken, endSession, fail]);
+
   /* ---- Refused rounds (denied) ----------------------------------------
      The 86 path and the chef's deny both leave a closed ticket with a
      reason. The diner gets three ways out of it, and all three go through
      the backend so two phones cannot disagree about what happened:
 
-       Retry          → requeue the lines that still exist, then fire again
-       Move to list   → the same requeue, but stop at the editable cart
+       Retry          → ONE atomic server call (#23): move, replace, fire.
+                        A failed re-fire leaves the refused ticket intact.
+       Move to list   → requeue into the editable cart
        Cancel         → discard the refused ticket */
   const deniedOrder = useMemo(() => {
     const latest = [...orders].sort((a, b) => b.created_at.localeCompare(a.created_at)).at(0);
@@ -833,16 +1112,28 @@ export function useLiveTable(tableToken: string): LiveTableValue {
   }, [deniedOrder, tableToken, reloadCart, reloadOrders, fail]);
 
   const retryDenied = useCallback(async (): Promise<DeniedActionResult> => {
-    const moved = await requeueDenied();
-    if (!moved.ok) return moved;
-
-    const result = await fire();
-    if (!result.ok) {
-      return { ok: false, omitted: moved.omitted, message: result.failure.message };
+    if (!deniedOrder) {
+      return { ok: false, message: "That order is no longer on screen." };
     }
 
-    return { ok: true, omitted: moved.omitted };
-  }, [requeueDenied, fire]);
+    try {
+      /* The server owns the whole operation: move → replace → fire, in one
+         transaction. If it fails, the refused ticket is still there. */
+      const result = await apiRetryDeniedOrder(deniedOrder.id, tableToken);
+      await Promise.all([reloadCart(), reloadOrders()]);
+      return { ok: true, omitted: result.omitted };
+    } catch (err) {
+      if (err instanceof ApiError) {
+        const omitted = Array.isArray(err.details?.omitted)
+          ? (err.details.omitted as string[])
+          : undefined;
+        await reloadOrders();
+        return { ok: false, message: err.message, omitted };
+      }
+      fail(err);
+      return { ok: false, message: "That order could not be re-fired." };
+    }
+  }, [deniedOrder, tableToken, reloadCart, reloadOrders, fail]);
 
   const dismissDenied = useCallback(async (): Promise<DeniedActionResult> => {
     if (!deniedOrder) {
@@ -865,6 +1156,7 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     error,
     retry,
     refresh,
+    refreshing,
     table,
     menu,
     cart: visibleCart,
@@ -874,6 +1166,9 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     totals,
     activeOrder,
     soldOutInCart,
+    billStatus,
+    hasCookingOrders: activeOrder !== null,
+    activeDevices,
     deniedOrder,
     deniedRetryPlan,
     itemErrors,
@@ -883,8 +1178,16 @@ export function useLiveTable(tableToken: string): LiveTableValue {
     updateLine,
     removeLine,
     fire,
+    requestBill,
     retryDenied,
     moveDeniedToCart: requeueDenied,
     dismissDenied,
   };
+}
+
+/** True when a realtime row is about a DIFFERENT table (#28). The RLS policy
+    already scopes the channel, but a staff token or a misconfigured policy
+    must not be able to end this guest's session. */
+function switchToForeignTable(changed: string | null, current: string): boolean {
+  return changed !== null && changed !== "" && changed !== current;
 }

@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import QRCode from "qrcode";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Logo } from "@/components/brand/logo";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -231,6 +231,9 @@ function AdminGate({ onUnlocked }: { onUnlocked: () => void }) {
    Console
    ===================================================================== */
 
+const ALL_SLICES = ["analytics", "tables", "menu"] as const;
+type ConsoleSlice = (typeof ALL_SLICES)[number];
+
 function AdminConsole({ onLock }: { onLock: () => void }) {
   const { toast } = useToast();
   const [tab, setTab] = useState<AdminTab>("analytics");
@@ -241,34 +244,84 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const [categories, setCategories] = useState<AdminCategory[]>([]);
   const [phase, setPhase] = useState<"loading" | "error" | "success">("loading");
   const [error, setError] = useState<ApiError | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [justRefreshed, setJustRefreshed] = useState(false);
+  const refreshDoneTimer = useRef<number | null>(null);
   const [clearingId, setClearingId] = useState<string | null>(null);
   const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
 
+  /* ---- Per-slice loading ---------------------------------------------
+     The console used to reload all four datasets after every save and put
+     the whole page back into `loading`, so an edit to one dish replaced the
+     console with skeletons. Data is now loaded (and patched) ONE SLICE AT A
+     TIME:
+
+       analytics  the reports
+       tables     the physical-table grid
+       menu       dishes + folders (they are edited together)
+
+     A soft read only writes state when the server actually returned
+     something different, so a 15 s poll that found nothing new causes no
+     re-render at all, and saving a dish cannot touch the tables tab. */
+  const loadingRef = useRef<Record<ConsoleSlice, boolean>>({
+    analytics: false,
+    tables: false,
+    menu: false,
+  });
+  const hadDataRef = useRef(false);
+  /* The tab whose data the initial load already covers. Used so the "load on
+     tab switch" effect does not re-fetch immediately after first paint. */
+  const loadedTabRef = useRef<AdminTab | null>("analytics");
+
+  /** Payloads here are small arrays; a structural compare is cheaper than a
+      wasted render of the whole active tab. */
+  const unchanged = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+  const onUnauthorized = useCallback(
+    (err: unknown): boolean => {
+      if (err instanceof ApiError && err.status === 401) {
+        // The token expired or was rejected: the gate owns the next step.
+        onLock();
+        return true;
+      }
+      return false;
+    },
+    [onLock],
+  );
+
+  const loadAnalytics = useCallback(async () => {
+    const next = await getAdminAnalytics();
+    setAnalytics((current) => (unchanged(current, next) ? current : next));
+  }, []);
+
+  const loadTables = useCallback(async () => {
+    const next = await getAdminTables();
+    setTables((current) => (unchanged(current, next) ? current : next));
+  }, []);
+
+  const loadMenu = useCallback(async () => {
+    const [nextMenu, nextCategories] = await Promise.all([getAdminMenu(), getAdminCategories()]);
+    setMenu((current) => (unchanged(current, nextMenu) ? current : nextMenu));
+    setCategories((current) => (unchanged(current, nextCategories) ? current : nextCategories));
+  }, []);
+
+  const loadAll = useCallback(async () => {
+    await Promise.all([loadAnalytics(), loadTables(), loadMenu()]);
+  }, [loadAnalytics, loadTables, loadMenu]);
+
+  /* The initial load. ONLY this may show skeletons; every later read patches
+     the content it already has. */
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       try {
-        const [nextAnalytics, nextTables, nextMenu, nextCategories] = await Promise.all([
-          getAdminAnalytics(),
-          getAdminTables(),
-          getAdminMenu(),
-          getAdminCategories(),
-        ]);
+        await loadAll();
         if (cancelled) return;
-        setAnalytics(nextAnalytics);
-        setTables(nextTables);
-        setMenu(nextMenu);
-        setCategories(nextCategories);
+        hadDataRef.current = true;
         setPhase("success");
       } catch (err) {
-        if (cancelled) return;
-        if (err instanceof ApiError && err.status === 401) {
-          // The token expired or was rejected: the gate owns the next step.
-          onLock();
-          return;
-        }
+        if (cancelled || onUnauthorized(err)) return;
         setError(err instanceof ApiError ? err : new ApiError(0, "INTERNAL", "Could not load the console."));
         setPhase("error");
       }
@@ -277,13 +330,112 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     return () => {
       cancelled = true;
     };
-  }, [reloadKey, onLock]);
+  }, [loadAll, onUnauthorized]);
 
-  function refresh() {
+  /** Soft, in-place read of just the requested slices.
+
+      `showSpinner` is for user-initiated reads (the button, a save). The 15 s
+      poll and realtime revalidation pass false: a background read that finds
+      nothing new must not even toggle a spinner, or the whole active tab
+      would re-render every 15 s for no content change. */
+  const reload = useCallback(
+    async (slices: readonly ConsoleSlice[], showSpinner = false): Promise<boolean> => {
+      const work = slices.filter((slice) => !loadingRef.current[slice]);
+      if (work.length === 0) return false;
+
+      for (const slice of work) loadingRef.current[slice] = true;
+      if (showSpinner) setRefreshing(true);
+
+      try {
+        await Promise.all(
+          work.map((slice) =>
+            slice === "analytics"
+              ? loadAnalytics()
+              : slice === "tables"
+                ? loadTables()
+                : loadMenu(),
+          ),
+        );
+        hadDataRef.current = true;
+        setPhase("success");
+        setError(null);
+        return true;
+      } catch (err) {
+        if (onUnauthorized(err)) return false;
+        /* A soft failure keeps the console exactly as it was; only a console
+           that never loaded may fall through to the error screen. */
+        if (!hadDataRef.current) {
+          setError(
+            err instanceof ApiError ? err : new ApiError(0, "INTERNAL", "Could not load the console."),
+          );
+          setPhase("error");
+        }
+        return false;
+      } finally {
+        for (const slice of work) loadingRef.current[slice] = false;
+        if (showSpinner) setRefreshing(false);
+      }
+    },
+    [loadAnalytics, loadTables, loadMenu, onUnauthorized],
+  );
+
+  const slicesForTab = useCallback(
+    (target: AdminTab): readonly ConsoleSlice[] =>
+      target === "analytics" ? ["analytics", "tables"] : target === "tables" ? ["tables"] : ["menu"],
+    [],
+  );
+
+  /* Refresh (button, post-save, post-settle): visible tab only. The button
+     spins softly while the read is in flight and shows a tick for a second
+     afterwards, so an operator knows the content is current without the
+     console ever blinking. */
+  const refresh = useCallback(async () => {
+    /* A second tap clears the previous tick immediately (and its timer, which
+       would otherwise cut the new one short), so the arrow never shows a
+       stale success while a new read is in flight. */
+    if (refreshDoneTimer.current !== null) {
+      window.clearTimeout(refreshDoneTimer.current);
+      refreshDoneTimer.current = null;
+    }
+    setJustRefreshed(false);
+    const ok = await reload(slicesForTab(tab), true);
+    if (!ok) return;
+
+    setJustRefreshed(true);
+    if (refreshDoneTimer.current !== null) window.clearTimeout(refreshDoneTimer.current);
+    refreshDoneTimer.current = window.setTimeout(() => {
+      refreshDoneTimer.current = null;
+      setJustRefreshed(false);
+    }, 1_100);
+  }, [reload, slicesForTab, tab]);
+
+  useEffect(
+    () => () => {
+      if (refreshDoneTimer.current !== null) window.clearTimeout(refreshDoneTimer.current);
+    },
+    [],
+  );
+
+  /* Background revalidation: same slices, no spinner, so an unchanged poll
+     produces no render at all. */
+  const softRefresh = useCallback(() => {
+    void reload(slicesForTab(tab));
+  }, [reload, slicesForTab, tab]);
+
+  /* Switching tabs reads that tab's slice, and nothing else. */
+  useEffect(() => {
+    if (phase !== "success") return;
+    if (loadedTabRef.current === tab) return;
+    loadedTabRef.current = tab;
+    void reload(slicesForTab(tab));
+  }, [phase, tab, reload, slicesForTab]);
+
+  /* Retry from the error screen is the one hard reload. */
+  const retry = useCallback(() => {
     setPhase("loading");
     setError(null);
-    setReloadKey((key) => key + 1);
-  }
+    void reload(ALL_SLICES);
+  }, [reload]);
 
   /* The unconditional "stop this table" override. Works on any table, at
      any point — including one that owes money or has a live ticket. */
@@ -296,7 +448,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
         title: `${table.name} deactivated`,
         description:
           result.closed_orders > 0
-            ? `${result.closed_orders} open ${result.closed_orders === 1 ? "ticket was" : "tickets were"} closed as served.`
+            ? `${result.closed_orders} open ${result.closed_orders === 1 ? "ticket was" : "tickets were"} stopped and removed with the seating.`
             : "Session ended. The table is ready for its next guests.",
         tone: "success",
       });
@@ -334,51 +486,32 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     }
   }
 
-  /* Realtime revalidation. Every console tab reads one of two published
-     tables (sql/008): menu_items for the catalog, restaurant_tables for the
-     grid and bill state. A burst of events — a fire, a settle, an 86 — is
-     collapsed into one REST read, and the read never flips the screen back
-     to skeletons. No refresh button exists because none is needed. */
-  const revalidating = useRef(false);
+  /* Realtime + poll. Events are routed to the tab they can affect, so a
+     settle on the floor cannot re-render an open menu editor, and an 86
+     cannot re-render the tables grid. The read is still soft (no skeletons)
+     and still guarded by the per-slice equality check. */
   useEffect(() => {
     if (phase !== "success") return;
-
-    const revalidate = () => {
-      if (revalidating.current) return;
-      revalidating.current = true;
-      void Promise.all([getAdminAnalytics(), getAdminTables(), getAdminMenu(), getAdminCategories()])
-        .then(([nextAnalytics, nextTables, nextMenu, nextCategories]) => {
-          setAnalytics(nextAnalytics);
-          setTables(nextTables);
-          setMenu(nextMenu);
-          setCategories(nextCategories);
-        })
-        .catch((err: unknown) => {
-          if (err instanceof ApiError && err.status === 401) {
-            onLock();
-          }
-        })
-        .finally(() => {
-          revalidating.current = false;
-        });
-    };
 
     let timer: ReturnType<typeof setTimeout> | null = null;
     const schedule = () => {
       if (timer !== null) return;
       timer = setTimeout(() => {
         timer = null;
-        revalidate();
+        softRefresh();
       }, 400);
     };
 
-    const detachMenu = subscribeMenuUpdates(schedule);
-    const detachTables = subscribeTableUpdates(schedule);
+    const detachMenu = subscribeMenuUpdates(() => {
+      if (tab === "menu") schedule();
+    });
+    const detachTables = subscribeTableUpdates(() => {
+      if (tab !== "menu") schedule();
+    });
 
     // Safety net for deployments where RLS denies the table channel (an
-    // admin JWT is not a floor claim): the console still refreshes itself,
-    // just more slowly, and never through a button.
-    const poll = setInterval(revalidate, 15_000);
+    // admin JWT is not a floor claim): the open tab still refreshes itself.
+    const poll = setInterval(softRefresh, 15_000);
 
     return () => {
       if (timer !== null) clearTimeout(timer);
@@ -386,7 +519,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
       detachMenu();
       detachTables();
     };
-  }, [phase, onLock]);
+  }, [phase, tab, softRefresh]);
 
   if (phase === "error") {
     return (
@@ -400,7 +533,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
               <div className="flex flex-wrap justify-center gap-3">
                 <Button
                   size="md"
-                  onClick={refresh}
+                  onClick={retry}
                   leftIcon={<RefreshCw className="size-4" aria-hidden />}
                 >
                   Refresh
@@ -434,15 +567,52 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
           <div className="ml-auto flex items-center gap-2">
             {/* Backup refresh: Realtime revalidates the console on its own,
-                but an operator gets a manual re-read when a socket dies. */}
+                but an operator gets a manual re-read when a socket dies.
+
+                The label never changes width, and the tint outlives the
+                pointer resting on the button (ghost's hover:text-ink would
+                otherwise swallow it). */}
             <Button
               variant="ghost"
               size="sm"
-              onClick={refresh}
-              leftIcon={<RefreshCw className="size-4" aria-hidden />}
+              onClick={() => void refresh()}
+              aria-busy={refreshing || undefined}
+              className={cn(
+                "transition-colors duration-500 ease-gentle",
+                justRefreshed && "text-ready hover:text-ready",
+              )}
+              leftIcon={
+                /* Two stacked glyphs that cross-fade: the refresh arrow turns
+                   slowly and softly while the read is running, then a tick
+                   eases into its place for a second. No layout shift. */
+                <span aria-hidden className="relative inline-flex size-4 items-center justify-center">
+                  <RefreshCw
+                    className={cn(
+                      "absolute size-4 transition-all duration-500 ease-gentle",
+                      justRefreshed
+                        ? "rotate-45 scale-75 opacity-0"
+                        : "rotate-0 scale-100 opacity-100",
+                      refreshing && "animate-spin [animation-duration:1.8s]",
+                    )}
+                  />
+                  <Check
+                    className={cn(
+                      "absolute size-4 text-ready transition-all duration-500 ease-gentle",
+                      justRefreshed ? "scale-100 opacity-100" : "scale-75 opacity-0",
+                    )}
+                  />
+                </span>
+              }
             >
+              {/* Constant label: the tick and tint carry the confirmation, so
+                  the header row never reflows. */}
               Refresh
             </Button>
+            {/* Status for assistive tech: outside the button, so it never
+                becomes part of its name. */}
+            <span role="status" className="sr-only">
+              {justRefreshed ? "Console refreshed" : refreshing ? "Refreshing console" : ""}
+            </span>
             <Button
               variant="outline"
               size="sm"

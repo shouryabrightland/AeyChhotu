@@ -6,7 +6,10 @@ const TOKEN_KEY = "aeychhotu.table_token";
 const NAME_KEY = "aeychhotu.diner_name";
 const DEVICE_KEY = "aeychhotu.device_id";
 
-export const DEFAULT_DISPLAY_NAME = "Guest";
+/* There is deliberately no "Guest" fallback: the session gate asks every
+   diner for a name before it calls an endpoint, so a stored name is the only
+   valid identity. An empty string means "not confirmed yet" and the gate
+   keeps the menu closed until it is. */
 
 function read(key: string): string | null {
   if (typeof window === "undefined") return null;
@@ -45,12 +48,25 @@ export function storeTableToken(token: string) {
   write(TOKEN_KEY, token);
 }
 
-export function getStoredDisplayName() {
-  return read(NAME_KEY) ?? DEFAULT_DISPLAY_NAME;
+export function getStoredDisplayName(): string {
+  return read(NAME_KEY)?.trim() ?? "";
 }
 
+/** Saves the name the gate confirmed. An empty value clears it rather than
+    writing a made-up label, so no screen can inherit an anonymous identity. */
 export function storeDisplayName(name: string) {
-  write(NAME_KEY, name.trim() || DEFAULT_DISPLAY_NAME);
+  const trimmed = name.trim();
+  if (!trimmed) {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem(NAME_KEY);
+      } catch {
+        /* ignore blocked storage */
+      }
+    }
+    return;
+  }
+  write(NAME_KEY, trimmed);
 }
 
 export function getDeviceId() {

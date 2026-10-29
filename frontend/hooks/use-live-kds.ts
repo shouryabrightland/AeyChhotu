@@ -58,6 +58,9 @@ export function useLiveKds(): LiveKdsValue {
 
   const mountedRef = useRef(true);
   const busyRef = useRef<Record<string, boolean>>({});
+  /** The board has rendered real data at least once. A later failed poll
+      must keep it on screen instead of replacing it with the error page. */
+  const hasDataRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -77,10 +80,17 @@ export function useLiveKds(): LiveKdsValue {
     try {
       const list = await loadTickets();
       if (!mountedRef.current) return;
-      setTickets(list);
+      hasDataRef.current = true;
+      /* Only hand React a new array when the content actually differs: the
+         15 s safety poll must not re-render every card on an idle board. */
+      setTickets((current) =>
+        JSON.stringify(current) === JSON.stringify(list) ? current : list,
+      );
       if (phase === "error") setPhase("success");
     } catch (err) {
       if (!mountedRef.current) return;
+      // A dropped background read keeps the board as it is.
+      if (hasDataRef.current) return;
       setError(
         err instanceof ApiError ? err : new ApiError(0, "INTERNAL_ERROR", "Could not load the board."),
       );
@@ -98,6 +108,7 @@ export function useLiveKds(): LiveKdsValue {
       try {
         const list = await loadTickets();
         if (cancelled) return;
+        hasDataRef.current = true;
         setTickets(list);
         setPhase("success");
       } catch (err) {
@@ -149,7 +160,16 @@ export function useLiveKds(): LiveKdsValue {
       void refresh();
     });
 
+    /* docs/14 #10 — the board must not freeze when Realtime is unavailable.
+       Subscriptions are NO-OPs without Supabase (and silent when RLS matches
+       nothing), so a slow poll underneath keeps the kitchen truthful. 15 s
+       matches the floor board and costs one request per terminal. */
+    const poll = setInterval(() => {
+      void refresh();
+    }, 15_000);
+
     return () => {
+      clearInterval(poll);
       detachIntake();
       detachFeed();
     };
@@ -168,8 +188,15 @@ export function useLiveKds(): LiveKdsValue {
       try {
         if (next === "served") {
           await apiPruneKdsTicket(order.id);
+          // The ticket leaves the board in this frame; the refetch reconciles.
+          setTickets((current) => current.filter((ticket) => ticket.id !== order.id));
         } else {
           await apiUpdateKdsStatus(order.id, next as "preparing" | "ready");
+          setTickets((current) =>
+            current.map((ticket) =>
+              ticket.id === order.id ? { ...ticket, status: next } : ticket,
+            ),
+          );
         }
         await refresh();
         return { ok: true };
@@ -207,6 +234,8 @@ export function useLiveKds(): LiveKdsValue {
 
       try {
         await apiDenyKdsTicket(order.id, reason);
+        // A refused ticket is no longer an active board card.
+        setTickets((current) => current.filter((ticket) => ticket.id !== order.id));
         await refresh();
         return { ok: true };
       } catch (err) {

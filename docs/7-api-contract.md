@@ -182,6 +182,14 @@ Endpoints by tier: staff = E10, E11, E12, E13, E14, E17. Everything else = none.
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `table_token` | string | yes | `^[a-z0-9]{4,16}$`; must exist in `restaurant_tables` |
+| `name` | string | **yes** | Trimmed, `1 – 40` chars. The guest's first name, collected by the gate before this call. An unnamed scan is `400 VALIDATION_ERROR` — see E1b–E1d, which require it too |
+| `user_id` | string | no | Device id, `≤ 64` chars. When present the device is upserted into `table_members`, so it appears on the roster and the Table Pass |
+| `scan_time` | ISO string | no | When the client opened the page; older than `last_cleared_at` → `409 STALE_SESSION` |
+
+**Name:** every entry point (E1, E1b join-pin, E1c join-pass, E1d reconnect)
+requires `name`. It is copied onto each cart line the guest adds and each
+ticket the kitchen fires, and it is what keeps the split bill split. There is
+no `"Guest"` fallback.
 
 **Success — `200 OK`** (marks the table `active` if it was `empty`)
 ```json
@@ -379,7 +387,7 @@ Claims only — no PIN, no secret, no internal configuration is ever echoed.
 | `quantity` | integer | no | `1 – 99`, default `1` |
 | `allergy_note` | string | no | `≤ 500` chars — **medical allergies only** (S2 red box) |
 | `request_note` | string | no | `≤ 500` chars — normal instructions (was `normal_note` in v1) |
-| `added_by` | string | no | `≤ 40` chars, default `"Guest"` |
+| `added_by` | string | **yes** | Trimmed, `1 – 40` chars — the name the session gate collected. Required: an unnamed line becomes an unnamed ticket, so there is no `"Guest"` fallback |
 
 **Upsert semantics:** if an identical line already exists for this table (`menu_item_id` + `request_note` + `allergy_note` all equal), `quantity` is incremented on that row instead of inserting a duplicate; the surviving `added_by` becomes the latest writer.
 
@@ -943,6 +951,10 @@ Clients subscribe from the browser using only the public `anon` key; `postgres_c
 | E15 | `GET /api/v1/orders/:order_id/status` | none | S3 | — |
 | E16 | `GET /api/v1/orders` | none | S3 | ✅ |
 | E17 | `GET /api/v1/floor/tables` | staff | S6 | ✅ |
+| E18 | `GET /api/v1/sessions/:table_token` | none (table token) | S1, S3 | — |
+| E19 | `GET /api/v1/sessions/:table_token/members` | none (table token) | S1 | — |
+| E20 | `POST /api/v1/orders/:order_id/retry` | none (table token) | S3 | — |
+| — | `POST /api/v1/sessions/:table_token/bill-request` | none (table token) | S1, S2 | — |
 
 ---
 
@@ -964,22 +976,105 @@ Enum casing note: `docs/7` v1 used `Pending/Preparing/Ready/Served`. The bluepri
 
 ---
 
-## 7. Not yet in the contract — the bill request channel
+## 7. The bill request channel — now server-side
 
-The **“Get bill now”** handoff (diner asks → floor takes payment → table clears) is shipped as a
-**client-side prototype**, deliberately outside this contract:
+The “Get bill now” handoff (diner asks → floor takes payment → table clears) was a
+client-side prototype in v2 and is now a server column (`restaurant_tables.bill_status`,
+`sql/007_bill_and_auto_release.sql`). **The browser-local store is no longer read by any live
+screen** (docs/14 #5): a diner's phone and a separate floor tablet agree because both read the
+same column.
 
-| | |
-|---|---|
-| **Where** | `frontend/lib/api/bill.ts` (all rules) · `frontend/hooks/use-bills.ts` (React view) |
-| **Transport** | `localStorage` key `aeychhotu.bills.v1`, mirrored over `BroadcastChannel` with a `storage`-event fallback — two tabs on one machine sync instantly |
-| **Operations** | `requestBill(code)` (idempotent) · `settleBill(code)` (keeps `requested_at`, stamps `settled_at`) · `acknowledgeSettlement(code)` (drops the event once the diner has read the thank-you) |
-| **Staleness** | a request nobody settles is pruned after **15 minutes** |
-| **Table clear** | `settleTable(code)` in `frontend/lib/api/index.ts` erases the table’s staged cart + orders — **demo store only**, because no live endpoint exists |
-| **Why not E18** | a diner’s phone and a separate floor tablet only share this state while they run in the same browser profile |
+| Step | Endpoint | Notes |
+|---|---|---|
+| Ask | `POST /api/v1/sessions/:table_token/bill-request` | idempotent; `unrequested → requested`, never downgrades `paid` |
+| Read | `GET /api/v1/sessions/:table_token` (E18) | `bill_status`, `bill_requested_at`, `bill_paid_at`, table `status`, `active_devices`, `active_orders` |
+| Push | `postgres_changes` on `restaurant_tables` | the diner screen follows a settle without a reload |
+| Fallback | E18 every 5 s | a deployment without Supabase is slower, never frozen |
+| Pay | `PATCH /api/v1/floor/tables/:table_id/settle` | staff; stamps `paid` and asks the release engine |
 
-**The gap to close (candidate E18):** a `bill_requests` table (`table_id` FK, `requested_at`,
-`settled_at`, unique on the open request per table) with `POST /api/v1/tables/:table_token/bill`,
-`PATCH /api/v1/floor/bill/:table_code/settle` (staff) and a `postgres_changes` channel mirroring
-channel A — plus a real settle that drains the table server-side. Because every rule already lives
-behind `lib/api/bill.ts`, the swap replaces that one file and nothing in the UI.
+`frontend/lib/api/bill.ts` remains in the tree as the offline/demo transport and its unit test,
+but no diner or staff screen imports it any more.
+
+---
+
+## 8. Additions in v2.2 (2026-10-29)
+
+These are additive; every existing consumer keeps working.
+
+### E18. `GET /api/v1/sessions/:table_token`
+**Auth:** none — the table token is the capability (same scope as `bill-request`). Returns the
+diner's own table state, no credentials:
+
+```json
+{
+  "success": true,
+  "data": {
+    "table_id": "8c3b9b4f-8012-4f35-90d1-0f796d11f181",
+    "code": "k7x2p",
+    "name": "Window 2",
+    "status": "active",
+    "bill_status": "requested",
+    "bill_requested_at": "2026-10-29T12:40:00Z",
+    "bill_paid_at": null,
+    "session_started_at": "2026-10-29T12:05:11Z",
+    "active_devices": 3,
+    "active_orders": 1
+  }
+}
+```
+
+`active_devices` counts heartbeats inside the 45 s release window (the same window the release
+engine uses). Errors: `404 TABLE_NOT_FOUND` (unknown or archived).
+
+### E19. `GET /api/v1/sessions/:table_token/members`
+**Auth:** none (table token). The roster recorded by E1/E1b/E1c (`table_members`), oldest first:
+
+```json
+{
+  "success": true,
+  "data": [
+    { "user_id": "dev_9f2c", "name": "Aarav", "joined_at": "2026-10-29T12:05:11Z" }
+  ]
+}
+```
+
+A guest who joined but has not ordered appears here — that is the point. Rows die with the
+seating when the table is cleared.
+
+### E20. `POST /api/v1/orders/:order_id/retry?table_token=…`
+**Auth:** none (table token). “Retry” as ONE transaction: move the still-available lines of a
+`denied` ticket back to the cart, replace that ticket with a fresh one via `fire_order()`, or roll
+the whole thing back. A failed re-fire (another 86, a network drop) leaves the refused ticket and
+its explanation intact (docs/14 #23).
+
+**Success — `201 Created`**
+```json
+{
+  "success": true,
+  "data": {
+    "order_id": "99b0c2a5-4f71-477c-bc8a-d142b78aef01",
+    "table_id": "8c3b9b4f-8012-4f35-90d1-0f796d11f181",
+    "status": "pending",
+    "created_at": "2026-10-29T12:41:03Z",
+    "moved": 2,
+    "omitted": ["Mango Lassi"]
+  }
+}
+```
+**Errors:** `404 ORDER_NOT_FOUND` · `409 ORDER_NOT_DENIED` · `409 NOTHING_TO_RETRY` (`omitted` in
+`details`) · `409 INVENTORY_FAILURE` / `DUPLICATE_ORDER` / `EMPTY_CART` — all of which leave the
+denied ticket untouched.
+
+### Changes to existing endpoints
+
+* `POST /api/v1/auth/kds-login` accepts an optional `surface: "kitchen" | "floor"`. It is
+  **rate-limit metadata only** — the issued role is unchanged — and gives each PIN wall its own
+  failed-attempt counter (docs/14 #18).
+* `PATCH /api/v1/cart/items/:cart_item_id` merges instead of failing when a note edit would
+  collide with another line of the same dish (docs/14 #24); the merged line is returned.
+* `GET /api/v1/floor/tables` now requires role `floor` or `kitchen` (docs/14 #13).
+* `GET /api/v1/orders` returns only the CURRENT seating: clearing a table removes its tickets
+  (docs/14 #21), and served takings live in the `sales_day` / `sales_rollup` tables
+  (`sql/012_sales_rollup_and_session_reset.sql`) that the admin analytics reads.
+* Rate limits are keyed by credential (staff bearer / table token) with a high per-IP backstop
+  (docs/14 #17), not by the shared restaurant IP alone.

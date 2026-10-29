@@ -46,7 +46,10 @@ import type {
   Paged,
   RemoveCartItemPayload,
   RequeuedDeniedOrder,
+  RetriedDeniedOrder,
   DismissedDeniedOrder,
+  TableMember,
+  TableState,
   KdsDenyResult,
   SessionEntryPayload,
   SessionIdentity,
@@ -70,7 +73,7 @@ const BASE = "/api/v1";
     this table's rows. Null/absent ⇒ REST-only (policies match no rows). */
 export async function initializeSession(
   tableToken: string,
-  entry: SessionEntryPayload = {},
+  entry: SessionEntryPayload,
 ): Promise<TableSession> {
   const { data } = await apiRequest<TableSession>(`${BASE}/sessions/initialize`, {
     method: "POST",
@@ -88,7 +91,7 @@ export async function initializeSession(
     the authentication business. */
 export async function startTableSession(
   tableToken: string,
-  entry: SessionEntryPayload = {},
+  entry: SessionEntryPayload,
 ): Promise<TableScan> {
   const { data } = await apiRequest<TableScan>(`${BASE}/sessions/initialize`, {
     method: "POST",
@@ -109,7 +112,7 @@ export async function startTableSession(
 export async function joinTableWithPin(
   tableToken: string,
   pin: string,
-  entry: SessionEntryPayload = {},
+  entry: SessionEntryPayload,
 ): Promise<TableSessionGrant> {
   const { data } = await apiRequest<TableSessionGrant>(`${BASE}/sessions/join-pin`, {
     method: "POST",
@@ -123,7 +126,7 @@ export async function joinTableWithPin(
 export async function joinTableWithPass(
   tableToken: string,
   secret: string,
-  entry: SessionEntryPayload = {},
+  entry: SessionEntryPayload,
 ): Promise<TableSessionGrant> {
   const { data } = await apiRequest<TableSessionGrant>(`${BASE}/sessions/join-pass`, {
     method: "POST",
@@ -133,25 +136,34 @@ export async function joinTableWithPass(
   return data;
 }
 
-/** E1d — POST /api/v1/sessions/reconnect (a returning device, no keypad). */
+/** E1d — POST /api/v1/sessions/reconnect (a returning device, no keypad).
+    Carries the same identity as every other entry point: the server refreshes
+    this device's row in table_members, so a renamed guest is renamed on the
+    roster too. */
 export async function reconnectTableSession(
   tableToken: string,
   secret: string,
-  scanTime?: string,
+  entry: SessionEntryPayload,
 ): Promise<TableSessionGrant> {
   const { data } = await apiRequest<TableSessionGrant>(`${BASE}/sessions/reconnect`, {
     method: "POST",
-    body: { table_token: tableToken, secret, ...(scanTime ? { scan_time: scanTime } : {}) },
+    body: { table_token: tableToken, secret, ...entry },
   });
   setRealtimeAuth(data.realtime_token ?? null);
   return data;
 }
 
-/** E2 — POST /api/v1/auth/kds-login (stores the issued shift JWT) */
-export async function loginKDS(pin: string): Promise<ShiftLogin> {
+/** E2 — POST /api/v1/auth/kds-login (stores the issued shift JWT).
+    `surface` is rate-limit metadata only (docs/14 #18): kitchen and floor
+    share this endpoint, so each PIN wall keeps its own failed-attempt budget.
+    The server still issues the same staff role. */
+export async function loginKDS(
+  pin: string,
+  surface: "kitchen" | "floor" = "kitchen",
+): Promise<ShiftLogin> {
   const { data } = await apiRequest<ShiftLogin>(`${BASE}/auth/kds-login`, {
     method: "POST",
-    body: { pin },
+    body: { pin, surface },
   });
   storeKdsToken(data.token);
   // Staff-scoped read token: channel B (kds_orders) may read every order.
@@ -162,6 +174,26 @@ export async function loginKDS(pin: string): Promise<ShiftLogin> {
 /** E2b — GET /api/v1/auth/me (active terminal session identity) */
 export async function getMe(): Promise<SessionIdentity> {
   const { data } = await apiRequest<SessionIdentity>(`${BASE}/auth/me`, { auth: true });
+  return data;
+}
+
+/** GET /api/v1/sessions/:table_token — the diner's own table state.
+    Server truth for `bill_status` and `status`, so a phone without realtime
+    still sees a settle or a clear. */
+export async function getTableState(tableToken: string): Promise<TableState> {
+  const { data } = await apiRequest<TableState>(
+    `${BASE}/sessions/${encodeURIComponent(tableToken)}`,
+  );
+  return data;
+}
+
+/** GET /api/v1/sessions/:table_token/members — the live table roster.
+    The Table Pass reads this so a guest who joined but has not ordered yet
+    still appears. */
+export async function getTableMembers(tableToken: string): Promise<TableMember[]> {
+  const { data } = await apiRequest<TableMember[]>(
+    `${BASE}/sessions/${encodeURIComponent(tableToken)}/members`,
+  );
   return data;
 }
 
@@ -279,6 +311,19 @@ export async function requeueDeniedOrder(
 ): Promise<RequeuedDeniedOrder> {
   const { data } = await apiRequest<RequeuedDeniedOrder>(
     `${BASE}/orders/${encodeURIComponent(orderId)}/requeue`,
+    { method: "POST", query: { table_token: tableToken } },
+  );
+  return data;
+}
+
+/** POST /api/v1/orders/:order_id/retry — atomic re-fire of a refused round.
+    If the new ticket cannot be fired the refused one is left untouched. */
+export async function retryDeniedOrder(
+  orderId: string,
+  tableToken: string,
+): Promise<RetriedDeniedOrder> {
+  const { data } = await apiRequest<RetriedDeniedOrder>(
+    `${BASE}/orders/${encodeURIComponent(orderId)}/retry`,
     { method: "POST", query: { table_token: tableToken } },
   );
   return data;

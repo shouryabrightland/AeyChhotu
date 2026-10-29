@@ -32,15 +32,16 @@ export function CartModal({
   onDisplayNameChange,
   onFired,
 }: CartModalProps) {
-  const { table, cart, menuIndex, totals, updateLine, removeLine, fire } = live;
-  const [busyLineId, setBusyLineId] = useState<string | null>(null);
+  const { table, cart, menuIndex, totals, updateLine, removeLine, fire, syncing } = live;
   const [firing, setFiring] = useState(false);
   const [failure, setFailure] = useState<FireFailure | null>(null);
 
   async function handleFire() {
-    // Frontend double-submission block: the button is already `loading`,
-    // this guard stops Enter-key re-entrant calls while a fire is in flight.
-    if (firing) return;
+    /* docs/14 #2 — firing reads the SERVER cart at that instant, so a dish
+       added a few hundred milliseconds ago would be missing from the ticket
+       and left behind in the cart. Wait for the in-flight add: the button is
+       disabled and this guard covers Enter-key re-entry. */
+    if (firing || syncing) return;
     setFiring(true);
     setFailure(null);
 
@@ -58,23 +59,19 @@ export function CartModal({
     onFired();
   }
 
-  async function handleQuantity(line: CartLine, quantity: number) {
-    setBusyLineId(line.id);
-
+  function handleQuantity(line: CartLine, quantity: number) {
+    /* No local busy lock: the ± paints at once (the hook applies the delta
+       optimistically) and reconciles behind it (docs/14 #4). */
     if (quantity < 1) {
-      await removeLine(line.id);
-    } else {
-      // The steppers send INTENT (+1 / -1), not an absolute copy of local
-      // state. The server applies the delta atomically
-      // (quantity = quantity + delta), so a second phone tapping at the
-      // same moment can no longer overwrite this one — no lost updates.
-      const delta = quantity - line.quantity;
-      if (delta !== 0) {
-        await updateLine(line.id, { quantity_delta: delta });
-      }
+      void removeLine(line.id);
+      return;
     }
 
-    setBusyLineId(null);
+    // The steppers send INTENT (+1 / -1), not an absolute copy of local
+    // state. The server applies the delta atomically, so a second phone
+    // tapping at the same moment can no longer overwrite this one.
+    const delta = quantity - line.quantity;
+    if (delta !== 0) void updateLine(line.id, { quantity_delta: delta });
   }
 
   const isDuplicate =
@@ -98,11 +95,11 @@ export function CartModal({
               variant="ember"
               size="xl"
               loading={firing}
-              disabled={firing}
+              disabled={firing || syncing}
               onClick={() => void handleFire()}
               leftIcon={<Flame className="size-5" aria-hidden />}
             >
-              {firing ? "Firing order…" : "Fire order for the table"}
+              {firing ? "Firing order…" : syncing ? "Syncing the cart…" : "Fire order for the table"}
             </Button>
             <Button variant="ghost" size="lg" onClick={onClose} disabled={firing}>
               Keep editing
@@ -169,10 +166,9 @@ export function CartModal({
                 key={line.id}
                 line={line}
                 item={menuIndex.get(line.menu_item_id)}
-                busy={busyLineId === line.id}
-                onQuantityChange={(quantity) => void handleQuantity(line, quantity)}
+                onQuantityChange={(quantity) => handleQuantity(line, quantity)}
                 onNotesChange={(notes) => void updateLine(line.id, notes)}
-                onRemove={() => void handleQuantity(line, 0)}
+                onRemove={() => handleQuantity(line, 0)}
               />
             ))}
           </ul>
@@ -181,6 +177,7 @@ export function CartModal({
         <div className="flex items-center justify-between border-t border-line pt-5">
           <Text variant="small" tone="muted">
             {totals.itemCount} {totals.itemCount === 1 ? "item" : "items"} · shared cart
+            {syncing ? " · syncing" : ""}
           </Text>
           <span className="font-display text-subheading text-ink">{formatPrice(totals.total)}</span>
         </div>

@@ -393,9 +393,9 @@ export async function updateTableCode(
    three writes below are ONE transaction so a table can never end up with a
    new code but yesterday's cart, or a cleared cart but a live session.
 
-   Serving the open orders is deliberate: the operator is archiving THIS
-   seating, and the orders stay in history as served tickets — deleting them
-   would rewrite the day's sales. */
+   The seating's tickets are REMOVED with it (docs/14 #21): the next party
+   starts empty. Sales are safe — a served ticket was already rolled up into
+   `sales_day` / `sales_rollup` by sql/012 before it is deleted here. */
 export async function regenerateTableToken(tableId: string): Promise<{
   table_id: string;
   code: string;
@@ -427,12 +427,7 @@ export async function regenerateTableToken(tableId: string): Promise<{
     await client.query("DELETE FROM cart_items WHERE table_id = $1", [table.id]);
     await client.query("DELETE FROM table_members WHERE table_id = $1", [table.id]);
     await client.query("DELETE FROM table_device_presence WHERE table_id = $1", [table.id]);
-    await client.query(
-      `UPDATE orders
-          SET status = 'served', updated_at = now()
-        WHERE table_id = $1 AND status <> 'served' AND status <> 'denied'`,
-      [table.id],
-    );
+    await client.query("DELETE FROM orders WHERE table_id = $1", [table.id]);
 
     const newCode = generateTableCode();
     const updated = await client.query<{ id: string; code: string; name: string }>(
@@ -508,10 +503,10 @@ export async function clearTableAsAdmin(tableId: string): Promise<AdminClearTabl
 
    The manager's "stop this table now", available at any moment. Unlike a
    staff clear it does not check for owed money or an open ticket: the manager
-   decides. Open tickets are closed as served (they stay in history at their
-   frozen price), the cart and presence rows are removed, the session ends and
-   the bill/alert reset — but the CODE IS KEPT, so the printed QR stand still
-   works when the table opens again. */
+   decides. The seating's tickets are removed (docs/14 #21 — anything already
+   served was rolled up into sales_day first), the cart and presence rows go
+   with them, the session ends and the bill/alert reset — but the CODE IS
+   KEPT, so the printed QR stand still works when the table opens again. */
 export interface DeactivateTableResult {
   table_id: string;
   deactivated: true;
@@ -534,17 +529,15 @@ export async function deactivateTableAsAdmin(tableId: string): Promise<Deactivat
       throw new AppError(404, "TABLE_NOT_FOUND", "Unknown table.");
     }
 
+    // Count what is being stopped BEFORE removing it, for the console receipt.
     const closed = await client.query<{ count: number }>(
-      `WITH updated AS (
-         UPDATE orders
-            SET status = 'served', updated_at = now()
-          WHERE table_id = $1 AND status <> 'served' AND status <> 'denied'
-          RETURNING 1
-       )
-       SELECT count(*)::int AS count FROM updated`,
+      `SELECT count(*)::int AS count
+         FROM orders
+        WHERE table_id = $1 AND status IN ('pending', 'preparing', 'ready')`,
       [tableId],
     );
 
+    await client.query("DELETE FROM orders WHERE table_id = $1", [tableId]);
     await client.query("DELETE FROM cart_items WHERE table_id = $1", [tableId]);
     await client.query("DELETE FROM table_members WHERE table_id = $1", [tableId]);
     await client.query("DELETE FROM table_device_presence WHERE table_id = $1", [tableId]);
@@ -587,9 +580,10 @@ export async function deactivateTableAsAdmin(tableId: string): Promise<Deactivat
    those rows any more (every read filters `deleted_at IS NULL`), so they
    were pure leakage: a table re-created with the same code would inherit a
    cart from a party that left months ago. Archiving therefore closes the
-   seating completely — open tickets are served, cart/roster/presence are
-   deleted, credentials and bill state are wiped, and `last_cleared_at`
-   records when — in ONE transaction, so an archive can never half-happen. */
+   seating completely — tickets, cart, roster and presence are deleted,
+   credentials and bill state are wiped, and `last_cleared_at` records when —
+   in ONE transaction, so an archive can never half-happen. Served tickets
+   were rolled up into sales_day (sql/012) before they are removed. */
 export async function archiveTable(tableId: string): Promise<{ table_id: string }> {
   const client = await pool.connect();
   let committed = false;
@@ -607,15 +601,10 @@ export async function archiveTable(tableId: string): Promise<{ table_id: string 
       throw new AppError(404, "TABLE_NOT_FOUND", "Unknown table.");
     }
 
+    await client.query("DELETE FROM orders WHERE table_id = $1", [tableId]);
     await client.query("DELETE FROM cart_items WHERE table_id = $1", [tableId]);
     await client.query("DELETE FROM table_members WHERE table_id = $1", [tableId]);
     await client.query("DELETE FROM table_device_presence WHERE table_id = $1", [tableId]);
-    await client.query(
-      `UPDATE orders
-          SET status = 'served', updated_at = now()
-        WHERE table_id = $1 AND status <> 'served' AND status <> 'denied'`,
-      [tableId],
-    );
 
     await client.query(
       `UPDATE restaurant_tables
@@ -897,10 +886,13 @@ export interface AnalyticsSummary {
 }
 
 /* GET /api/v1/admin/analytics/top-selling.
-   Sold quantities come from `order_items`, never from the cart, and only
-   fully SERVED orders count — a ticket still on the line has not earned its
-   revenue yet. Prices are the fire-time snapshot (004), so re-pricing a dish
-   today cannot inflate yesterday's takings. */
+
+   Reads the SALES ROLLUP (sql/012), not the order rows. A ticket is counted
+   the moment it reaches `served`, and the rollup outlives the ticket when a
+   seating is cleared (docs/14 #21). Online tickets are absent on purpose — a
+   ticket still on the line has not earned its revenue yet. Revenue is the
+   fire-time price snapshot (sql/004), so re-pricing a dish today cannot
+   inflate yesterday's takings. */
 export async function topSellingAnalytics(): Promise<AnalyticsSummary> {
   const [items, summary, tables] = await Promise.all([
     pool.query<{
@@ -913,21 +905,18 @@ export async function topSellingAnalytics(): Promise<AnalyticsSummary> {
       `SELECT mi.id AS menu_item_id,
               mi.name,
               mi.category,
-              COALESCE(SUM(oi.quantity), 0)::int AS total_sold,
-              COALESCE(SUM(oi.quantity * oi.unit_price), 0)::numeric(10,2) AS total_revenue
-         FROM order_items oi
-         JOIN orders o ON o.id = oi.order_id
-         JOIN menu_items mi ON mi.id = oi.menu_item_id
-        WHERE o.status = 'served'
+              COALESCE(SUM(sr.quantity), 0)::int AS total_sold,
+              COALESCE(SUM(sr.revenue), 0)::numeric(10,2) AS total_revenue
+         FROM sales_rollup sr
+         JOIN menu_items mi ON mi.id = sr.menu_item_id
         GROUP BY mi.id, mi.name, mi.category
         ORDER BY total_sold DESC
         LIMIT 10`,
     ),
     pool.query<{ total_revenue: string; total_orders_served: number }>(
-      `SELECT COALESCE(SUM(total), 0)::numeric(10,2) AS total_revenue,
-              count(*)::int AS total_orders_served
-         FROM orders
-        WHERE status = 'served'`,
+      `SELECT COALESCE(SUM(revenue), 0)::numeric(10,2) AS total_revenue,
+              COALESCE(SUM(orders_served), 0)::int AS total_orders_served
+         FROM sales_day`,
     ),
     pool.query<{ active_tables_count: number }>(
       `SELECT count(*)::int AS active_tables_count

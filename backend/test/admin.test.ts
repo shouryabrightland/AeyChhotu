@@ -151,9 +151,20 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
 
   after(async () => {
     if (createdOrderIds.length > 0) {
+      /* The sales rollup (sql/012) keeps a marker per served ticket and rows
+         per sold dish. Both reference test data, so they go first: the rollup
+         is deliberately RESTRICT on menu_items, because production never
+         hard-deletes a dish (archive is a soft delete) and a takings figure
+         must not silently disappear with one. */
+      await pool.query("DELETE FROM sales_recorded_orders WHERE order_id = ANY($1::uuid[])", [
+        createdOrderIds,
+      ]);
       await pool.query("DELETE FROM orders WHERE id = ANY($1::uuid[])", [createdOrderIds]);
     }
     if (createdMenuItemIds.length > 0) {
+      await pool.query("DELETE FROM sales_rollup WHERE menu_item_id = ANY($1::uuid[])", [
+        createdMenuItemIds,
+      ]);
       await pool.query("DELETE FROM menu_items WHERE id = ANY($1::uuid[])", [createdMenuItemIds]);
     }
     if (createdTableIds.length > 0) {
@@ -246,7 +257,7 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
     assert.equal(error.status, 409);
   });
 
-  it("regenerates the token: new code, cart wiped, orders served, session cleared", async () => {
+  it("regenerates the token: new code, cart wiped, seating closed, session cleared", async () => {
     const table = await admin.createTable({ name: `Regenerate ${stamp}` });
     createdTableIds.push(table.table_id);
 
@@ -305,12 +316,15 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
     );
     assert.equal(cart.rows[0]?.count, 0);
 
-    // The open ticket is closed, not deleted: the day's sales stay intact.
-    const served = await pool.query<{ status: string }>(
-      "SELECT status FROM orders WHERE id = $1",
-      [orderId],
+    /* docs/14 #21 — the seating is handed over EMPTY: the open ticket and the
+       party's other tickets are removed with it. Served takings are not lost
+       because the database rolls them up into sales_day / sales_rollup
+       (sql/012) before the rows go. */
+    const remaining = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM orders WHERE table_id = $1",
+      [table.table_id],
     );
-    assert.equal(served.rows[0]?.status, "served");
+    assert.equal(remaining.rows[0]?.count, 0);
   });
 
   it("archives a table instead of dropping the row", async () => {
@@ -373,7 +387,7 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
     assert.equal(row.rows[0]?.is_available, false);
   });
 
-  it("aggregates best sellers from SERVED orders using the fire-time price", async () => {
+  it("aggregates best sellers from SERVED tickets using the fire-time price", async () => {
     const table = await admin.createTable({ name: `Analytics ${stamp}` });
     createdTableIds.push(table.table_id);
 
@@ -381,9 +395,13 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
     const quantity = 97;
     const unitPrice = 100;
 
+    /* The real path: a ticket is inserted in the kitchen, its lines are
+       attached, and only then does it become `served`. That transition is
+       what sql/012 rolls up (an INSERT-as-served would be counted before its
+       lines existed). */
     const order = await pool.query<{ id: string }>(
-      "INSERT INTO orders (table_id, status, total) VALUES ($1, 'served', $2) RETURNING id",
-      [table.table_id, quantity * unitPrice],
+      "INSERT INTO orders (table_id, status) VALUES ($1, 'pending') RETURNING id",
+      [table.table_id],
     );
     const orderId = order.rows[0]?.id;
     assert.ok(orderId);
@@ -393,6 +411,11 @@ suite(`admin engine against Postgres${reason ? ` — SKIPPED (${reason})` : ""}`
       `INSERT INTO order_items (order_id, menu_item_id, quantity, unit_price)
             VALUES ($1, $2, $3, $4)`,
       [orderId, analyticsMenuId, quantity, unitPrice],
+    );
+
+    await pool.query(
+      "UPDATE orders SET status = 'served', total = $2 WHERE id = $1",
+      [orderId, quantity * unitPrice],
     );
 
     const analytics = await admin.topSellingAnalytics();

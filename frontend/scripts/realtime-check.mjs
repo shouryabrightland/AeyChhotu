@@ -102,7 +102,7 @@ try {
   section("0. Diner session issues a realtime token");
   const session = await api("/api/v1/sessions/initialize", {
     method: "POST",
-    body: { table_token: TABLE_TOKEN },
+    body: { table_token: TABLE_TOKEN, user_id: "realtime-check", name: "Realtime Check" },
   });
   check("E1 → 200", session.status === 200, `got ${session.status}`);
 

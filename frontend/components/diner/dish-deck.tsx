@@ -35,8 +35,11 @@ export interface DishDeckProps {
    (aria-hidden, pointer-events-none) but they are what makes the section read
    as a deck instead of a single tile that keeps changing.
 
-   Replaced / re-filtered dishes remount this component from the browser (its
-   key carries the dish ids), so the skipped list can never hold a stale dish. */
+   The pile is RECONCILED with the `items` prop instead of being rebuilt from
+   it: when the menu reloads (an 86, a price change), the card on top is
+   replaced by the same dish's new object and the deck keeps its position.
+   Remounting here would reset every folder to its first card on every menu
+   event, which read as a page reload. */
 export function DishDeck({
   items,
   quantities,
@@ -48,19 +51,34 @@ export function DishDeck({
   sizes = "(min-width: 1280px) 20rem, (min-width: 640px) 40vw, 100vw",
   className,
 }: DishDeckProps) {
-  const [queue, setQueue] = useState<MenuItem[]>(items);
-  const [skipped, setSkipped] = useState<MenuItem[]>([]);
+  /* The deck stores IDS, and the items themselves are looked up from the
+     CURRENT prop on every render. That is what keeps an 86 or a price change
+     from remounting the pile: the same position keeps pointing at the same
+     dish, but the card always renders the latest object. An archived dish
+     simply stops resolving, so it drops out of the queue and the skipped
+     chips without any effect or state reset. */
+  const [queueIds, setQueueIds] = useState<string[]>(() => items.map((item) => item.id));
+  const [skippedIds, setSkippedIds] = useState<string[]>([]);
   const [addedCount, setAddedCount] = useState(0);
   const [announcement, setAnnouncement] = useState("");
 
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const expand = (ids: string[]): MenuItem[] =>
+    ids.flatMap((id) => {
+      const item = byId.get(id);
+      return item ? [item] : [];
+    });
+
+  const queue = expand(queueIds);
+  const skipped = expand(skippedIds);
   const current = queue[0] ?? null;
   const next = queue[1] ?? null;
   const total = items.length;
-  const seen = total - queue.length;
+  const seen = Math.min(total, Math.max(0, total - queue.length));
   const progress = total === 0 ? 0 : Math.round((seen / total) * 100);
 
   function advance() {
-    setQueue((rest) => rest.slice(1));
+    setQueueIds((rest) => rest.slice(1));
   }
 
   function handleAdd(item: MenuItem) {
@@ -70,19 +88,19 @@ export function DishDeck({
   }
 
   function handleSkip(item: MenuItem) {
-    setSkipped((list) => (list.some((entry) => entry.id === item.id) ? list : [...list, item]));
+    setSkippedIds((list) => (list.includes(item.id) ? list : [...list, item.id]));
     setAnnouncement(`Skipped ${item.name}.`);
   }
 
   function bringBack(item: MenuItem) {
-    setSkipped((list) => list.filter((entry) => entry.id !== item.id));
-    setQueue((list) => [item, ...list]);
+    setSkippedIds((list) => list.filter((id) => id !== item.id));
+    setQueueIds((list) => [item.id, ...list.filter((id) => id !== item.id)]);
     setAnnouncement(`${item.name} is back on top of the deck.`);
   }
 
   function startOver() {
-    setQueue(items);
-    setSkipped([]);
+    setQueueIds(items.map((item) => item.id));
+    setSkippedIds([]);
     setAddedCount(0);
     setAnnouncement(label ? `Starting ${label} again.` : "Starting this deck again.");
   }

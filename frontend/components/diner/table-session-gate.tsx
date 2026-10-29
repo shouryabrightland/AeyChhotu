@@ -1,12 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { InAppQrScanner } from "@/components/diner/in-app-qr-scanner";
 import { SessionEndedState } from "@/components/diner/session-ended-state";
 import { TableLockedGate } from "@/components/diner/table-locked-gate";
+import { TableNameGate } from "@/components/diner/table-name-gate";
 import { TablePinPad } from "@/components/diner/table-pin-pad";
-import { Button } from "@/components/ui/button";
+import { Button, buttonStyles } from "@/components/ui/button";
 import { Container } from "@/components/ui/container";
 import { ErrorState } from "@/components/ui/empty-state";
 import { Spinner } from "@/components/ui/spinner";
@@ -18,7 +20,7 @@ import {
   startTableSession,
   type TableSessionGrant,
 } from "@/lib/api-client";
-import { getDeviceId, getStoredDisplayName } from "@/lib/api/session";
+import { getDeviceId, getStoredDisplayName, storeDisplayName } from "@/lib/api/session";
 import {
   clearStoredSession,
   readStoredSession,
@@ -38,6 +40,11 @@ import {
  * longer enough on its own: anyone who photographs the QR on the table has
  * the token. The gate answers, in order:
  *
+ *   0. Who is this? A name, once, before ANY session call. Every endpoint
+ *      below refuses an unnamed guest, because an unnamed diner becomes an
+ *      anonymous "Guest" line on the ticket and in the split bill. The name
+ *      is remembered on the device, and a device that already holds this
+ *      table's pass reconnects with it silently — a refresh never re-asks.
  *   1. Does this device already hold the pass for THIS table?
  *      → POST /sessions/reconnect. No keypad, no flash. A 403 means the
  *        table was settled or the secret was replaced, so storage is
@@ -51,7 +58,7 @@ import {
  * Nothing here renders a child until a session has been GRANTED, which is
  * what makes `useLiveTable` free of authentication logic. */
 
-type Phase = "checking" | "pin" | "locked" | "ready" | "ended" | "error";
+type Phase = "checking" | "name" | "pin" | "locked" | "ready" | "ended" | "missing" | "error";
 
 /** The `?pass=` / `?secret=` value from the URL, if exactly one is present.
     A native camera app can open the QR as a plain link, so the gate has to
@@ -97,15 +104,22 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
     return scanTimeRef.current;
   }, []);
 
+  /* The name confirmed on the gate screen. Empty until the guest has one, and
+     every session call below refuses to run without it. */
+  const [confirmedName, setConfirmedName] = useState("");
+  /* What the name screen starts with: the last name this device used. */
+  const [nameDraft, setNameDraft] = useState("");
+
   /** The device identity + scan time every entry point carries. The identity
-      is what puts this guest on the table's roster (table_members). */
+      is what puts this guest on the table's roster (table_members), and the
+      name is what the ticket and the split bill show. */
   const sessionEntry = useCallback(
     () => ({
       scan_time: scanTime(),
       user_id: getDeviceId(),
-      name: getStoredDisplayName(),
+      name: confirmedName,
     }),
-    [scanTime],
+    [scanTime, confirmedName],
   );
 
   /* A cleared / stale table is not a screen to linger on: wipe the dead
@@ -147,13 +161,36 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
     setPhase("ready");
   }, []);
 
-  // ---- Step 1 ⇢ 4: reconnect, URL pass, scan, join ----------------------
+  // ---- Step 0 ⇢ 4: name, reconnect, URL pass, scan, join ----------------
   useEffect(() => {
     let cancelled = false;
 
     // No state reset here: the effect only SUBSCRIBES to the (async) answer.
     // A retry goes through the button below, which sets the phase first.
     (async () => {
+      /* 0. Who is this? A device that already holds THIS table's pass and a
+            saved name adopts it and continues to the reconnect path, so a
+            refresh or a tracker load never asks again. Everything else — a
+            first scan, a tablemate joining, a device whose name was cleared
+            — stops at the name screen before any endpoint is called. The
+            decision is deferred out of the effect body so the first paint
+            stays "checking" and hydration can never disagree. */
+      if (!confirmedName) {
+        const stored = readStoredSession(tableToken);
+        const saved = getStoredDisplayName();
+
+        if (stored && saved) {
+          if (!cancelled) setConfirmedName(saved);
+          return;
+        }
+
+        if (!cancelled) {
+          setNameDraft(saved);
+          setPhase("name");
+        }
+        return;
+      }
+
       /* 1. This device already belongs to the table? A refresh must never
             show the keypad again. A rejection means the session is GONE —
             the table was settled or cleared — and per the stale-refresh rule
@@ -166,7 +203,7 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
           const granted = await reconnectTableSession(
             tableToken,
             stored.session_secret,
-            scanTime(),
+            sessionEntry(),
           );
           if (!cancelled) grant(granted);
           return;
@@ -182,8 +219,11 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
           }
 
           if (err instanceof ApiError && err.error === "TABLE_NOT_FOUND") {
+            /* docs/14 #26 — a code that is not a table is NOT a settled
+               table: saying "the bill was settled" for a typo was worse than
+               saying nothing. */
             clearStoredSession(tableToken);
-            setPhase("ended");
+            setPhase("missing");
             return;
           }
 
@@ -259,7 +299,8 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
           }
 
           if (err.error === "TABLE_NOT_FOUND") {
-            setPhase("ended");
+            clearStoredSession(tableToken);
+            setPhase("missing");
             return;
           }
           setErrorMessage(err.message);
@@ -275,7 +316,7 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
     return () => {
       cancelled = true;
     };
-  }, [tableToken, reloadKey, grant, exitToHome, scanTime, sessionEntry]);
+  }, [tableToken, reloadKey, confirmedName, grant, exitToHome, scanTime, sessionEntry]);
 
   /** Turns a join failure into the next gate state (server owns the count). */
   function applyJoinFailure(err: unknown) {
@@ -355,7 +396,26 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
     setScanOpen(true);
   }
 
+  /** The name is confirmed: save it on this device, then let the normal
+      reconnect → claim → join sequence run with it attached. */
+  function handleName(name: string) {
+    storeDisplayName(name);
+    setNameDraft(name);
+    setConfirmedName(name);
+    setPhase("checking");
+  }
+
   // ---- Render ----------------------------------------------------------
+
+  if (phase === "name") {
+    return (
+      <TableNameGate
+        tableName={tableName || tableToken}
+        initialName={nameDraft}
+        onConfirm={handleName}
+      />
+    );
+  }
 
   if (phase === "checking") {
     return (
@@ -366,6 +426,27 @@ export function TableSessionGate({ tableToken, children }: TableSessionGateProps
   }
 
   if (phase === "ended") return <SessionEndedState />;
+
+  /* A wrong code should say so, with a way back to the scanner. It must not
+     render the settled-table screen (docs/14 #26). */
+  if (phase === "missing") {
+    return (
+      <main id="main" className="min-h-dvh">
+        <Container size="narrow" className="py-16">
+          <ErrorState
+            titleAs="h1"
+            title="That code is not a table"
+            description="Check the code on your table's QR stand, or scan the QR code again."
+            action={
+              <Link href="/" className={buttonStyles({ size: "md" })}>
+                Enter the code again
+              </Link>
+            }
+          />
+        </Container>
+      </main>
+    );
+  }
 
   if (phase === "error") {
     return (

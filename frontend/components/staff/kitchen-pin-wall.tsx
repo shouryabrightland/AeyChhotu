@@ -44,8 +44,10 @@ export function KitchenPinWall({ onSuccess, surface = "kitchen" }: KitchenPinWal
     // E2 issues the shift JWT and stores it for every authenticated KDS call
     // (and the 401 redirect guard). There is no offline substitute: an
     // unauthenticated board is not a safer board, it is a fictional one.
+    // `surface` only feeds the rate limiter: kitchen and floor share this
+    // endpoint, so each wall keeps its own failed-attempt budget (#18).
     try {
-      await loginKDS(value);
+      await loginKDS(value, surface === "floor" ? "floor" : "kitchen");
       onSuccess();
       return;
     } catch (err) {

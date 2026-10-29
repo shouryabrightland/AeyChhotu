@@ -41,23 +41,23 @@ export function DinerNavBar({
   onOpenPass,
   onRefresh,
 }: DinerNavBarProps) {
-  const { menuIndex, orders, cart, activeOrder } = live;
+  const { menuIndex, orders, cart, activeOrder, refreshing } = live;
   const headerRef = useRef<HTMLElement>(null);
 
-  /* The band always starts on "Guest" and only then adopts the stored name.
-     A name read during render would be present on the client and absent in
-     the server HTML, which is exactly the mismatch React reports. */
-  const [hydratedName, setHydratedName] = useState("Guest");
+  /* The band starts blank and only then adopts the stored name: a name read
+     during render would be present on the client and absent in the server
+     HTML, which is exactly the mismatch React reports. The gate has already
+     confirmed a name before this screen mounts, so the blank is one frame. */
+  const [hydratedName, setHydratedName] = useState("");
 
   useEffect(() => {
     const timer = window.setTimeout(() => setHydratedName(getStoredDisplayName()), 0);
     return () => window.clearTimeout(timer);
   }, []);
 
-  /* "Guest" is the server's value, so while the prop still holds it the
-     locally hydrated name is the better answer; the moment the parent syncs
-     (or the guest edits), the prop wins. */
-  const name = displayName === "Guest" && hydratedName ? hydratedName : displayName;
+  /* The prop wins the moment the parent syncs (or the guest edits); until
+     then the locally hydrated name is the better answer. */
+  const name = displayName || hydratedName;
 
   /* Matches the landing page's navbar exactly: transparent and lineless at
      the top of the scroll, then a blurred canvas wash once content passes
@@ -198,14 +198,18 @@ export function DinerNavBar({
           {/* Deliberately last of the five: it is the utility, not the job.
               Realtime normally keeps this table current on its own; this is
               the tap that proves the app right when it does not. */}
-          <Tooltip label="Refresh menu and cart" side="bottom">
+          <Tooltip label={refreshing ? "Refreshing…" : "Refresh menu and cart"} side="bottom">
             <button
               type="button"
               onClick={onRefresh}
-              aria-label="Refresh menu and cart"
-              className={actionClass}
+              disabled={refreshing}
+              aria-label={refreshing ? "Refreshing menu and cart" : "Refresh menu and cart"}
+              aria-busy={refreshing || undefined}
+              className={cn(actionClass, "disabled:pointer-events-none disabled:opacity-50")}
             >
-              <RefreshCw className="size-5" aria-hidden />
+              {/* docs/14 #1 — a refresh is SOFT: the menu stays mounted and
+                  only this glyph shows the re-read. */}
+              <RefreshCw className={cn("size-5", refreshing && "animate-spin")} aria-hidden />
             </button>
           </Tooltip>
         </div>
@@ -250,7 +254,9 @@ function DinerIdentity({
 
   function commit() {
     const next = draft.trim();
-    onChange(next || "Guest");
+    /* A blank edit keeps the current name — every cart line needs one. */
+    if (next) onChange(next);
+    else setDraft(displayName);
     setEditing(false);
   }
 

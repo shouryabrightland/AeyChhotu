@@ -4,7 +4,12 @@ import helmet from "helmet";
 import { env } from "./config/env.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFoundHandler } from "./middleware/not-found.js";
-import { apiLimiter, loginLimiter } from "./middleware/rate-limit.js";
+import {
+  adminLoginLimiter,
+  apiLimiter,
+  ipSafetyLimiter,
+  staffLoginLimiter,
+} from "./middleware/rate-limit.js";
 import { requestContext } from "./observability/logger.js";
 import { healthRouter } from "./routes/health.js";
 import { readyRouter } from "./routes/ready.js";
@@ -87,12 +92,15 @@ export function createApp() {
   // JSON body parsing for mutating requests.
   app.use(express.json({ limit: "1mb" }));
 
-  /* Rate limits. Order matters: the login limiter must be mounted BEFORE
-     the general limiter so its failed-attempt-only budget is what applies
-     to kds-login (the general limiter would otherwise count successes too,
-     punishing a busy kitchen). */
-  app.use("/api/v1/auth/kds-login", loginLimiter);
-  app.use("/api/v1/auth/admin-login", loginLimiter);
+  /* Rate limits. Order matters: the login limiters must be mounted BEFORE
+     the general limiter so their failed-attempt-only budgets are what apply
+     to the PIN walls (the general limiter would otherwise count successes
+     too, punishing a busy kitchen). Kitchen/floor and admin have separate
+     counters, and the API budget is per credential rather than per shared
+     restaurant IP — see middleware/rate-limit.ts. */
+  app.use("/api/v1/auth/kds-login", staffLoginLimiter);
+  app.use("/api/v1/auth/admin-login", adminLoginLimiter);
+  app.use("/api/v1", ipSafetyLimiter);
   app.use("/api/v1", apiLimiter);
 
   // Routes (docs/7-api-contract.md E1–E17; health/ready stay public).

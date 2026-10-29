@@ -1,7 +1,6 @@
 "use client";
 
 import { Flame, Loader2, Pencil, Receipt } from "lucide-react";
-import { useState } from "react";
 import { QuantityStepper } from "@/components/diner/quantity-stepper";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -36,18 +35,15 @@ export function TableCart({
   className,
 }: TableCartProps) {
   const { cart, menuIndex, totals, soldOutInCart, syncing, updateLine, removeLine } = live;
-  const [busyLineId, setBusyLineId] = useState<string | null>(null);
 
-  async function changeQuantity(cartItemId: string, nextQuantity: number, delta: number) {
-    setBusyLineId(cartItemId);
-
+  function changeQuantity(cartItemId: string, nextQuantity: number, delta: number) {
+    /* Optimistic (#4): the hook paints the new quantity immediately, so there
+       is no per-line spinner blocking the next tap. */
     if (nextQuantity < 1) {
-      await removeLine(cartItemId);
+      void removeLine(cartItemId);
     } else if (delta !== 0) {
-      await updateLine(cartItemId, { quantity_delta: delta });
+      void updateLine(cartItemId, { quantity_delta: delta });
     }
-
-    setBusyLineId(null);
   }
 
   return (
@@ -132,9 +128,8 @@ export function TableCart({
                   <QuantityStepper
                     quantity={line.quantity}
                     label={item?.name ?? "this item"}
-                    busy={busyLineId === line.id}
                     onChange={(nextQuantity) =>
-                      void changeQuantity(line.id, nextQuantity, nextQuantity - line.quantity)
+                      changeQuantity(line.id, nextQuantity, nextQuantity - line.quantity)
                     }
                     className="shrink-0"
                   />

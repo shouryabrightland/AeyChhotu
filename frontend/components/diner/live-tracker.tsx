@@ -178,7 +178,7 @@ export function LiveTracker({ tableToken }: LiveTrackerProps) {
         </div>
 
         <div className="flex items-center gap-3">
-          <ActiveDinersBadge tableToken={table.code} />
+          <ActiveDinersBadge tableToken={table.code} serverCount={live.activeDevices} />
 
           {/* Backup refresh — the same quiet icon treatment as the link below.
               Channel C streams the status flips; this is for the socket that

@@ -381,6 +381,185 @@ export async function requeueDeniedOrder(
   }
 }
 
+export interface RetriedDeniedOrder {
+  order_id: string;
+  table_id: string;
+  status: string;
+  created_at: string;
+  /** How many lines went back on the new ticket. */
+  moved: number;
+  /** Names the kitchen no longer has, left off the replacement ticket. */
+  omitted: string[];
+}
+
+/* POST /api/v1/orders/:order_id/retry — "Retry" as ONE transaction.
+
+   docs/14 #23: the old frontend requeued (which DELETED the refused ticket)
+   and then fired. If that second call failed — an 86, a dropped network — the
+   refused ticket was already gone and the guest was left with a toast and an
+   empty tracker. Here the move, the delete and the fire share one
+   transaction, so a failed re-fire ROLLS BACK: the denied ticket (and its
+   explanation) is still on screen, and the cart is exactly as it was.
+
+   `moved`/`omitted` describe the replacement ticket. Nothing available ⇒
+   409 NOTHING_TO_RETRY with the ticket left intact. */
+export async function retryDeniedOrder(
+  orderId: string,
+  tableToken: string,
+): Promise<RetriedDeniedOrder> {
+  const client = await pool.connect();
+  let committed = false;
+
+  try {
+    await client.query("BEGIN");
+
+    const found = await client.query<{ id: string; table_id: string; status: string }>(
+      `SELECT o.id, o.table_id, o.status
+         FROM orders o
+         JOIN restaurant_tables t ON t.id = o.table_id
+        WHERE o.id = $1
+          AND t.code = $2
+          AND t.deleted_at IS NULL
+          FOR UPDATE OF o`,
+      [orderId, tableToken],
+    );
+
+    const order = found.rows[0];
+    if (!order) {
+      throw new AppError(404, "ORDER_NOT_FOUND", "That order no longer exists.");
+    }
+    if (order.status !== "denied") {
+      throw new AppError(
+        409,
+        "ORDER_NOT_DENIED",
+        "Only a denied order can be retried.",
+        { current_status: order.status },
+      );
+    }
+
+    const lines = await client.query<{
+      menu_item_id: string;
+      name: string;
+      quantity: number;
+      request_note: string;
+      allergy_note: string;
+      added_by: string;
+      is_available: boolean;
+    }>(
+      `SELECT oi.menu_item_id,
+              mi.name,
+              oi.quantity,
+              oi.request_note,
+              oi.allergy_note,
+              oi.added_by,
+              mi.is_available
+         FROM order_items oi
+         JOIN menu_items mi ON mi.id = oi.menu_item_id
+        WHERE oi.order_id = $1
+        ORDER BY oi.id`,
+      [orderId],
+    );
+
+    const available = lines.rows.filter((line) => line.is_available);
+    const omitted = lines.rows.filter((line) => !line.is_available).map((line) => line.name);
+
+    if (available.length === 0) {
+      // Keep the refused ticket exactly where the diner can read WHY.
+      await client.query("ROLLBACK");
+      committed = true;
+      throw new AppError(
+        409,
+        "NOTHING_TO_RETRY",
+        omitted.length
+          ? `${omitted.join(", ")} ${omitted.length === 1 ? "is" : "are"} out of stock — nothing could be re-fired.`
+          : "There was nothing left to re-fire from that order.",
+        { omitted },
+      );
+    }
+
+    for (const line of available) {
+      await client.query(
+        `INSERT INTO cart_items (table_id, menu_item_id, quantity, request_note, allergy_note, added_by)
+              VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (table_id, menu_item_id, request_note, allergy_note)
+           DO UPDATE SET quantity = LEAST(cart_items.quantity + EXCLUDED.quantity, 99),
+                         added_by = EXCLUDED.added_by`,
+        [
+          order.table_id,
+          line.menu_item_id,
+          line.quantity,
+          line.request_note,
+          line.allergy_note,
+          line.added_by,
+        ],
+      );
+    }
+
+    /* Replace the refused ticket with the fresh one. fire_order() validates
+       inventory, snapshots prices and drains the cart; if it answers with
+       anything but OK this whole transaction (cart move included) is rolled
+       back, so the diner never loses the explanation. */
+    await client.query("DELETE FROM orders WHERE id = $1", [orderId]);
+
+    const fired = await client.query<{ result: FireResult }>(
+      "SELECT fire_order($1) AS result",
+      [tableToken],
+    );
+    const result = fired.rows[0]?.result;
+
+    if (!result) {
+      throw new AppError(500, "INTERNAL_ERROR", "Unexpected server error.");
+    }
+
+    switch (result.code) {
+      case "OK":
+        break;
+      case "INVENTORY_FAILURE": {
+        const sold = result.sold_out ?? [];
+        /* This transaction rolls back, so nothing was purged and nothing was
+           re-fired — say exactly that instead of the fire endpoint's
+           "Cart updated." copy. */
+        throw new AppError(
+          409,
+          "INVENTORY_FAILURE",
+          `${sold.join(", ")} ${sold.length > 1 ? "have" : "has"} sold out — nothing was re-fired.`,
+          { sold_out: sold },
+        );
+      }
+      case "DUPLICATE_ORDER":
+        throw new AppError(409, "DUPLICATE_ORDER", "Order already sent", {
+          order_id: result.order_id,
+          status: result.status,
+        });
+      case "EMPTY_CART":
+        throw new AppError(409, "EMPTY_CART", "The table cart is empty — nothing to fire.");
+      case "TABLE_NOT_FOUND":
+        throw new AppError(404, "TABLE_NOT_FOUND", "Invalid table token parsed.");
+      default:
+        throw new AppError(500, "INTERNAL_ERROR", "Unexpected server error.");
+    }
+
+    await client.query("COMMIT");
+    committed = true;
+
+    return {
+      order_id: result.order_id as string,
+      table_id: result.table_id as string,
+      status: result.status as string,
+      created_at: iso(result.created_at),
+      moved: available.length,
+      omitted,
+    };
+  } catch (err) {
+    if (!committed) {
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export interface DismissedDeniedOrder {
   order_id: string;
   dismissed: true;

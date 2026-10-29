@@ -55,6 +55,8 @@ export function useLiveFloor(): LiveFloorValue {
   const [reloadKey, setReloadKey] = useState(0);
 
   const mountedRef = useRef(true);
+  /** Real data has been on screen: a dropped poll keeps it there. */
+  const hasDataRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -70,7 +72,12 @@ export function useLiveFloor(): LiveFloorValue {
 
   const apply = useCallback((next: FloorTableSummary[]) => {
     if (!mountedRef.current) return;
-    setTables(next);
+    hasDataRef.current = true;
+    /* Identical payload ⇒ keep the previous array, so the room does not
+       re-render every 15 s when nothing moved. */
+    setTables((current) =>
+      JSON.stringify(current) === JSON.stringify(next) ? current : next,
+    );
   }, []);
 
   // ---- Initial load + every retry --------------------------------------
@@ -108,7 +115,10 @@ export function useLiveFloor(): LiveFloorValue {
       apply(await loadLive());
       if (mountedRef.current && phase === "error") setPhase("success");
     } catch (err) {
-      if (err instanceof ApiError && mountedRef.current) {
+      /* Only a board that never loaded may fall to the error screen. A
+         dropped poll or a failed post-settle read keeps the room visible. */
+      if (!mountedRef.current || hasDataRef.current) return;
+      if (err instanceof ApiError) {
         setError(err);
         setPhase("error");
       }

@@ -43,6 +43,9 @@ const { listFloorTables, settleTableBill, clearFloorTable } = await import(
 );
 const { clearTableAsAdmin } = await import("../src/services/admin.service.js");
 const { pool } = await import("../src/db/pool.js");
+const { initializeSchema, joinPassSchema, joinPinSchema, reconnectSchema } = await import(
+  "../src/validation/schemas.js"
+);
 
 const PIN_RE = /^\d{2}$/;
 const SECRET_RE = /^[A-Za-z0-9]{20}$/;
@@ -122,12 +125,16 @@ async function resetTable() {
     `DELETE FROM table_device_presence
       WHERE table_id = (SELECT id FROM restaurant_tables WHERE code = $1)`,
     [TEST_CODE],
-  );
-  await pool.query(
-    `DELETE FROM cart_items
-      WHERE table_id = (SELECT id FROM restaurant_tables WHERE code = $1)`,
-    [TEST_CODE],
-  );
+  );    await pool.query(
+      `DELETE FROM cart_items
+        WHERE table_id = (SELECT id FROM restaurant_tables WHERE code = $1)`,
+      [TEST_CODE],
+    );
+    await pool.query(
+      `DELETE FROM table_members
+        WHERE table_id = (SELECT id FROM restaurant_tables WHERE code = $1)`,
+      [TEST_CODE],
+    );
   await pool.query(
     `UPDATE restaurant_tables
         SET status = 'empty', session_pin = NULL, session_secret = NULL,
@@ -177,6 +184,48 @@ describe("session credential generators", () => {
   it("keeps the documented thresholds", () => {
     assert.equal(MAX, 3);
     assert.equal(sessions.SESSION_SECRET_LENGTH, 20);
+  });
+});
+
+/* The name is not decoration: it is the only thing that keeps a ticket, a
+   split-bill tab and the roster pointing at a person. The API therefore
+   refuses every entry point without one. */
+describe("the guest name on every entry point", () => {
+  const token = { table_token: "k7x2p" };
+
+  it("refuses initialize without a usable name", () => {
+    assert.equal(initializeSchema.safeParse(token).success, false);
+    assert.equal(initializeSchema.safeParse({ ...token, name: "   " }).success, false);
+  });
+
+  it("trims and keeps the name it is given", () => {
+    const parsed = initializeSchema.safeParse({
+      ...token,
+      user_id: "dev_1234",
+      name: "  Ravi  ",
+    });
+    assert.equal(parsed.success, true);
+    if (!parsed.success) return;
+    assert.equal(parsed.data.name, "Ravi");
+    assert.equal(parsed.data.user_id, "dev_1234");
+  });
+
+  it("refuses join-pin, join-pass and reconnect without one", () => {
+    assert.equal(joinPinSchema.safeParse({ ...token, pin: "07" }).success, false);
+    assert.equal(joinPassSchema.safeParse({ ...token, secret: "a".repeat(20) }).success, false);
+    assert.equal(reconnectSchema.safeParse({ ...token, secret: "a".repeat(20) }).success, false);
+  });
+
+  it("accepts all three when the name is present", () => {
+    const name = "Ravi";
+    assert.equal(joinPinSchema.safeParse({ ...token, pin: "07", name }).success, true);
+    assert.equal(joinPassSchema.safeParse({ ...token, secret: "a".repeat(20), name }).success, true);
+    assert.equal(reconnectSchema.safeParse({ ...token, secret: "a".repeat(20), name }).success, true);
+  });
+
+  it("caps the name at 40 characters", () => {
+    assert.equal(initializeSchema.safeParse({ ...token, name: "a".repeat(40) }).success, true);
+    assert.equal(initializeSchema.safeParse({ ...token, name: "a".repeat(41) }).success, false);
   });
 });
 
@@ -345,6 +394,39 @@ describe("table session lifecycle", { skip: hasDatabase ? false : "DATABASE_URL 
       sessions.reconnectSession({ table_token: TEST_CODE, secret: stale }),
       "SESSION_ENDED",
     );
+  });
+
+  it("registers the returning device on reconnect and renames it in place", async () => {
+    await resetTable();
+    const granted = await claim();
+    const tableId = await testTableId();
+
+    await sessions.reconnectSession({
+      table_token: TEST_CODE,
+      secret: granted.session_secret,
+      member: { user_id: "dev-returning", name: "Ravi" },
+    });
+
+    const memberRows = () =>
+      pool.query<{ user_id: string; name: string }>(
+        "SELECT user_id, name FROM table_members WHERE table_id = $1 ORDER BY user_id",
+        [tableId],
+      );
+
+    const first = await memberRows();
+    assert.equal(first.rows.length, 1, "reconnect must add exactly one roster row");
+    assert.equal(first.rows[0]?.name, "Ravi");
+
+    // A refresh with a corrected name updates the row; it never forks one.
+    await sessions.reconnectSession({
+      table_token: TEST_CODE,
+      secret: granted.session_secret,
+      member: { user_id: "dev-returning", name: "Ravi Kumar" },
+    });
+
+    const renamed = await memberRows();
+    assert.equal(renamed.rows.length, 1, "a second reconnect must not duplicate the member");
+    assert.equal(renamed.rows[0]?.name, "Ravi Kumar");
   });
 
   it("keeps the session alive when the last ticket is served before payment", async () => {

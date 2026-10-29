@@ -30,11 +30,21 @@ const scanTime = z
   .refine((value) => !Number.isNaN(Date.parse(value)), "scan_time must be an ISO timestamp.")
   .optional();
 
-/* The anonymous device identity registered in table_members. Optional for
-   backwards compatibility; when present the guest appears on the roster. */
+/* The device identity registered in table_members.
+
+   `name` is REQUIRED on every entry point: an anonymous "Guest" is what used
+   to lump several people's dishes onto one split-bill tab and leave the
+   kitchen with no name to call at a crowded table. The gate asks for it
+   before the first session call, and the roster and every ticket inherit it.
+   `user_id` stays optional only for older clients — a payload without one
+   joins without a roster row, exactly as before. */
 const sessionMember = {
   user_id: z.string().trim().min(1, "user_id cannot be empty.").max(64, "user_id must be 64 characters or fewer.").optional(),
-  name: z.string().trim().max(40, "name must be 40 characters or fewer.").optional(),
+  name: z
+    .string()
+    .trim()
+    .min(1, "name is required — enter your name so the table knows who ordered.")
+    .max(40, "name must be 40 characters or fewer."),
 };
 
 /** E1 POST /api/v1/sessions/initialize */
@@ -72,11 +82,16 @@ export const reconnectSchema = z.object({
   table_token: tableToken,
   secret: tableSecret,
   scan_time: scanTime,
+  ...sessionMember,
 });
 
-/** E2 POST /api/v1/auth/kds-login */
+/** E2 POST /api/v1/auth/kds-login.
+    `surface` is optional and only feeds the rate limiter: kitchen and floor
+    share this endpoint, so each PIN wall gets its own failed-attempt counter
+    (docs/14 #18). It never changes the role the server issues. */
 export const kdsLoginSchema = z.object({
   pin: z.string().regex(/^\d{4,6}$/, "PIN must be 4 to 6 digits."),
+  surface: z.enum(["kitchen", "floor"]).optional(),
 });
 
 /** POST /api/v1/auth/admin-login — the owner/manager PIN (ADMIN_PIN).
@@ -121,7 +136,14 @@ export const cartAddSchema = z.object({
   quantity: z.coerce.number().int("quantity must be an integer between 1 and 99.").min(1, "quantity must be an integer between 1 and 99.").max(99, "quantity must be an integer between 1 and 99.").default(1),
   allergy_note: note.optional(),
   request_note: note.optional(),
-  added_by: z.string().max(40, "added_by must be 40 characters or fewer.").optional(),
+  /* Who put it in the cart, taken from the name the gate collected. Required:
+     an unnamed cart line becomes an unnamed ticket, which is what made the
+     split bill read as one anonymous "Guest" tab. */
+  added_by: z
+    .string()
+    .trim()
+    .min(1, "added_by is required — a dish must belong to someone at the table.")
+    .max(40, "added_by must be 40 characters or fewer."),
 });
 
 /** E6 PATCH /api/v1/cart/items/:cart_item_id */

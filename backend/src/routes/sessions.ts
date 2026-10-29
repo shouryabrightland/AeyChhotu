@@ -1,9 +1,11 @@
 import { Router } from "express";
 import {
   activeCheck,
+  getTableState,
   initializeSession,
   joinWithPass,
   joinWithPin,
+  listTableMembers,
   reconnectSession,
   recordHeartbeat,
   removeHeartbeat,
@@ -39,7 +41,7 @@ export const sessionsRouter = Router();
    guest can identity themselves) their roster entry. The service owns the
    decision — a stale page is refused with 409 STALE_SESSION and a device that
    joined is upserted into table_members. */
-function memberOf(body: { user_id?: string; name?: string }) {
+function memberOf(body: { user_id?: string; name: string }) {
   if (!body.user_id) return undefined;
   return { user_id: body.user_id, name: body.name };
 }
@@ -71,7 +73,25 @@ sessionsRouter.post("/join-pass", async (req, res) => {
 // E1d — POST /api/v1/sessions/reconnect
 sessionsRouter.post("/reconnect", async (req, res) => {
   const body = parseOrThrow(reconnectSchema, req.body);
-  const data = await reconnectSession(body);
+  const data = await reconnectSession({ ...body, member: memberOf(body) });
+  res.status(200).json({ success: true, data });
+});
+
+/* GET /api/v1/sessions/:table_token — the diner's own table state.
+   The REST half of docs/14 #3/#5: a phone without realtime still learns that
+   the bill was settled or the table cleared, and `bill_status` is the server
+   column rather than a browser-local store. */
+sessionsRouter.get("/:table_token", async (req, res) => {
+  const params = parseOrThrow(sessionTableParamsSchema, req.params);
+  const data = await getTableState(params.table_token);
+  res.status(200).json({ success: true, data });
+});
+
+/* GET /api/v1/sessions/:table_token/members — the live roster for the Table
+   Pass (#16). Same table-token capability as the rest of the diner surface. */
+sessionsRouter.get("/:table_token/members", async (req, res) => {
+  const params = parseOrThrow(sessionTableParamsSchema, req.params);
+  const data = await listTableMembers(params.table_token);
   res.status(200).json({ success: true, data });
 });
 

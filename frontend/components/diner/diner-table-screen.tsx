@@ -1,9 +1,9 @@
 "use client";
 
 import { CircleCheckBig } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { acknowledgeSettlement, requestBill } from "@/lib/api/bill";
 import { BillDrawer, type BillScope } from "@/components/diner/bill-drawer";
 import { CartModal } from "@/components/diner/cart-modal";
 import { CartStrip } from "@/components/diner/cart-strip";
@@ -20,9 +20,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/loading-state";
 import { useToast } from "@/components/ui/toast";
 import { usePresence } from "@/hooks/use-presence";
-import { useBills } from "@/hooks/use-bills";
 import { useLiveTable } from "@/hooks/use-live-table";
-import { ApiError, requestTableBill } from "@/lib/api-client";
 import { getStoredDisplayName, storeDisplayName, storeTableToken } from "@/lib/api/session";
 import { clearStoredSession, getGrantedSession } from "@/lib/api/table-session";
 import type { MenuItem } from "@/lib/api/types";
@@ -30,9 +28,6 @@ import type { MenuItem } from "@/lib/api/types";
 export interface DinerTableScreenProps {
   tableToken: string;
 }
-
-/* How long the diner gets to read the thank-you before the table clears. */
-const SETTLED_THANKS_MS = 3600;
 
 export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
   const router = useRouter();
@@ -48,11 +43,12 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
   // The Table Pass sheet: this device's PIN plus the QR that carries the
   // session secret to a tablemate's camera.
   const [passOpen, setPassOpen] = useState(false);
-  /* Hydration-safe identity: the server has no localStorage, so it renders
-     "Guest" and so does the first client paint. The stored name is synced in
-     the effect below, after mount, which is the only point where the two
-     trees can never disagree. */
-  const [displayName, setDisplayName] = useState("Guest");
+  /* Hydration-safe identity: the server has no localStorage, so the first
+     paint is blank and the confirmed name is synced in the effect below,
+     after mount — the only point where the two trees can never disagree.
+     There is no "Guest" placeholder: the session gate refuses to open this
+     screen without a name, so a blank here lasts one frame at most. */
+  const [displayName, setDisplayName] = useState("");
 
   useEffect(() => {
     // Deferred a frame so this never races the first paint (and never
@@ -61,8 +57,15 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
     return () => window.clearTimeout(timer);
   }, []);
 
-  const bills = useBills();
-  const settledAt = bills[tableToken]?.settled_at ?? null;
+  /* The bill is SERVER truth now (docs/14 #5): `bill_status` arrives from
+     `GET /sessions/:token` and the table channel, not from a browser-local
+     store, so two phones at the table always agree. */
+  const billRequested = live.billStatus !== "unrequested";
+  /* docs/14 #22 — a pre-pay or a staff settle must not hide food that is
+     still being cooked. The thank-you appears once nothing is in the
+     kitchen; until then the guest keeps the tracker and history. */
+  const paidWhileCooking = live.billStatus === "paid" && live.hasCookingOrders;
+  const settled = live.billStatus === "paid" && !live.hasCookingOrders;
 
   usePresence(tableToken);
 
@@ -116,47 +119,37 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
     storeTableToken(tableToken);
   }, [tableToken]);
 
-  /* The server settled the bill: hold the thank-you for a beat, then drop the
-     event so nothing lingers for the next guests. The clear itself happens in
-     useLiveTable and in the shared demo store. */
-  useEffect(() => {
-    if (!settledAt) return;
-    const timer = window.setTimeout(() => acknowledgeSettlement(tableToken), SETTLED_THANKS_MS);
-    return () => window.clearTimeout(timer);
-  }, [settledAt, tableToken]);
-
   function handleDisplayNameChange(name: string) {
+    /* A blank edit keeps the current name: attribution is never optional. */
+    if (!name.trim()) return;
     setDisplayName(name);
     storeDisplayName(name);
   }
 
   async function handleRequestBill() {
-    if (bills[tableToken]) return;
+    if (billRequested) return;
 
-    try {
-      // The server state is what the floor board reads; the local bill store
-      // mirrors it so this device's own icons update instantly.
-      await requestTableBill(tableToken);
-      requestBill(tableToken);
-      // Asking for the bill closes the editor behind it: the table is done.
-      setCartOpen(false);
-      toast({
-        title: "Bill requested",
-        description: "We've asked the server to bring your bill.",
-      });
-    } catch (err) {
-      setCartOpen(false);
-      toast({
-        title: err instanceof ApiError ? err.message : "Could not request the bill.",
-        tone: "error",
-      });
+    const result = await live.requestBill();
+    // Asking for the bill closes the editor behind it: the table is done.
+    setCartOpen(false);
+
+    if (!result.ok) {
+      toast({ title: result.message ?? "Could not request the bill.", tone: "error" });
+      return;
     }
+
+    toast({
+      title: "Bill requested",
+      description: "We've asked the server to bring your bill.",
+    });
   }
 
   async function handleAdd(item: MenuItem) {
     setPendingItemId(item.id);
 
-    const result = await live.addToCart(item, displayName);
+    /* The stored name, not a placeholder: hydration may still be a frame
+       behind on the very first tap. */
+    const result = await live.addToCart(item, displayName || getStoredDisplayName());
 
     setPendingItemId(null);
 
@@ -258,7 +251,7 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
             live={live}
             onReview={() => setCartOpen(true)}
             onRequestBill={() => void handleRequestBill()}
-            billRequested={Boolean(bills[tableToken])}
+            billRequested={billRequested}
           />
         </aside>
       </Container>
@@ -267,7 +260,7 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
         itemCount={totals.itemCount}
         total={totals.total}
         onView={() => setCartOpen(true)}
-        billRequested={Boolean(bills[tableToken])}
+        billRequested={billRequested}
         onRequestBill={() => void handleRequestBill()}
         syncing={live.syncing}
       />
@@ -312,8 +305,26 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
         />
       ) : null}
 
+      {/* Paid, but the kitchen still has a ticket. Keep the visit alive and
+          say so plainly instead of replacing the screen (docs/14 #22). */}
+      {paidWhileCooking ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed inset-x-0 bottom-24 z-30 mx-auto w-fit max-w-[calc(100vw-2rem)] rounded-pill border border-ready/40 bg-ready-surface px-4 py-2 text-center text-sm font-medium text-ink shadow-sm lg:bottom-6"
+        >
+          Bill paid — your remaining dishes are still cooking.{" "}
+          <Link
+            href={`/table/${tableToken}/tracker`}
+            className="font-semibold text-ready underline underline-offset-2"
+          >
+            Follow the tracker
+          </Link>
+        </div>
+      ) : null}
+
       {/* Last in the DOM so it sits above the cart, the strip and the nav. */}
-      {settledAt ? (
+      {settled ? (
         <div
           role="status"
           aria-live="polite"
@@ -327,7 +338,7 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
           </span>
           <h2 className="font-display text-title font-semibold text-ink">Thank you!</h2>
           <p className="max-w-md text-lead text-ink-muted">
-            Your bill is settled. This table has been cleared and is ready for its next guests.
+            Your bill is settled. Thank you for dining with us.
           </p>
         </div>
       ) : null}

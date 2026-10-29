@@ -49,7 +49,9 @@ const WEB = (process.env.SESSION_WEB_URL ?? "http://localhost:3000").replace(/\/
 const API = (process.env.SESSION_API_URL ?? "http://localhost:4000").replace(/\/+$/, "");
 const CHROME = process.env.CHROME_PATH ?? "google-chrome";
 const PORT = Number(process.env.CDP_PORT ?? 9223);
-const TABLE_TOKEN = "k7x2p";
+/* A seeded table code. Override when the demo database was seeded under a
+   different code — the flow below settles it again on the way out. */
+const TABLE_TOKEN = process.env.SESSION_TABLE_TOKEN ?? "k7x2p";
 const STORAGE_KEY = "aeychhotu.table_session.v1";
 
 let passed = 0;
@@ -169,9 +171,14 @@ function connect(url) {
   });
 }
 
-/* Leaves the demo table EMPTY with no credentials, by firing a real order and
-   serving it. Settling is the only path that wipes the session (sql/005), so
-   this also proves the wipe from the outside. */
+/* Leaves the demo table EMPTY with no credentials.
+
+   Serving the last ticket is NOT enough (docs/14 #21): a table is released
+   only when its bill is paid, nothing is cooking, and no device is still
+   sending heartbeats. A check script that only pruned therefore left the
+   table `active` and the next run started at the PIN gate instead of the
+   claim. So the fixture pays the bill as staff and then clears the table,
+   which is the same pair of taps the floor screen offers. */
 async function settleDemoTable(staffToken) {
   const problems = [];
 
@@ -205,6 +212,27 @@ async function settleDemoTable(staffToken) {
     if (pruned.status !== 200) problems.push(`prune ${orderId}: HTTP ${pruned.status}`);
   }
 
+  const floor = await api("/api/v1/floor/tables?limit=100", { token: staffToken });
+  const row = (floor.body?.data ?? []).find((entry) => entry.code === TABLE_TOKEN);
+  const tableId = row?.table_id;
+
+  if (tableId && row.status === "active") {
+    const settled = await api(`/api/v1/floor/tables/${tableId}/settle`, {
+      method: "PATCH",
+      token: staffToken,
+    });
+    if (settled.status !== 200) problems.push(`settle: HTTP ${settled.status}`);
+
+    const cleared = await api(`/api/v1/floor/tables/${tableId}/clear`, {
+      method: "PATCH",
+      token: staffToken,
+    });
+    // 404 means the settle's auto-release already emptied it — also clean.
+    if (cleared.status !== 200 && cleared.status !== 404) {
+      problems.push(`clear: HTTP ${cleared.status}`);
+    }
+  }
+
   return problems;
 }
 
@@ -216,7 +244,12 @@ async function seedAnOrder() {
 
   await api("/api/v1/cart/items", {
     method: "POST",
-    body: { table_token: TABLE_TOKEN, menu_item_id: dish.menu_item_id, quantity: 1 },
+    body: {
+      table_token: TABLE_TOKEN,
+      menu_item_id: dish.menu_item_id,
+      quantity: 1,
+      added_by: "Session Check",
+    },
   });
   const fired = await api("/api/v1/orders/fire", {
     method: "POST",
@@ -281,6 +314,45 @@ try {
        })()`,
     );
 
+  /* The name screen is a controlled React input, so setting `.value` alone
+     would leave React's state untouched. The native setter + an input event is
+     what a real keystroke does, and then Continue submits the form. */
+  const typeName = async (name) => {
+    const filled = await evaluate(
+      `(() => {
+         const input = document.querySelector('main input');
+         if (!input) return false;
+         const setter = Object.getOwnPropertyDescriptor(
+           window.HTMLInputElement.prototype, 'value'
+         ).set;
+         setter.call(input, ${JSON.stringify(name)});
+         input.dispatchEvent(new Event('input', { bubbles: true }));
+         return true;
+       })()`,
+    );
+    if (!filled) return false;
+
+    /* React re-renders the button from the input event; clicking while it is
+       still disabled is a silent no-op. Wait for it to open up. */
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const enabled = await evaluate(
+        `(() => {
+           const button = [...document.querySelectorAll('button')]
+             .find((node) => node.textContent.trim() === 'Continue');
+           return Boolean(button && !button.disabled);
+         })()`,
+      );
+      if (enabled) break;
+      await sleep(100);
+    }
+
+    return clickByText("Continue");
+  };
+
+  const nameInputValue = () =>
+    evaluate(`document.querySelector('main input')?.value ?? null`);
+
   // ---------------------------------------------------------------- fixtures
   section("0. Fixtures — a settled, credential-free table");
 
@@ -311,10 +383,34 @@ try {
   await evaluate(`localStorage.removeItem(${JSON.stringify(STORAGE_KEY)}); 'ok'`);
   await goto(`${WEB}/table/${TABLE_TOKEN}`);
 
-  /* The menu opens on the cuisine level ("What are you in the mood for?"),
-     not on a dish list, so that is the marker for "the gate opened". */
-  const claimedText = await waitForText("in the mood for", 25_000);
+  /* The first thing a scanner sees is the name question — before ANY session
+     call. An unnamed guest cannot open the menu, which is what stops every
+     cart line and ticket defaulting to an anonymous "Guest". */
+  const nameGate = await waitForText("What should we call you?", 25_000);
+  check("a first scan asks for a name", Boolean(nameGate));
+  check(
+    "the menu does NOT open before a name is confirmed",
+    !(nameGate ?? "").toLowerCase().includes("today’s menu"),
+  );
+
+  const continueDisabled = await evaluate(
+    `(() => {
+       const button = [...document.querySelectorAll('button')]
+         .find((node) => node.textContent.trim() === 'Continue');
+       return button ? button.disabled : null;
+     })()`,
+  );
+  check("Continue is disabled while the name is empty", continueDisabled === true, String(continueDisabled));
+
+  await typeName("Ravi");
+
+  /* The menu's own heading ("Today’s menu") is the marker for "the gate
+     opened"; the nav band and the name screen never contain it. */
+  const claimedText = await waitForText("today’s menu", 25_000);
   check("the menu opens for the first scanner", Boolean(claimedText));
+
+  const savedName = await evaluate(`localStorage.getItem("aeychhotu.diner_name")`);
+  check("the confirmed name is saved on the device", savedName === "Ravi", String(savedName));
 
   const stored = await evaluate(
     `(() => { try { return JSON.parse(localStorage.getItem(${JSON.stringify(STORAGE_KEY)})); } catch { return null; } })()`,
@@ -381,11 +477,18 @@ try {
   await evaluate(`localStorage.removeItem(${JSON.stringify(STORAGE_KEY)}); 'ok'`);
   await goto(`${WEB}/table/${TABLE_TOKEN}`);
 
+  /* No session, but this device still remembers the name: the screen returns
+     pre-filled, so confirming is one tap rather than retyping. */
+  const revisitGate = await waitForText("What should we call you?", 20_000);
+  check("a device without a session is asked again, pre-filled", Boolean(revisitGate));
+  check("the last name is pre-filled", (await nameInputValue()) === "Ravi", String(await nameInputValue()));
+  await clickByText("Continue");
+
   const padText = await waitForText("Enter table PIN", 25_000);
   check("the keypad gate is shown", Boolean(padText));
   check(
     "the menu does NOT render behind the gate",
-    !(padText ?? "").toLowerCase().includes("in the mood for"),
+    !(padText ?? "").toLowerCase().includes("today’s menu"),
   );
 
   const inputCount = await evaluate(`document.querySelectorAll('main input').length`);
@@ -397,7 +500,7 @@ try {
     await sleep(120);
   }
 
-  const afterPin = await waitForText("in the mood for", 20_000);
+  const afterPin = await waitForText("today’s menu", 20_000);
   check("two digits auto-submit and open the menu", Boolean(afterPin));
 
   // --------------------------------------------------------- 4. the 3-strike lock
@@ -405,14 +508,19 @@ try {
 
   await evaluate(`localStorage.removeItem(${JSON.stringify(STORAGE_KEY)}); 'ok'`);
   await goto(`${WEB}/table/${TABLE_TOKEN}`);
+  await waitForText("What should we call you?", 20_000);
+  await clickByText("Continue");
   await waitForText("Enter table PIN", 25_000);
 
   const wrongDigit = pin.startsWith("0") ? "9" : "0";
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await clickByText(wrongDigit);
-    await sleep(90);
+    await sleep(120);
     await clickByText(wrongDigit);
-    await sleep(900);
+    /* The pad ignores keys while its previous answer is in flight; in dev the
+       round trip can take a moment, and a click lost here costs an attempt
+       without the script noticing. */
+    await sleep(1_600);
   }
 
   const lockedText = await waitForText("Table locked", 20_000);
@@ -436,14 +544,19 @@ try {
 
   const unlocked = await api("/api/v1/sessions/join-pass", {
     method: "POST",
-    body: { table_token: TABLE_TOKEN, secret: stored?.session_secret ?? "" },
+    body: {
+      table_token: TABLE_TOKEN,
+      secret: stored?.session_secret ?? "",
+      user_id: "session-check-phone",
+      name: "Ravi",
+    },
   });
   check("join-pass accepts a tablemate's pass", unlocked.status === 200, `HTTP ${unlocked.status}`);
   check("the counter is reset by the pass", unlocked.body?.data?.status === "active");
 
   const relocked = await api("/api/v1/sessions/initialize", {
     method: "POST",
-    body: { table_token: TABLE_TOKEN },
+    body: { table_token: TABLE_TOKEN, user_id: "session-check-scout", name: "Scout" },
   });
   check("the table is no longer flagged", relocked.body?.data?.pin_locked === false);
 
@@ -455,11 +568,15 @@ try {
   );
   await goto(`${WEB}/table/${TABLE_TOKEN}`);
 
-  const reconnected = await waitForText("in the mood for", 25_000);
+  const reconnected = await waitForText("today’s menu", 25_000);
   check("the menu returns without a keypad", Boolean(reconnected));
   check(
     "no PIN prompt was shown on the way in",
     !(reconnected ?? "").toLowerCase().includes("enter table pin"),
+  );
+  check(
+    "a returning device is not asked for its name again",
+    !(reconnected ?? "").toLowerCase().includes("what should we call you"),
   );
 
   // ------------------------------------------------------------ 7. hygiene

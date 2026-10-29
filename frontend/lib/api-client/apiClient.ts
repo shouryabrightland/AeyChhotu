@@ -14,8 +14,34 @@ import { clearKdsToken, getKdsToken } from "./token";
 /** §6 — hard connection ceiling for every outbound operation. */
 export const REQUEST_TIMEOUT_MS = 20_000;
 
-/** Staff PIN checkpoint page (§5 redirect target). */
+/** Staff PIN checkpoint page (§5 default redirect target). */
 export const KDS_LOGIN_PATH = "/kitchen";
+
+/** Staff gates, one per surface (``). The 401 guard sends the operator back
+    to the wall of the surface they are actually on — bouncing a floor
+    operator to /kitchen left the floor flag "unlocked", so returning to
+    /floor repeated the bounce forever. */
+const STAFF_GATE_PATHS = ["/kitchen", "/floor"] as const;
+const STAFF_UNLOCK_FLAGS = ["aeychhotu.kds.unlocked", "aeychhotu.floor.unlocked"] as const;
+
+function staffGatePath(): string {
+  if (typeof window === "undefined") return KDS_LOGIN_PATH;
+  const path = window.location.pathname;
+  if (path.startsWith("/floor")) return "/floor";
+  if (path.startsWith("/kitchen")) return "/kitchen";
+  return KDS_LOGIN_PATH;
+}
+
+/** Wipe every staff "unlocked" flag. Without this the gate would render its
+    board again on the redirect and immediately 401 a second time. */
+function clearStaffUnlockFlags(): void {
+  if (typeof window === "undefined") return;
+  try {
+    for (const key of STAFF_UNLOCK_FLAGS) window.sessionStorage.removeItem(key);
+  } catch {
+    /* Storage blocked: the hard navigation below still resets the component. */
+  }
+}
 
 /**
  * §1 — Dynamic base URL. Read from the framework's public env surface at
@@ -123,11 +149,15 @@ function handleUnauthorized(mode: AuthMode): void {
   }
 
   clearKdsToken();
-  if (typeof window !== "undefined" && !window.location.pathname.startsWith(KDS_LOGIN_PATH)) {
+  clearStaffUnlockFlags();
+
+  if (typeof window !== "undefined") {
+    const gate = staffGatePath();
     // Hard navigation on purpose: spec §5 requires terminating the whole
     // shift workspace (a client-side route push would keep its state alive).
-    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- intentional full workspace teardown
-    window.location.assign(KDS_LOGIN_PATH);
+    // It also re-reads the flag just cleared above, so the surface asks for
+    // its own PIN instead of rendering an empty board.
+    window.location.assign(gate);
   }
 }
 

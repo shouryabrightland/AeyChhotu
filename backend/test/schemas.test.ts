@@ -77,11 +77,30 @@ describe("table_token rules (§1.7)", () => {
 });
 
 describe("cartAddSchema (E5)", () => {
-  const base = { table_token: "k7x2p", menu_item_id: "0f0e0d0c-0b0a-4987-8654-321098765432" };
+  const base = {
+    table_token: "k7x2p",
+    menu_item_id: "0f0e0d0c-0b0a-4987-8654-321098765432",
+    added_by: "Amit",
+  };
 
   it("accepts the happy path and defaults quantity to 1", () => {
     const parsed = cartAddSchema.parse(base);
     assert.equal(parsed.quantity, 1);
+  });
+
+  it("requires an author — there is no anonymous cart line", () => {
+    assert.equal(
+      cartAddSchema.safeParse({
+        table_token: "k7x2p",
+        menu_item_id: "0f0e0d0c-0b0a-4987-8654-321098765432",
+      }).success,
+      false,
+    );
+    assert.equal(cartAddSchema.safeParse({ ...base, added_by: "   " }).success, false);
+    assert.equal(cartAddSchema.safeParse({ ...base, added_by: "x".repeat(41) }).success, false);
+
+    const parsed = cartAddSchema.parse({ ...base, added_by: "  Ravi  " });
+    assert.equal(parsed.added_by, "Ravi");
   });
 
   it("rejects quantity 0, 100, fractional and non-integer", () => {
@@ -195,10 +214,18 @@ describe("session entry (stale refresh + roster)", () => {
     assert.equal(parsed.user_id, "dev_1a2b3c4d");
   });
 
-  it("stays backwards compatible without scan_time or identity", () => {
-    assert.equal(initializeSchema.safeParse({ table_token: "k7x2p" }).success, true);
+  it("requires a name on every entry point, scan_time and user_id optional", () => {
+    assert.equal(initializeSchema.safeParse({ table_token: "k7x2p" }).success, false);
     assert.equal(
       joinPinSchema.safeParse({ table_token: "k7x2p", pin: "07" }).success,
+      false,
+    );
+
+    const minimal = initializeSchema.parse({ table_token: "k7x2p", name: "Ravi" });
+    assert.equal(minimal.name, "Ravi");
+    assert.equal(minimal.user_id, undefined);
+    assert.equal(
+      joinPinSchema.safeParse({ table_token: "k7x2p", pin: "07", name: "Ravi" }).success,
       true,
     );
   });

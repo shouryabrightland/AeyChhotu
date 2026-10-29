@@ -95,22 +95,18 @@ export function BillDrawer({
     0,
   );
   const stagedTotal = staged.reduce((sum, line) => sum + line.amount, 0);
-  const grandTotal = firedTotal + stagedTotal;
   const empty = fired.length === 0 && staged.length === 0;
 
-  // Every guest's running total, fired plus staged, made from the unscoped
-  // data so the split always accounts for the whole table.
+  /* docs/14 #19 — the number labelled as the bill must not include dishes
+     that were never ordered. The footer shows what has actually been fired;
+     the staged lines are shown separately, one line below it. "Split by
+     person" is scoped the same way: nobody owes money for a cart line. */
   const personTotals = new Map<string, number>();
   for (const order of billable) {
     for (const item of order.items) {
       const owner = ownerName(item.added_by);
       personTotals.set(owner, (personTotals.get(owner) ?? 0) + item.price * item.quantity);
     }
-  }
-  for (const line of cart) {
-    const owner = ownerName(line.added_by);
-    const price = menuIndex.get(line.menu_item_id)?.price ?? 0;
-    personTotals.set(owner, (personTotals.get(owner) ?? 0) + price * line.quantity);
   }
   const split = [...personTotals.entries()]
     .map(([name, total]) => ({ name, total }))
@@ -129,14 +125,19 @@ export function BillDrawer({
       size="md"
       footer={
         empty ? null : (
-          <>
-            <span className="self-center text-label text-ink-subtle uppercase sm:mr-auto">
-              {mineOnly ? "Your total" : "Table total"}
+          <div className="flex w-full flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+            <span className="text-label text-ink-subtle uppercase">
+              {mineOnly ? "Your ordered total" : "Ordered so far"}
             </span>
             <span className="font-display text-subheading text-ink tabular-nums">
-              {formatPrice(grandTotal)}
+              {formatPrice(firedTotal)}
             </span>
-          </>
+            {stagedTotal > 0 ? (
+              <span className="w-full text-xs text-ink-subtle">
+                + {formatPrice(stagedTotal)} still in the cart, not ordered yet.
+              </span>
+            ) : null}
+          </div>
         )
       }
     >
@@ -204,12 +205,6 @@ export function BillDrawer({
               </section>
             ) : null}
 
-            {fired.length > 0 && staged.length > 0 ? (
-              <p className="text-xs text-ink-subtle">
-                {formatPrice(firedTotal)} ordered · {formatPrice(stagedTotal)} staged
-              </p>
-            ) : null}
-
             {/* The whole-table view closes with who owes what. It is
                 deliberately hidden in the "your part" view, where every line
                 is already the guest's own. */}
@@ -218,7 +213,7 @@ export function BillDrawer({
                 <header className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-dashed border-line-strong pb-2">
                   <span className="text-label text-ink-subtle uppercase">Split by person</span>
                   <span className="text-xs text-ink-subtle">
-                    {split.length} {split.length === 1 ? "guest" : "guests"}
+                    {split.length} {split.length === 1 ? "guest" : "guests"} · ordered only
                   </span>
                 </header>
                 <ul className="flex flex-col divide-y divide-line/70">

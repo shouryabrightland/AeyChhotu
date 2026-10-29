@@ -429,3 +429,43 @@ asked for a bill.
 field on the diner payload), 24 (cart merge on conflict) and 13/16 (small backend
 additions). 22 and 27 are product decisions more than bugs; 4, 12, 19, 20, 26 are
 polish. 28 and 29 need no work today.
+
+---
+
+## Decisions & outcome (2026-10-29)
+
+The architecture-affecting items were decided before any code was changed; the
+rest were fixed in place. `docs/7-api-contract.md` §7–8 records the contract
+changes.
+
+| # | Decision | Outcome |
+|---|---|---|
+| 1 | — | Refresh is **soft**: it swaps the snapshot in place, so the deck, skipped cards, scroll and open sheets survive. Only Retry (from the error screen) resets `loading`. |
+| 2 | — | Fire is disabled while any cart write is in flight (`syncing`), plus a handler guard for Enter-key re-entry. |
+| 3 | — | New `GET /sessions/:token` (E18) polled every 5 s; the diner poll now covers table status **and** `bill_status`. |
+| 4 | — | ± and remove are optimistic (`lineAdjustments` / `removedLines` over the server cart), with rollback on failure. No per-line busy lock. |
+| 5 | **Server `bill_status` only** | Diner reads the server column via E18 + the table channel; `requestBill` goes through the API. The localStorage store is no longer imported by any live screen. |
+| 6 | — | A poll that overlapped a local write (write sequence counter) never raises a "someone else changed the cart" diff. |
+| 7 | — | Folder tree re-reads on every menu reload and retries after 10 s on failure. |
+| 8 | — | `activeOrder` is only `pending / preparing / ready`, so a denied ticket no longer pulses the nav dot. |
+| 9 | — | Fire and soft refresh clear `pendingAdds`, line adjustments and removals. |
+| 10 | — | KDS board polls every 15 s in the success phase (matches the floor). |
+| 11 | — | The 401 guard clears the staff unlock flags and redirects to the gate of the **current** surface (`/floor` → `/floor`, `/kitchen` → `/kitchen`); admin keeps its own wall. |
+| 12 | **By design** | `/floor` and `/admin` stay URL-only routes; no new navigation was added. |
+| 13 | — | `GET /floor/tables` now requires role `floor` or `kitchen`. |
+| 14 | — | Presence badge uses the server registry count (`active_devices` from E18), with Supabase Presence as the faster number when configured. The dead local heartbeat path is no longer read. |
+| 15 / 30 | **Keep paid-only release** | No server change. The floor's `needs_attention` flag plus staff/manager clear remain the answer for a walk-out; documented as intentional. |
+| 16 | **New members endpoint** | `GET /sessions/:token/members` (E19); the Table Pass reads it while open (15 s) and falls back to order-derived names if the read fails. |
+| 17 | **Credential-keyed budgets** | `apiLimiter` keys on staff bearer / table token with an IP fallback (600/min per credential); a separate 6 000/min per-IP backstop remains. |
+| 18 | **Per-surface login counters** | Kitchen and floor share `kds-login` with an optional `surface` field; admin has its own limiter. Fat-fingering one wall cannot lock another. |
+| 19 | — | The bill footer shows **ordered** total (fired, denied excluded) and lists staged lines separately; "split by person" is ordered-only. |
+| 20 | — | An unfired cart says "Dishes chosen … ordered, none sent to the kitchen yet" and omits the "0 rounds" row. |
+| 21 | **Wipe the seating on clear** | Clearing (staff, auto-release, admin clear/deactivate/regenerate/archive) now deletes that table's orders as well as cart/roster/presence. Served takings survive in `sales_day` / `sales_rollup` (sql/012), which is what admin analytics reads — no revenue history is lost and no previous party's food can appear on a new party's tracker. |
+| 22 | **Thank-you only when nothing is cooking** | Paid while a ticket is active shows a "Bill paid — still cooking" banner and keeps tracker/history; the overlay appears once no ticket is pending/preparing/ready. Settling no longer wipes the diner's orders. |
+| 23 | — | `POST /orders/:id/retry` (E20) does move → replace → fire in ONE transaction; a failed re-fire rolls back, so the refused ticket is preserved. |
+| 24 | **Merge colliding note edits** | E6 runs in a transaction; if the new note pair already exists it adds the quantity to that line (capped at 99) and removes the edited row. |
+| 25 | — | Deck remount key includes availability and price, so an 86 with unchanged ids refreshes the pile. |
+| 26 | — | `TABLE_NOT_FOUND` at the gate renders "That code is not a table" with a link back to the scanner, never the settled-table screen. |
+| 27 | **Keep one open round, documented** | The partial unique index and E9 pre-check stay. This is intentional: one grouped ticket at a time simplifies the KDS; the next round unlocks when the kitchen serves it. |
+| 28 | — | The table-updates handler ignores rows whose `table_id`/`code` is not this table (one-line hardening). |
+| 29 | **No action** | Latent only; floor tokens still carry the `kitchen` role. If a real `floor` role is introduced, widen E14 to `requireRole("kitchen", "floor")`. |

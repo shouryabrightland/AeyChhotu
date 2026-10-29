@@ -27,7 +27,11 @@ import {
 export const floorRouter = Router();
 const FLOOR_ROLES = ["floor", "kitchen"] as const;
 
-floorRouter.get("/tables", requireAuth, async (req, res) => {
+/* The floor feed is a STAFF read (docs/14 #13): it carries every table's
+   order lines and allergy notes, so a valid token of the wrong role — e.g. a
+   manager token — must not be able to read the room. Same roles as the
+   actions below. */
+floorRouter.get("/tables", requireAuth, requireRole(...FLOOR_ROLES), async (req, res) => {
   const query = parseOrThrow(floorQuerySchema, req.query);
   const { data, meta } = await listFloorTables(query);
   res.status(200).json({ success: true, data, meta });

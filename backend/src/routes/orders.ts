@@ -5,6 +5,7 @@ import {
   getOrderStatus,
   listOrders,
   requeueDeniedOrder,
+  retryDeniedOrder,
 } from "../services/orders.service.js";
 import {
   fireSchema,
@@ -50,6 +51,16 @@ ordersRouter.post("/:order_id/requeue", async (req, res) => {
   const query = parseOrThrow(orderStatusQuerySchema, req.query);
   const data = await requeueDeniedOrder(params.order_id, query.table_token);
   res.status(200).json({ success: true, data });
+});
+
+/* POST /api/v1/orders/:order_id/retry?table_token=…
+   "Retry" as one server transaction: move the still-available lines, replace
+   the refused ticket with a fresh one, or roll everything back. */
+ordersRouter.post("/:order_id/retry", async (req, res) => {
+  const params = parseOrThrow(orderStatusParamsSchema, req.params);
+  const query = parseOrThrow(orderStatusQuerySchema, req.query);
+  const data = await retryDeniedOrder(params.order_id, query.table_token);
+  res.status(201).json({ success: true, data });
 });
 
 /* POST /api/v1/orders/:order_id/dismiss?table_token=…
