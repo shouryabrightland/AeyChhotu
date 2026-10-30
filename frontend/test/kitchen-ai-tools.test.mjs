@@ -235,6 +235,20 @@ describe("denial requires a spoken yes", () => {
     const result = await toolset.execute("deny_ticket", { table: "T04" });
     assert.equal(result.response.error.code, "MISSING_REASON");
   });
+
+  it("carries the guest-facing sentence to the API unchanged", async () => {
+    const { calls, toolset } = makeRuntime({ tickets: [ticket({ status: "preparing" })] });
+    const reason =
+      "Maaf kijiye, ye order abhi nahi ban payega kyunki paneer khatam ho gaya hai. Aap kuch aur order karna chahenge?";
+
+    const parked = await toolset.execute("deny_ticket", { table: "T04", reason });
+    assert.equal(parked.response.error.code, "CONFIRMATION_REQUIRED");
+    assert.match(parked.response.error.action, /Maaf kijiye/);
+
+    const confirmed = await toolset.execute("confirm_action", { confirm: true });
+    assert.equal(confirmed.response.ok, true);
+    assert.deepEqual(calls, [["deny", "T04", reason]]);
+  });
 });
 
 describe("86", () => {

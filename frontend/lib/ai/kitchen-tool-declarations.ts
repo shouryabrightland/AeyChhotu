@@ -97,10 +97,12 @@ export const KITCHEN_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   ),
   fn(
     "deny_ticket",
-    "Refuse a ticket because the dish ran out or cannot be made. Needs a short reason the guest will read. Does NOT run immediately: it asks the chef to confirm out loud, then confirm_action performs it.",
+    "Refuse a ticket because the dish ran out or cannot be made. The reason is printed for the GUEST to read, so write it as a short, polite sentence — never the cook's blunt phrase. Does NOT run immediately: it asks the chef to confirm out loud, then confirm_action performs it.",
     {
       table: table("The table code the chef said."),
-      reason: table("Short reason the diner will see, e.g. 'paneer is over'."),
+      reason: table(
+        "The guest-facing sentence: an apology, then why it cannot be made. E.g. 'Maaf kijiye, ye order abhi nahi ban payega kyunki paneer khatam ho gaya hai.' Never just 'paneer khatam'.",
+      ),
     },
     ["table", "reason"],
   ),
