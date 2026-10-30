@@ -195,14 +195,17 @@ describe("serving", () => {
 });
 
 describe("denial requires a spoken yes", () => {
-  it("parks the refusal instead of denying", async () => {
+  const GUEST_REASON = "Maaf kijiye, ye order abhi nahi ho payega kyunki paneer over.";
+
+  it("parks the refusal with a guest-facing sentence, not the cook's shorthand", async () => {
     const { calls, toolset } = makeRuntime({ tickets: [ticket({ status: "preparing" })] });
 
     const result = await toolset.execute("deny_ticket", { table: "T04", reason: "paneer over" });
     assert.equal(result.response.ok, false);
     assert.equal(result.response.error.code, "CONFIRMATION_REQUIRED");
+    assert.equal(result.response.error.reason_for_guest, GUEST_REASON);
     assert.deepEqual(calls, []);
-    assert.equal(toolset.pendingDescription(), "Deny table T04 (paneer over)");
+    assert.equal(toolset.pendingDescription(), `Deny table T04 (${GUEST_REASON})`);
   });
 
   it("runs only after confirm_action says yes", async () => {
@@ -212,7 +215,7 @@ describe("denial requires a spoken yes", () => {
     const confirmed = await toolset.execute("confirm_action", { confirm: true });
 
     assert.equal(confirmed.response.ok, true);
-    assert.deepEqual(calls, [["deny", "T04", "paneer over"]]);
+    assert.deepEqual(calls, [["deny", "T04", GUEST_REASON]]);
     assert.equal(toolset.pendingDescription(), null);
   });
 

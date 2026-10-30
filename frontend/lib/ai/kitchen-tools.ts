@@ -90,6 +90,31 @@ function digitsOf(value: string): string {
   return (value.match(/\d+/g) ?? []).join("").replace(/^0+/, "");
 }
 
+/* THE REFUSAL IS READ BY THE GUEST. The cook says "paneer khatam"; the tracker
+   shows the stored reason, so its shape is decided HERE rather than left to the
+   model's phrasing: one polite sentence — apology, then why. A reason that
+   already opens with an apology is kept as written. `orders.denial_reason` is
+   capped at 300 chars by SQL, so the sentence is clamped well inside that. */
+const APOLOGY_RE = /^(maaf|sorry|excuse|क्षमा|kshama)\b/i;
+const DENIAL_REASON_LIMIT = 240;
+
+function politeDenialReason(input: string): string {
+  const cleaned = input
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[.\s]+$/, "");
+  if (!cleaned) return "";
+
+  const sentence = APOLOGY_RE.test(cleaned)
+    ? cleaned
+    : `Maaf kijiye, ye order abhi nahi ho payega kyunki ${cleaned}`;
+
+  const terminated = /[!?]$/.test(sentence) ? sentence : `${sentence}.`;
+  if (terminated.length <= DENIAL_REASON_LIMIT) return terminated;
+
+  return `${terminated.slice(0, DENIAL_REASON_LIMIT - 1).trimEnd()}.`;
+}
+
 /** "T04", "4" and "table 4" all address the same ticket. */
 function sameTable(code: string, reference: string): boolean {
   const left = normalize(code);
@@ -515,6 +540,9 @@ export function createKitchenToolset(runtime: KitchenRuntime): KitchenToolset {
           return fail("MISSING_REASON", "Ask the chef why, in a few words the guest can read.");
         }
 
+        // The tool owns the tone: the guest sees this line, not the cook's phrase.
+        const guestReason = politeDenialReason(reason);
+
         const match = findTicket(runtime.tickets, reference);
         if ("candidates" in match) {
           return fail(
@@ -527,19 +555,19 @@ export function createKitchenToolset(runtime: KitchenRuntime): KitchenToolset {
         }
 
         const ticket = match.order;
-        const description = `Deny table ${ticket.table_code} (${reason})`;
+        const description = `Deny table ${ticket.table_code} (${guestReason})`;
         pending = {
           description,
           run: async () => {
-            const result = await runtime.denyTicket(ticket, reason);
+            const result = await runtime.denyTicket(ticket, guestReason);
             return runWrite(result, `Table ${ticket.table_code} denied`, "UPDATE_FAILED");
           },
         };
 
         return fail(
           "CONFIRMATION_REQUIRED",
-          `Nothing has changed yet. Confirm with the chef out loud: deny table ${ticket.table_code}'s order because "${reason}". Then call confirm_action.`,
-          { waiting_for: "spoken_yes", action: description },
+          `Nothing has changed yet. This is the exact sentence the guest will read: "${guestReason}". Read it to the chef and ask them to confirm, then call confirm_action.`,
+          { waiting_for: "spoken_yes", action: description, reason_for_guest: guestReason },
           [{ kind: "order", label: `Waiting for your yes: ${description}`, ok: false }],
         );
       }

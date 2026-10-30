@@ -97,7 +97,7 @@ export const KITCHEN_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   ),
   fn(
     "deny_ticket",
-    "Refuse a ticket because the dish ran out or cannot be made. The reason is printed for the GUEST to read, so write it as a short, polite sentence — never the cook's blunt phrase. Does NOT run immediately: it asks the chef to confirm out loud, then confirm_action performs it.",
+    "Refuse a ticket because the dish ran out or cannot be made. The reason is printed for the GUEST to read: pass the cook's real reason and the tool shapes it into one polite sentence (apology, then why) — never pass a blunt phrase, the tool will not leave it blunt. Does NOT run immediately: it asks the chef to confirm out loud, then confirm_action performs it.",
     {
       table: table("The table code the chef said."),
       reason: table(
