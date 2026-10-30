@@ -93,6 +93,9 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
   const [activity, setActivity] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [micLevel, setMicLevel] = useState(0);
+  /* The mic keeps streaming while Chhotu thinks and speaks, so the icon is
+     keyed on the mic itself, not on the turn phase. */
+  const [micOn, setMicOn] = useState(false);
 
   const sessionRef = useRef<ChhotuLiveSession | null>(null);
   const pendingRef = useRef<Promise<ChhotuLiveSession | null> | null>(null);
@@ -221,6 +224,7 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
     setActions([]);
     setActivity(null);
     setMicLevel(0);
+    setMicOn(false);
     setPhase("idle");
   }, []);
 
@@ -291,8 +295,14 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
 
     if (!session) return;
 
-    if (session.micActive) session.stopMic();
-    else await session.startMic();
+    if (session.micActive) {
+      session.stopMic();
+      setMicOn(false);
+      return;
+    }
+
+    await session.startMic();
+    setMicOn(session.micActive);
   }
 
   const canSend = input.trim().length > 0 && !connecting;
@@ -359,7 +369,7 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
                 onClick={() => void toggleMic()}
                 disabled={connecting}
                 className={cn("h-12 shrink-0 px-3", listening && "ring-2 ring-ember/40")}
-                leftIcon={<MicLevelIcon listening={listening} level={micLevel} />}
+                leftIcon={<MicLevelIcon active={micOn} level={micLevel} />}
               >
                 <span className="sr-only">{listening ? "Stop listening" : "Voice"}</span>
               </Button>
@@ -534,15 +544,18 @@ function buildRuntime(live: LiveTableValue, tableToken: string, userName: string
 
 /** The mic's own feedback: three bars that move with the guest's voice, so it
     is obvious the phone is hearing them. Minimal by design — no waveform. */
-function MicLevelIcon({ listening, level }: { listening: boolean; level: number }) {
-  if (!listening) return <Mic className="size-4" aria-hidden />;
+function MicLevelIcon({ active, level }: { active: boolean; level: number }) {
+  if (!active) return <Mic className="size-4" aria-hidden />;
   return (
     <span aria-hidden className="flex h-4 items-end gap-[3px]">
-      {[0.45, 1, 0.7].map((scale, index) => (
+      {[0, 1, 2].map((index) => (
         <span
           key={index}
-          className="w-[3px] rounded-pill bg-current transition-[height] duration-75 ease-out"
-          style={{ height: `${4 + Math.min(1, level * 2.2) * 12 * scale}px` }}
+          className="h-4 w-[3px] origin-bottom animate-mic-live rounded-pill bg-current"
+          style={{
+            animationDelay: `${index * 130}ms`,
+            animationDuration: `${Math.round(950 - Math.min(1, level) * 450)}ms`,
+          }}
         />
       ))}
     </span>

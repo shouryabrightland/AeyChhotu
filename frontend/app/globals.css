@@ -151,6 +151,22 @@
   --animate-pulse-soft: pulse-soft 2.4s var(--ease-gentle) infinite;
   --animate-flash-ready: flash-ready 1.4s var(--ease-gentle) 3;
   --animate-float: float 5.2s ease-in-out infinite;
+  /* The voice line's own meter. The bars scale on the compositor (no layout),
+     stagger via animation-delay, and shorten their duration with the guest's
+     loudness — so the icon is alive in silence and leans in when someone
+     speaks. Under reduced motion it settles at full height, still readable. */
+  --animate-mic-live: mic-live 900ms var(--ease-gentle) infinite;
+
+  @keyframes mic-live {
+    0%,
+    100% {
+      transform: scaleY(0.35);
+    }
+
+    50% {
+      transform: scaleY(1);
+    }
+  }
 
   @keyframes pulse-soft {
     0%,

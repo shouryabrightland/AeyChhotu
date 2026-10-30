@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, Mic, Square } from "lucide-react";
+import { Loader2, Mic } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChhotuAvatar } from "@/components/brand/chhotu-avatar";
 import { Button } from "@/components/ui/button";
@@ -115,10 +115,22 @@ function MicLevel({ level, listening }: { level: number; listening: boolean }) {
         {[0.45, 1, 0.7].map((scale, index) => (
           <span
             key={index}
-            className="w-[3px] rounded-pill bg-current transition-[height] duration-75 ease-out"
-            style={{
-              height: `${4 + Math.min(1, Math.max(listening ? 0.18 : 0, level) * 2.2) * 12 * scale}px`,
-            }}
+            className={cn(
+              "w-[3px] rounded-pill bg-current",
+              // While the line is open the bars breathe on their own, so the
+              // icon never looks dead between words.
+              listening
+                ? "h-4 origin-bottom animate-mic-live"
+                : "transition-[height] duration-75 ease-out",
+            )}
+            style={
+              listening
+                ? {
+                    animationDelay: `${index * 130}ms`,
+                    animationDuration: `${Math.round(950 - Math.min(1, level) * 450)}ms`,
+                  }
+                : { height: `${4 + Math.min(1, level) * 12 * scale}px` }
+            }
           />
         ))}
       </span>
@@ -494,7 +506,7 @@ export function KitchenVoice({
                 busy ? (
                   <Loader2 className="size-4 animate-spin" aria-hidden />
                 ) : listening ? (
-                  <Square className="size-3.5" aria-hidden />
+                  <MicLevel level={level} listening />
                 ) : (
                   <Mic className="size-4" aria-hidden />
                 )
