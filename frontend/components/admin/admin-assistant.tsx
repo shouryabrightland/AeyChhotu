@@ -161,10 +161,12 @@ export function AdminAssistant() {
     setActions([]);
 
     if (asked) push({ role: "user", text: asked });
+    /* A tool-only turn carries no spoken answer; inventing "Done." for it
+       spammed the transcript once per tool round-trip. The chips say it. */
     if (answered || turnActions.length > 0) {
       push({
         role: "assistant",
-        text: answered || "Done.",
+        text: answered,
         ...(turnActions.length > 0 ? { actions: turnActions } : {}),
       });
     }
@@ -396,16 +398,18 @@ export function AdminAssistant() {
                   {message.role === "assistant" ? (
                     <ChhotuAvatar size="sm" className="mt-0.5" />
                   ) : null}
-                  <div
-                    className={cn(
-                      "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
-                      message.role === "user"
-                        ? "border border-ember/20 bg-ember-soft text-ink"
-                        : "border border-line bg-paper text-ink",
-                    )}
-                  >
-                    {message.text}
-                  </div>
+                  {message.text ? (
+                    <div
+                      className={cn(
+                        "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
+                        message.role === "user"
+                          ? "border border-ember/20 bg-ember-soft text-ink"
+                          : "border border-line bg-paper text-ink",
+                      )}
+                    >
+                      {message.text}
+                    </div>
+                  ) : null}
                 </div>
                 {message.actions && message.actions.length > 0 ? (
                   <ul className="flex flex-wrap gap-1.5">

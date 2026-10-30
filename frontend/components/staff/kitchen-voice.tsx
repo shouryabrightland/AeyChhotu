@@ -292,7 +292,9 @@ export function KitchenVoice({
         next.push({
           id: `kv-${idRef.current}`,
           role: "assistant",
-          text: answered || "Done.",
+          // No invented "Done.": a tool-only turn carries its result chips
+          // and nothing else, so the transcript stays truthful.
+          text: answered,
           ...(turnActions.length > 0 ? { actions: turnActions } : {}),
         });
       }
@@ -570,16 +572,18 @@ export function KitchenVoice({
                   {line.role === "assistant" ? (
                     <ChhotuAvatar size="sm" className="mt-0.5" />
                   ) : null}
-                  <div
-                    className={cn(
-                      "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
-                      line.role === "user"
-                        ? "border border-ember/20 bg-ember-soft text-ink"
-                        : "border border-line bg-paper text-ink",
-                    )}
-                  >
-                    {line.text}
-                  </div>
+                  {line.text ? (
+                    <div
+                      className={cn(
+                        "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
+                        line.role === "user"
+                          ? "border border-ember/20 bg-ember-soft text-ink"
+                          : "border border-line bg-paper text-ink",
+                      )}
+                    >
+                      {line.text}
+                    </div>
+                  ) : null}
                 </div>
                 {line.actions && line.actions.length > 0 ? (
                   <ul className="flex flex-wrap gap-1.5">

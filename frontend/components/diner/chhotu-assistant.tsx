@@ -145,10 +145,13 @@ export function ChhotuAssistant({ tableToken, live, displayName, className }: Ch
     setActions([]);
 
     if (heard) push({ role: "user", text: heard });
+    /* A tool-only turn (a function call with no spoken answer) used to push a
+       literal "Done.", and every tool round-trip produced another one. The
+       chips already say what happened, so an empty text is left empty. */
     if (spoken || turnActions.length > 0) {
       push({
         role: "assistant",
-        text: spoken || "Done.",
+        text: spoken,
         ...(turnActions.length > 0 ? { actions: turnActions } : {}),
       });
     }
@@ -459,19 +462,21 @@ function MessageBubble({ message, live = false }: { message: ChhotuMessage; live
       <div className={cn("flex w-full items-start gap-2", fromChhotu ? "justify-start" : "justify-end")}>
         {fromChhotu ? <ChhotuAvatar size="sm" className="mt-0.5" /> : null}
 
-        <div
-          className={cn(
-            "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
-            fromChhotu
-              ? "border border-line bg-paper text-ink"
-              : "border border-ember/20 bg-ember-soft text-ink",
-          )}
-        >
-          {message.text}
-          {live ? (
-            <span aria-hidden className="ml-1 inline-block size-1.5 animate-pulse-soft rounded-pill bg-ember align-middle" />
-          ) : null}
-        </div>
+        {message.text ? (
+          <div
+            className={cn(
+              "max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed",
+              fromChhotu
+                ? "border border-line bg-paper text-ink"
+                : "border border-ember/20 bg-ember-soft text-ink",
+            )}
+          >
+            {message.text}
+            {live ? (
+              <span aria-hidden className="ml-1 inline-block size-1.5 animate-pulse-soft rounded-pill bg-ember align-middle" />
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {message.actions && message.actions.length > 0 ? (
