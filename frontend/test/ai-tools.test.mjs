@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 
    The behaviours pinned here are the ones a language model can get wrong:
    dish resolution, argument coercion, allergy notes surviving to the cart,
-   sold-out rejection, duplicate-order mapping and the ambiguous-line rule. */
+   sold-out rejection, the one-round-at-a-time rule and the ambiguous-line rule. */
 
 import { findDish, searchDishes } from "../lib/ai/dish-search.ts";
 import { ALLERGY_CAVEAT, scanDishAllergies } from "../lib/ai/allergy.ts";
@@ -388,7 +388,59 @@ describe("order and bill operations", () => {
     assert.equal(result.mutated, true);
   });
 
-  it("maps a duplicate order to a clear tool error, with no mutation", async () => {
+  it("refuses a second round while one is with the kitchen, and keeps the cart", async () => {
+    const { runtime, calls } = makeRuntime({
+      cart: [line],
+      orders: [
+        {
+          id: "order-live",
+          table_id: "table-1",
+          table_code: "k7x2p",
+          status: "preparing",
+          created_at: "2026-10-29T11:00:00Z",
+          updated_at: "2026-10-29T11:05:00Z",
+          items: [],
+        },
+      ],
+    });
+
+    const result = await executeTool("review_and_fire_order", {}, runtime);
+
+    assert.equal(result.response.ok, false);
+    assert.equal(result.response.error.code, "ORDER_IN_PROGRESS");
+    assert.match(result.response.error.message, /one order goes to the kitchen at a time/i);
+    assert.match(result.response.error.message, /safe in the table cart/i);
+    assert.equal(result.response.error.active_order.status, "preparing");
+    assert.equal(result.response.error.cart_lines, 1);
+    assert.equal(calls.fire, 0);
+    assert.equal(runtime.cart.length, 1);
+    assert.equal(result.mutated, false);
+  });
+
+  it("fires again once the previous round is closed", async () => {
+    const { runtime, calls } = makeRuntime({
+      cart: [line],
+      orders: [
+        {
+          id: "order-done",
+          table_id: "table-1",
+          table_code: "k7x2p",
+          status: "served",
+          created_at: "2026-10-29T10:00:00Z",
+          updated_at: "2026-10-29T10:30:00Z",
+          items: [],
+        },
+      ],
+    });
+
+    const result = await executeTool("review_and_fire_order", {}, runtime);
+
+    assert.equal(result.response.ok, true);
+    assert.equal(calls.fire, 1);
+    assert.equal(result.mutated, true);
+  });
+
+  it("turns a duplicate order from the server into the one-round rule, with no mutation", async () => {
     const { runtime } = makeRuntime({
       cart: [line],
       fireOrder: async () => {
@@ -401,9 +453,32 @@ describe("order and bill operations", () => {
     const result = await executeTool("review_and_fire_order", {}, runtime);
 
     assert.equal(result.response.ok, false);
-    assert.equal(result.response.error.code, "DUPLICATE_ORDER");
-    assert.equal(result.response.error.message, "Order already sent");
+    assert.equal(result.response.error.code, "ORDER_IN_PROGRESS");
+    assert.match(result.response.error.message, /safe in the table cart/i);
+    assert.equal(result.response.error.cart_lines, 1);
     assert.equal(result.mutated, false);
+  });
+
+  it("tells the guest that an open round blocks the next fire", async () => {
+    const { runtime } = makeRuntime({
+      cart: [line],
+      orders: [
+        {
+          id: "order-ready",
+          table_id: "table-1",
+          table_code: "k7x2p",
+          status: "ready",
+          created_at: "2026-10-29T11:00:00Z",
+          updated_at: "2026-10-29T11:10:00Z",
+          items: [],
+        },
+      ],
+    });
+
+    const result = await executeTool("get_order_status", {}, runtime);
+
+    assert.equal(result.response.ok, true);
+    assert.match(result.response.data.next_round_note, /stay in the cart/i);
   });
 
   it("treats an inventory failure as a mutation (the server purged sold-out lines)", async () => {

@@ -586,6 +586,22 @@ export async function executeTool(
         return fail({ code: "EMPTY_CART", message: "The table cart is empty — there is nothing to send." });
       }
 
+      /* ONE ROUND AT A TIME: the database allows a single active ticket per
+         table, so a second fire can never succeed. Detecting it here means the
+         guest hears the reason and the way out instead of a bare 409 — and the
+         lines they added stay in the table cart for the next round. */
+      const activeOrder = runtime.orders.find((order) =>
+        ["pending", "preparing", "ready"].includes(order.status),
+      );
+      if (activeOrder) {
+        return fail({
+          code: "ORDER_IN_PROGRESS",
+          message: `Table ${activeOrder.table_code} already has a round with the kitchen (${activeOrder.status}). One order goes to the kitchen at a time, so this cart cannot be fired yet. Everything added is safe in the table cart — fire again as soon as that order is served.`,
+          active_order: { order_id: activeOrder.id, status: activeOrder.status },
+          cart_lines: runtime.cart.length,
+        });
+      }
+
       const summary = summariseCart(runtime);
 
       try {
@@ -605,6 +621,18 @@ export async function executeTool(
         );
       } catch (err) {
         const error = errorFromException(err);
+
+        // Another device fired between our read and the write: same guidance,
+        // and the server did not drain this cart.
+        if (error.code === "DUPLICATE_ORDER") {
+          return fail({
+            code: "ORDER_IN_PROGRESS",
+            message:
+              "This table already has a round with the kitchen, and one order goes at a time. Everything added is safe in the table cart — fire again as soon as that order is served.",
+            cart_lines: runtime.cart.length,
+          });
+        }
+
         // INVENTORY_FAILURE purges the sold-out lines server-side, so the cart
         // on screen is stale even though the fire failed.
         const mutated = error.code === "INVENTORY_FAILURE";
@@ -644,6 +672,12 @@ export async function executeTool(
           })),
         },
         cart_lines: runtime.cart.length,
+        ...(["pending", "preparing", "ready"].includes(order.status)
+          ? {
+              next_round_note:
+                "This table already has a round with the kitchen. Lines added now stay in the cart and can be fired once that order is served.",
+            }
+          : {}),
       });
     }
 
