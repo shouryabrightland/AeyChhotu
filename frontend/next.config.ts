@@ -53,6 +53,20 @@ const nextConfig: NextConfig = {
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },
+  /* Same-origin API. When NEXT_PUBLIC_API_URL is relative ("/" or
+     "same-origin"), the browser only ever talks to the Next origin and this
+     rewrite hands /api/* to Express server-side. That is what lets a single
+     forwarded port (3000) serve the whole app, and it takes CORS out of the
+     picture entirely: the request never leaves the page's origin. A deployed
+     build that points NEXT_PUBLIC_API_URL straight at the API is unaffected —
+     the rewrite simply goes unused. */
+  async rewrites() {
+    const target = (process.env.API_PROXY_TARGET ?? "http://localhost:4000").replace(
+      /\/+$/,
+      "",
+    );
+    return [{ source: "/api/:path*", destination: `${target}/api/:path*` }];
+  },
 };
 
 export default nextConfig;

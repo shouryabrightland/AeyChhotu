@@ -220,9 +220,12 @@ cd frontend && npm run dev       # http://localhost:3000
 | `table/[token]/page.tsx` | Diner entry for a table code: wraps `DinerTableScreen` in `TableSessionGate`. |
 | `table/[token]/tracker/page.tsx` | The live tracker for the same table, behind the same gate. |
 
-> **No `app/api/*` routes exist.** They were removed: the app calls the Express
-> API directly (`NEXT_PUBLIC_API_URL`). A Next route handler in the middle only
-> added a second place for auth to drift.
+> **No `app/api/*` route handlers exist.** They were removed: the app calls the
+> Express API directly (`NEXT_PUBLIC_API_URL`). The one exception is the pure
+> `rewrites()` proxy in `next.config.ts`, used only when the base URL is
+> relative (`/` or `same-origin`): it forwards `/api/*` to `API_PROXY_TARGET`
+> (default `http://localhost:4000`) so a single exposed port serves the app. It
+> is a rewrite, not a handler — no auth logic, no second place to drift.
 
 ### 5.3 `components/ui/` — the primitives
 

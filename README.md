@@ -655,7 +655,7 @@ commands. Both apps are push-to-deploy on `main`.
 
 | Variable | Required | Example | Purpose |
 |---|---|---|---|
-| `NEXT_PUBLIC_API_URL` | **yes** | `http://localhost:4000` | Express base URL, no trailing slash |
+| `NEXT_PUBLIC_API_URL` | **yes** | `http://localhost:4000` | Express base URL, no trailing slash. Set `/` to send `/api/*` through Next's rewrite to `API_PROXY_TARGET` (default `http://localhost:4000`), so one exposed port serves the whole app |
 | `NEXT_PUBLIC_SUPABASE_URL` | for Realtime | `https://xxx.supabase.co` | Realtime endpoint |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | for Realtime | `eyJ…` | **Public anon key only** — never `service_role` |
 | `NEXT_PUBLIC_ENABLE_DEMO_FALLBACK` | no | *(empty)* | Opts back into the offline demo store. **Default: on in `next dev`, off in a production build** — a deployment with a wrong API URL must fail loudly, not render seeded dishes as real orders |

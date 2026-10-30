@@ -1182,7 +1182,7 @@ function GuestVoiceScene() {
   );
 }
 
-/* WOW 02 — the kitchen is hands-free, and ambient talk cannot act */
+/* WOW 02 — the kitchen is voice-first: one tap opens the mic, then talk */
 function KitchenVoiceScene() {
   return (
     <Scene accent="#a31b10">
@@ -1228,7 +1228,7 @@ function KitchenVoiceScene() {
           <div className={styles.kdsAllergy}>PEANUT ALLERGY</div>
           <footer className={styles.ticketFoot}>
             <span className={styles.pillReady}>Ready</span>
-            <span>voice · 0 taps</span>
+            <span>voice · tap once</span>
           </footer>
         </div>
       </div>

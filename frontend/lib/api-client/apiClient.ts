@@ -57,6 +57,12 @@ export function getBaseUrl(): string {
       "API base URL is not configured (NEXT_PUBLIC_API_URL missing).",
     );
   }
+
+  /* A relative base means "same origin": the Next server proxies /api/* to
+     Express (see next.config.ts), so the browser needs no second host and no
+     CORS allow-list. Used when only the app's own port is reachable. */
+  if (raw === "/" || raw.toLowerCase() === "same-origin") return "";
+
   return pointLocalApiAtPageHost(raw.replace(/\/+$/, ""));
 }
 
