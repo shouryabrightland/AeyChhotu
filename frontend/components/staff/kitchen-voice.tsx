@@ -639,16 +639,21 @@ export function KitchenVoice({
             </p>
           ) : null}
 
-          <div className="flex flex-col gap-2 border-t border-line pt-3">
-            <p className="text-[10px] font-semibold tracking-[0.14em] text-ink-subtle uppercase">
-              Say it out loud
-            </p>
-            <ul className="grid gap-1 text-xs leading-snug text-ink-subtle">
-              {SPOKEN_EXAMPLES.map((example) => (
-                <li key={example}>{example}</li>
-              ))}
-            </ul>
-          </div>
+          {/* Only before the first exchange, like the diner sheet's quick
+              prompts: after the cook has used it once, a hint under every
+              answer is noise, not help. Clearing the history brings it back. */}
+          {lines.length === 1 ? (
+            <div className="flex flex-col gap-2 border-t border-line pt-3">
+              <p className="text-[10px] font-semibold tracking-[0.14em] text-ink-subtle uppercase">
+                Say it out loud
+              </p>
+              <ul className="grid gap-1 text-xs leading-snug text-ink-subtle">
+                {SPOKEN_EXAMPLES.map((example) => (
+                  <li key={example}>{example}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       </Drawer>
     </>
