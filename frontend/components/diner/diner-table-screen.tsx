@@ -45,9 +45,6 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
   // The Table Pass sheet: this device's PIN plus the QR that carries the
   // session secret to a tablemate's camera.
   const [passOpen, setPassOpen] = useState(false);
-  // “Ask Chhotu” — the conversational waiter. It reads the live snapshot and
-  // every write it makes goes through the same REST endpoints as the UI.
-  const [assistantOpen, setAssistantOpen] = useState(false);
   /* Hydration-safe identity: the server has no localStorage, so the first
      paint is blank and the confirmed name is synced in the effect below,
      after mount — the only point where the two trees can never disagree.
@@ -277,7 +274,6 @@ export function DinerTableScreen({ tableToken }: DinerTableScreenProps) {
             itemErrors={itemErrors}
             onAdd={(item) => void handleAdd(item)}
             stickyTopClass="top-[var(--diner-nav-h,3.75rem)]"
-            onOpenAssistant={() => setAssistantOpen(true)}
           />
         )}
 
