@@ -36,52 +36,47 @@ PIN wall is its real gate.
 
 ---
 
-## 2. Kitchen voice: "Aey Chhotu"
+## 2. Kitchen voice: tap once, then talk
 
 ### Audio path
 
-- The mic streams continuously while the shift is armed — 16 kHz PCM16 mono,
+- The mic streams continuously once the cook taps it — 16 kHz PCM16 mono,
   chunked by a `ScriptProcessorNode` and sent with `sendRealtimeInput`.
 - Playback is 24 kHz PCM16, queued so chunks butt together.
 - Mic level (RMS) is throttled to ~12 fps purely for the UI bars.
 
-### Wake-word gate
+### Tap to talk
 
-The wake word is **not** a second speech recogniser. It is a gate on the same
-Live session's `inputTranscription`:
+There is no wake word on any surface, the kitchen included. The cook taps the
+mic once — the gesture browsers require before any microphone or AudioContext
+can start — `primeAudio()` opens the audio clocks synchronously inside that
+tap, and from then on the mic stays open: every sentence is a command. Tapping
+again pauses the mic; the session is kept, so the next tap continues the same
+conversation.
 
-1. Every turn's transcript accumulates in `turnUserText`.
-2. `containsWakePhrase()` (`frontend/lib/ai/wake-word.ts`) matches the phrase
-   and its recognition variants ("ay chhotu", "hey chhotu", "ऐ छोटू").
-3. Until it matches, model **audio is buffered, not played**, and the model's
-   transcript is held.
-4. On a match the buffered audio is released and `onWake` fires (the dock
-   flashes "Aey Chhotu heard").
-5. At `turnComplete` an unaddressed turn is **dropped** and produces no bubble.
+The answer arrives twice over: the spoken reply and the written transcript are
+the same sentence, so a cook can look back at what was said. Nothing is typed
+on this screen — the transcript is history, never an input.
 
-A tap on the mic is the other way in: `addressNextTurn()` lets exactly **one**
-following turn through without the phrase, then the gate re-arms. So a cook can
-say "Aey Chhotu, table four ready", or tap once and just say "table four ready".
+Ambient kitchen talk is handled in the persona rather than in a gate: the
+prompt tells the model to ignore a remark that is clearly aimed at a colleague.
+The guardrails that remain are structural — tickets resolve by table code, the
+SQL state machine decides which moves are legal, and the two destructive
+actions still park until the cook says yes out loud.
 
-Timing matters and is handled: Live's `inputTranscription` can land a second or
-two after the model has already decided to call a tool, so `runTools` waits up to
-2.5 s for that turn's transcript before judging it. Previously every spoken
-command raced the transcript and lost, answering `NOT_ADDRESSED`.
-
-**The hard part is tools.** In `runTools`, a `functionCall` on a turn that did
-not pass the gate is answered with `NOT_ADDRESSED` and is **never executed**.
-Ambient kitchen talk therefore cannot move a ticket, 86 a dish, or serve food —
-even if the model decides to call something.
-
-A typo-safe path exists for debugging: typed input (`sendText`) bypasses the
-gate, but the kitchen dock is voice-only.
+**Tools are the safety boundary.** Every write goes through the same board
+calls the UI uses (`useLiveKds`), so the credential is a kitchen shift token
+bound by the api-client and never a model-supplied argument.
 
 ### What the chef can say
 
 | Tool | Effect | Confirmation |
 |---|---|---|
 | `get_board_overview` | counts per lane, waiting tables, oldest ticket | — |
-| `list_tickets` | lines, quantities, requests, **allergies** | — |
+| `list_tickets` | lines, quantities, requests, **allergies**; one lane or one table | — |
+| `get_menu_status` | availability, the 86 list, allergens and ingredients | — |
+| `get_waiter_requests` | ready tables that pinged, and minutes waited | — |
+| `refresh_board` | re-reads the board from the server | — |
 | `move_ticket` | pending → preparing → ready (one lane at a time) | — |
 | `serve_ticket` | ready → served (records the sale) | — |
 | `deny_ticket` | refuses with a reason the diner reads | **spoken yes** |
@@ -185,15 +180,16 @@ reads it.
 - **Stock is mostly untracked.** `NULL` means the kitchen keeps no count; the
   assistant is told never to read that as zero. There is no UI yet to set counts.
 - **Feedback starts empty.** The console is told not to invent themes from it.
-- **The wake gate depends on transcription.** If the transcript never arrives
-  within the wait, the turn is refused (safe) rather than acted on. A tap is the
-  fallback when recognition is slow. The mic is browser-only: Chrome/Edge are
+- **The mic needs one real tap.** Browsers will not open an `AudioContext` or
+  capture audio without a gesture, and a suspended context streams silence;
+  `primeAudio()` runs inside that tap. The mic is browser-only: Chrome/Edge are
   the reliable targets.
-- **The mic needs one real tap the first time.** Browsers will not open an
-  `AudioContext` or capture audio without a gesture, and a suspended context
-  streams silence. After the permission is remembered the dock starts itself on
-  load; `primeAudio()` is what makes that first tap work.
-- **No wake word on the diner sheet or console** — those are tap-to-talk.
+- **No wake word on any surface** — the diner sheet, the console and the
+  kitchen are all tap-to-talk, and nothing is typed on the kitchen dock.
+- **Ambient kitchen talk is a persona rule, not a gate.** The model is told to
+  ignore a remark aimed at a colleague. The structural checks still hold
+  regardless of what it hears: tickets resolve by table code, the SQL state
+  machine refuses illegal moves, and deny/86 wait for a spoken yes.
 - **Rollup rows written before 017** keep their UTC-calendar day keys; the
   migration documents that they age out.
 
@@ -203,10 +199,9 @@ reads it.
 
 ```
 frontend/lib/ai/
-  live-session.ts            Live socket, mic, playback, wake gate, tool loop
-  wake-word.ts               phrase + variants, normalisation
+  live-session.ts            Live socket, mic, playback, tool loop
   system-prompt.ts           diner persona
-  kitchen-system-prompt.ts   chef persona (wake word + confirmation rules)
+  kitchen-system-prompt.ts   chef persona (tap-to-talk + confirmation rules)
   admin-system-prompt.ts     console persona
   tools.ts                   diner executors
   kitchen-tools.ts           chef executors + parked confirmations
@@ -214,11 +209,11 @@ frontend/lib/ai/
   *-tool-declarations.ts     the function schemas
 frontend/components/
   diner/chhotu-assistant.tsx diner voice sheet
-  staff/kitchen-voice.tsx    kitchen dock (always listening)
+  staff/kitchen-voice.tsx    kitchen dock (tap once, then talk)
   admin/admin-assistant.tsx  console assistant
 frontend/test/
   ai-tools.test.mjs          diner tool behaviours
-  kitchen-ai-tools.test.mjs  chef tools, confirmations, wake matching
+  kitchen-ai-tools.test.mjs  chef tools, confirmations, waiter pings
   admin-catalog-tool.test.mjs catalogue queries
 backend/src/services/
   insights.service.ts        sales, best sellers, tickets, tables, stock, feedback, catalogue

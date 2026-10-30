@@ -144,7 +144,7 @@ unavoidably on the KDS, and a live `pending → preparing → ready → served` 
 | 18 | **Refusal with a required reason** — the guest reads it and can retry | `kds/tickets/:id/deny` |
 | 19 | **Serving closes the ticket** — only from Ready, and it clears the waiter ping in the same transaction | `E12` |
 | 20 | **86 from the board** — live catalogue, shared with the floor, greys the dish for every guest | `E14` + `useStaffMenuCatalog` |
-| 21 | **Hands-free voice** — “Aey Chhotu”, 8 tools, spoken confirmation before anything destructive | `kitchen-voice` + `kitchen-tools` |
+| 21 | **Hands-free voice** — one tap to listen, 11 tools covering every board task, spoken confirmation before anything destructive | `kitchen-voice` + `kitchen-tools` |
 | 22 | **“Waiter coming” strip** — a floor tap appears at the pass with a chime | `serve-request` + `kds-board` |
 | 23 | **Shift arming** — unlocks audio for chimes and registers the device | `E13` |
 
@@ -180,7 +180,7 @@ unavoidably on the KDS, and a live `pending → preparing → ready → served` 
 | 39 | **The whole thing is re-runnable** — 19 idempotent migrations, 211 unit tests, 126 contract checks, 81 schema assertions | `sql/` · `scripts/` |
 
 > **Honest state:** stock counts are `untracked` until someone enters them, guest feedback starts empty,
-> and the kitchen wake word needs a Chromium browser with mic permission. The assistants say so rather
+> and the kitchen voice dock needs a Chromium browser with mic permission. The assistants say so rather
 > than inventing an answer.
 
 ---
@@ -198,12 +198,12 @@ travels over the same Live socket.
 
 ### Why the kitchen is the interesting one
 
-- The mic streams **continuously** while the shift is armed — 16 kHz PCM16 mono chunks over the same
-  session, so a cook never touches the screen.
-- The **wake gate** is the session's own `inputTranscription`. Until the transcript contains
-  “Aey Chhotu”, model audio is **buffered, not played**, and the transcript is not shown.
-- An unaddressed turn is dropped — and any `functionCall` inside it is answered `NOT_ADDRESSED` and
-  **never executed**. Ambient kitchen talk cannot move a ticket.
+- **One tap, then talk.** The tap is the browser's gesture; after it the mic streams continuously —
+  16 kHz PCM16 mono chunks over the same session, so a cook never touches the screen again.
+- The answer is **spoken and written at once**: the transcript under the mic is the same sentence, so
+  the dock doubles as a readable log of the shift. Nothing is typed there.
+- Every board task has a tool: lanes and ages, one table's ticket, move, serve, deny, 86/restock, the
+  86 list, waiter pings, a board re-read and shift arming.
 - `deny_ticket` and an 86 do **not** run on the ask. They park a closure; only `confirm_action` after a
   spoken yes can execute it, so a hallucinated `confirm: true` has nothing to fire.
 - Tickets are resolved by **table code** (“table four” → `T04`); an ambiguous reference is refused with
@@ -217,7 +217,7 @@ travels over the same Live socket.
   `/kds/assistant/key`, or with the table session), and a wrong role gets 401/403.
 - **No destructive console tools.** Archiving a dish or clearing a table is a button a human presses.
 
-Full detail, including the wake-gate state machine and every tool: [`docs/15`](docs/15-voice-assistants-and-insights.md).
+Full detail, including the tap-to-talk session and every tool: [`docs/15`](docs/15-voice-assistants-and-insights.md).
 
 ---
 
@@ -478,7 +478,7 @@ Business outcomes are **returned as `jsonb` codes rather than raised**, so an
 | Diner surfaces | `components/diner/` | menu list, cart modal/strip, allergy input, live tracker |
 | Staff surfaces | `components/staff/` | PIN wall, KDS board + cards, floor view, 86 drawer |
 | Data runtimes | `hooks/use-live-table.ts`, `hooks/use-live-kds.ts` | Live-first with mock fallback + realtime + polling safety net |
-| AI runtimes | `lib/ai/` | Gemini Live session, three personas, three tool sets, wake-word gate, confirmation state |
+| AI runtimes | `lib/ai/` | Gemini Live session (tap-to-talk), three personas, three tool sets, confirmation state |
 | API client | `lib/api-client/` | `apiClient` (20 s timeout, envelope parse, 401 guard), `endpoints` (1 fn per endpoint), `realtime`, `paginate`, `normalize` |
 | Offline demo store | `lib/api/` | Seeded store used **only** when the backend is unreachable |
 | Design tokens | `app/globals.css` | `@theme` block (Hospitality skin) + an unlayered `[data-skin="ops"]` block that enlarges the kitchen/floor ticket type — palette, type scale, radii, shadows, motion timings |
@@ -557,7 +557,7 @@ to enlarge the ticket type for reading at distance.
 │   ├── hooks/                 ← use-live-table · use-live-kds · use-bills · use-db · use-presence · use-now
 │   ├── lib/
 │   │   ├── api-client/        ← apiClient · endpoints · realtime · paginate · normalize · types
-│   │   ├── ai/                ← Live session, personas, tools, wake-word gate
+│   │   ├── ai/                ← Live session, personas, tools, confirmation state
 │   │   └── api/               ← offline demo store (fallback only)
 │   ├── .env.example
 │   └── package.json
@@ -775,7 +775,7 @@ Everything below was run and is green on the current tree:
 | Frontend types | `cd frontend && npm run typecheck` | ✅ 0 errors |
 | Frontend lint | `cd frontend && npm run lint` | ✅ 0 errors |
 | Frontend build | `cd frontend && npm run build` | ✅ 8 routes compiled |
-| **Frontend unit tests** | `cd frontend && npm test` | ✅ **136/136** — normalizers incl. the fire-time price snapshot, production demo-fallback gate, menu atlas/photos, bill handoff, diner AI tools, kitchen tools + confirmation flow, wake-word matching, catalogue queries |
+| **Frontend unit tests** | `cd frontend && npm test` | ✅ **147/147** — normalizers incl. the fire-time price snapshot, production demo-fallback gate, menu atlas/photos, bill handoff, diner AI tools, kitchen tools + confirmation flow, waiter pings, catalogue queries |
 | **Schema + RLS assertions** | `cd backend && npm run db:verify` | ✅ **81/81** — tables, RLS on, policies, indexes, claim-scoping, privileges, hardening (004), stock + feedback, waiter ping |
 | **Contract smoke (live server)** | `cd backend && npm run smoke` | ✅ **126/126** — every endpoint in the real diner → kitchen → floor journey, incl. the frozen bill and denial paths |
 | Realtime wiring | `db:setup` on `wal_level=logical` | ✅ publication created, `REPLICA IDENTITY FULL` set |
@@ -832,10 +832,10 @@ on typecheck · lint · build, with **211 unit tests**, **81 schema/RLS/hardenin
 | **CI** | `.github/workflows/ci.yml` — typecheck, lint, build for both apps, plus schema verify and contract smoke against a real Postgres 17 |
 | **Repo hygiene** | Root `.gitignore` (covers `.env`, logs, `.pgdata`, editor noise); `dev.log` can no longer be committed |
 | **Ops hardening** | helmet security headers (backend + `next.config.ts`), two-tier rate limiting (10 *failed* PIN attempts / 10 min on `kds-login` — correct PINs never consume budget), ndjson structured logs with `X-Request-Id` correlation (upstream ids honoured), `/api/v1/ready` readiness probe with a cached real Postgres ping, and bounded graceful shutdown on SIGTERM (drain → close pool) — verified live: brute-force gets 429 after 10 tries, SIGTERM drains and exits cleanly |
-| **Unit tests** | `node:test` (zero test deps): backend 75 (schemas/JWT/transitions/admin/menu metadata), frontend 136 (normalizers, AI tools, kitchen confirmation, wake word, catalogue), both wired into CI |
+| **Unit tests** | `node:test` (zero test deps): backend 75 (schemas/JWT/transitions/admin/menu metadata), frontend 147 (normalizers, AI tools, kitchen confirmation, waiter pings, catalogue), both wired into CI |
 | **Bill handoff** | “Get bill now” is **server-persisted**: `bill_status` on the table, a staff-only settle, and an auto-release engine that requires paid + no open ticket + no device heartbeat. An unpaid clear is refused with `409 BILL_UNPAID` and raises a manager alert |
 | **Voice surfaces** | Diner waiter, kitchen dock and manager console share one Gemini Live runtime (`lib/ai/live-session.ts`), one model and one transcript format; voices are per surface (Puck / Kore / Aoede) |
-| **Kitchen wake word** | “Aey Chhotu” gates the transcript: unaddressed turns drop their audio **and** their tool calls are refused `NOT_ADDRESSED`. Deny/86 park an action that only `confirm_action` can run after a spoken yes |
+| **Kitchen voice** | One tap opens the mic — no wake word and nothing typed; deny/86 park an action that only `confirm_action` can run after a spoken yes |
 | **Waiter ping** | “I’ll serve this” writes `serve_requested_at` (`sql/018`); the KDS shows a “Waiter coming” strip, watches `restaurant_tables`, and clears the flag on serve/deny |
 | **Manager insights + catalogue** | Seven admin insight reads plus `insights/menu` (ingredients, allergens, spice, diet tags) feed a read-only assistant with 8 tools and guest names |
 | **Business day** | `sql/017` keys every rollup on `((created_at AT TIME ZONE 'Asia/Kolkata') - interval '5 hours')::date`, so a 2 am order belongs to the night that just ended |
@@ -850,8 +850,8 @@ on typecheck · lint · build, with **211 unit tests**, **81 schema/RLS/hardenin
 | **CSP** | `Content-Security-Policy` not yet set on either app — needs nonce plumbing with Next inlines; the rest of the header set is in place |
 | **Secrets rotation** | `KDS_TOKEN_SECRET`/`STAFF_PIN`/`ADMIN_PIN` rotation is manual (restart with new values); no dual-secret overlap window |
 | **Stock entry UI** | `stock_quantity` / `low_stock_threshold` exist and the assistant reads them, but there is no screen yet to enter counts — so every dish reports `untracked` |
-| **Voice QA** | The wake gate and confirmation flow are pinned by tests at the data layer; real playback and mic capture need a Chromium browser with a mic tap, so rehearse on the demo machine |
-| **Transcription dependency** | The wake gate trusts Live `inputTranscription`. If it never arrives the turn is dropped (safe), which is the intended failure direction |
+| **Voice QA** | The tool layer and confirmation flow are pinned by tests; real playback and mic capture need a Chromium browser with a mic tap, so rehearse on the demo machine |
+| **Transcription dependency** | The written transcript is Live `inputTranscription`; if it never arrives the cook still hears the answer and the tool still runs, but the log line is missing |
 
 Full engineering detail lives in the [docs index](#-documentation-index) — especially
 [`docs/10-db-report.md`](docs/10-db-report.md) §4 and [`docs/9-integration-report.md`](docs/9-integration-report.md).
@@ -876,7 +876,7 @@ Full engineering detail lives in the [docs index](#-documentation-index) — esp
 | [`docs/12-codebase-guide.md`](docs/12-codebase-guide.md) | Every file, and why it exists |
 | [`docs/13-data-model.md`](docs/13-data-model.md) | Tables, tokens and payloads that move between those files |
 | [`docs/14-issue-audit.md`](docs/14-issue-audit.md) | Issue audit and the fixes behind them |
-| [`docs/15-voice-assistants-and-insights.md`](docs/15-voice-assistants-and-insights.md) | **The three Gemini Live surfaces** — diner waiter, kitchen voice, manager console; wake-word gating, chef tools, insight endpoints, the 05:00 business day and the waiter ping |
+| [`docs/15-voice-assistants-and-insights.md`](docs/15-voice-assistants-and-insights.md) | **The three Gemini Live surfaces** — diner waiter, kitchen voice, manager console; tap-to-talk, chef tools, insight endpoints, the 05:00 business day and the waiter ping |
 
 ---
 

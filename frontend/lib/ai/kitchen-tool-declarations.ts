@@ -1,14 +1,14 @@
 /* Function declarations for the kitchen's voice assistant.
 
    This surface WANTS writes (unlike the manager console, which is read-only):
-   the chef is standing and the whole point is moving tickets without touching
-   the screen. Safety comes from three places instead of from withholding
-   tools:
+   the chef is standing and the whole point is cooking without touching the
+   screen. Safety comes from three places instead of from withholding tools:
 
    1. The credential is a kitchen shift token bound by the api-client, never a
       model-supplied argument.
-   2. Nothing runs unless the turn passed the wake-word gate (see
-      live-session.ts) — ambient kitchen talk cannot move a ticket.
+   2. Every write goes through the same board calls the UI uses, so the SQL
+      state machine still decides what is legal (one lane at a time, Ready to
+      serve, explicit refusal reason).
    3. `deny_ticket` and marking a dish unavailable do not execute directly:
       they park an action that only `confirm_action` can run, after the chef
       said yes out loud.
@@ -57,7 +57,24 @@ export const KITCHEN_TOOL_DECLARATIONS: FunctionDeclaration[] = [
         enum: ["pending", "preparing", "ready"],
         description: "Only this lane. Leave empty for every active ticket.",
       },
+      table: table("Only this table's ticket, e.g. '4' or 'T04'. Leave empty for all."),
     },
+  ),
+  fn(
+    "get_menu_status",
+    "Look up the catalogue: whether a dish is available or 86, its category, allergens and ingredients, plus every dish currently marked 86. Use for 'is paneer tikka available', 'kya 86 hai', 'what's run out'.",
+    {
+      dish: table("The dish the cook named, e.g. 'masala dosa'. Leave empty to list the menu."),
+      only_unavailable: flag("true to list only the dishes that are 86."),
+    },
+  ),
+  fn(
+    "get_waiter_requests",
+    "Which READY tables have pinged a waiter ('I'll serve this' on the floor board), with how many minutes they have waited. Use for 'konsi table waiter maang rahi hai'.",
+  ),
+  fn(
+    "refresh_board",
+    "Re-read the kitchen board from the server. Use when the cook says the screen looks stale, or after a change that should have appeared.",
   ),
   fn(
     "move_ticket",

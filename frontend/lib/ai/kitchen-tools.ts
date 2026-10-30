@@ -5,6 +5,11 @@
    server surface. The kitchen shift token is bound by the api-client; it is
    never a tool argument.
 
+   VOICE-FIRST: every task the board offers has a tool here — read the lanes,
+   read one table's ticket, move a ticket, serve it, refuse it, 86 a dish or put
+   it back, see the 86 list, see who pinged for a waiter, re-read the board and
+   arm the shift. The cook's only touch is the tap that opens the mic.
+
    TWO GUARDRAILS LIVE HERE:
 
    1. Tickets are resolved by TABLE CODE, not by order id, and an ambiguous
@@ -161,13 +166,30 @@ function summarizeTicket(order: Order, nowMs: number) {
     ),
   ];
 
+  const specialRequests = [
+    ...new Set(
+      order.items
+        .map((item) => item.request_note)
+        .filter((note): note is string => Boolean(note && note.trim())),
+    ),
+  ];
+
+  const serveRequested = order.serve_requested_at ? Date.parse(order.serve_requested_at) : NaN;
+  const waiterWaitingMinutes = Number.isFinite(serveRequested)
+    ? Math.max(0, Math.round((nowMs - serveRequested) / 60_000))
+    : null;
+
   return {
     table: order.table_code,
     status: order.status,
     age_minutes: ageMinutes,
     order_id: order.id,
+    line_count: order.items.length,
+    total_quantity: order.items.reduce((total, item) => total + item.quantity, 0),
     items,
     allergy_notes: allergies,
+    ...(specialRequests.length > 0 ? { special_requests: specialRequests } : {}),
+    ...(waiterWaitingMinutes !== null ? { waiter_requested_minutes: waiterWaitingMinutes } : {}),
   };
 }
 
@@ -259,10 +281,24 @@ export function createKitchenToolset(runtime: KitchenRuntime): KitchenToolset {
 
       case "list_tickets": {
         const wanted = asString(args.status);
+        const reference = asString(args.table);
         const nowMs = clock();
-        const tickets = wanted
+        let tickets = wanted
           ? runtime.tickets.filter((ticket) => ticket.status === wanted)
           : runtime.tickets;
+
+        /* "read me table four" is the commonest kitchen question, so it is
+           resolved here rather than left to a model that cannot see the list. */
+        if (reference) {
+          tickets = tickets.filter((ticket) => sameTable(ticket.table_code, reference));
+          if (tickets.length === 0) {
+            return fail(
+              "TICKET_NOT_FOUND",
+              `No open ticket matches table "${reference}"${wanted ? ` in ${wanted}` : ""}.`,
+              { open_tables: openTables(), status: wanted ?? "all" },
+            );
+          }
+        }
 
         return ok(
           {
@@ -277,6 +313,105 @@ export function createKitchenToolset(runtime: KitchenRuntime): KitchenToolset {
           tickets.length > 0
             ? [{ kind: "info", label: `${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`, ok: true }]
             : [],
+        );
+      }
+
+      case "get_menu_status": {
+        const reference = asString(args.dish);
+        const onlyOff = asOptionalBoolean(args.only_unavailable);
+        const menu = runtime.menu;
+
+        if (menu.length === 0) {
+          return ok(
+            { count: 0, dishes: [], off_menu: [], off_menu_count: 0 },
+            [{ kind: "info", label: "The menu has not loaded yet", ok: false }],
+          );
+        }
+
+        let list = menu;
+        if (reference) {
+          const match = findDish(menu, reference);
+          if ("dish" in match) list = [match.dish];
+          else if (match.candidates.length > 0) list = match.candidates;
+          else {
+            return fail("DISH_NOT_FOUND", `No live dish matches "${reference}".`, {
+              dishes: menu.map((item) => item.name).slice(0, 30),
+            });
+          }
+        }
+
+        if (onlyOff === true) list = list.filter((item) => !item.is_available);
+
+        const offMenu = menu.filter((item) => !item.is_available).map((item) => item.name);
+
+        return ok(
+          {
+            count: list.length,
+            dishes: list.slice(0, 25).map((item) => ({
+              name: item.name,
+              available: item.is_available,
+              category: item.category,
+              ...(item.allergens && item.allergens.length > 0 ? { allergens: item.allergens } : {}),
+              ...(item.ingredients && item.ingredients.length > 0
+                ? { ingredients: item.ingredients }
+                : {}),
+            })),
+            off_menu_count: offMenu.length,
+            off_menu: offMenu.slice(0, 25),
+            note:
+              offMenu.length === 0
+                ? "Nothing is 86 right now."
+                : "available=false means the dish is 86. An empty allergen list means not recorded, never 'none'.",
+          },
+          [
+            {
+              kind: "info",
+              label:
+                onlyOff === true
+                  ? `${offMenu.length} dish${offMenu.length === 1 ? "" : "es"} 86`
+                  : `${list.length} dish${list.length === 1 ? "" : "es"} · ${offMenu.length} 86`,
+              ok: true,
+            },
+          ],
+        );
+      }
+
+      case "get_waiter_requests": {
+        const nowMs = clock();
+        const waiting = runtime.tickets.filter(
+          (ticket) => ticket.status === "ready" && Boolean(ticket.serve_requested_at),
+        );
+
+        return ok(
+          {
+            count: waiting.length,
+            requests: waiting.map((ticket) => summarizeTicket(ticket, nowMs)),
+            note:
+              waiting.length === 0
+                ? "No waiter has pinged. Say so; do not invent a ping."
+                : "A waiter is walking to these tables. Hand the plates over at the pass.",
+          },
+          waiting.length > 0
+            ? [
+                {
+                  kind: "info",
+                  label: `Waiter waiting: ${waiting.map((ticket) => ticket.table_code).join(", ")}`,
+                  ok: true,
+                },
+              ]
+            : [],
+        );
+      }
+
+      case "refresh_board": {
+        await runtime.refresh();
+        return ok(
+          {
+            refreshed: true,
+            note:
+              "The board was re-read from the server just now. Call get_board_overview or list_tickets for the numbers; do not guess them.",
+          },
+          [{ kind: "info", label: "Board re-read from the server", ok: true }],
         );
       }
 
@@ -511,6 +646,12 @@ export function createKitchenToolset(runtime: KitchenRuntime): KitchenToolset {
           return "Reading the board…";
         case "list_tickets":
           return "Reading the tickets…";
+        case "get_menu_status":
+          return "Checking the menu…";
+        case "get_waiter_requests":
+          return "Checking the waiter pings…";
+        case "refresh_board":
+          return "Re-reading the board…";
         case "move_ticket":
           return `Moving ${asString(args.table) ?? "the ticket"}…`;
         case "serve_ticket":

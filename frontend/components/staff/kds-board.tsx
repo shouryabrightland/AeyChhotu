@@ -1,7 +1,7 @@
 "use client";
 
 import { AnimatePresence } from "motion/react";
-import { BellRing, Check, ChefHat, EyeOff, Flame, Lock, RefreshCw, Sparkles, Volume2, VolumeX } from "lucide-react";
+import { BellRing, Check, ChefHat, EyeOff, Flame, Lock, RefreshCw, Volume2, VolumeX } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KdsCard } from "@/components/staff/kds-card";
 import { KitchenVoice } from "@/components/staff/kitchen-voice";
@@ -131,9 +131,6 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
   const { toast } = useToast();
   const [audioArmed, setAudioArmed] = useState(false);
   const [availabilityOpen, setAvailabilityOpen] = useState(false);
-  /* Opens the voice dock from the header — the assistant is not just a
-     floating pill a cook has to discover mid-service. */
-  const [voiceRequest, setVoiceRequest] = useState(0);
 
   /* Below `lg` the three-column Kanban becomes ONE lane plus a segmented
      control. Stacking three full-height lanes meant a cook scrolled past two
@@ -293,15 +290,6 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
         }
         actions={
           <>
-            <Button
-              variant="soft"
-              size="sm"
-              onClick={() => setVoiceRequest((current) => current + 1)}
-              leftIcon={<Sparkles className="size-4" aria-hidden />}
-            >
-              Chhotu
-            </Button>
-
             {/* Icon carries the state: a crossed speaker while the board is
                 silent, ember until it is armed. The label explains it. */}
             <IconButton
@@ -541,7 +529,6 @@ export function KdsBoard({ onLock }: KdsBoardProps) {
         onDeny={deny}
         onSetAvailability={catalog.setAvailability}
         onStartShift={handleStartShift}
-        openRequest={voiceRequest}
       />
 
       <MenuAvailabilityDrawer

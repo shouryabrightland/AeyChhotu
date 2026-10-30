@@ -29,7 +29,6 @@ import {
 } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
 import type { ChhotuAction, ToolExecution } from "./types";
-import { containsWakePhrase, type WakePhrase } from "./wake-word";
 
 /** The only model this app talks to: Gemini 3.8 Live. It is a native-audio
  *  Live model, so the same session takes speech and text.
@@ -55,20 +54,6 @@ const OUTPUT_SAMPLE_RATE = 24_000;
  *  unsupported model or a blocked socket leaves `connect()` pending forever,
  *  which looked to the guest like a sheet stuck on "Opening the voice line". */
 const CONNECT_TIMEOUT_MS = 15_000;
-
-/** How long a model turn may sit unaddressed while its transcript is still
- *  arriving. Passing the gate is instant (the transcript contains the wake
- *  word); this only bounds how long a non-addressed turn stays buffered before
- *  it is dropped. Generous on purpose: Live's input transcript can land a
- *  couple of seconds after the audio, and a turn dropped early was a spoken
- *  answer nobody heard. */
-const WAKE_GATE_GRACE_MS = 8_000;
-
-/** How long a tool call waits for the turn's transcript before it is refused.
- *  The model decides to call a tool before the transcription model has
- *  finished writing the same sentence down. Without this wait every spoken
- *  command lost its tool call to "they did not say the wake phrase". */
-const WAKE_TOOL_WAIT_MS = 2_500;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -108,9 +93,6 @@ export interface ChhotuLiveCallbacks {
   /** 0–1 loudness of the guest's microphone, ~12 times a second, so the sheet
       can show that the mic is actually hearing something. */
   onMicLevel?: (level: number) => void;
-  /** The wake phrase was actually heard (kitchen only). Lets the UI flash
-      "Aey Chhotu" without exposing every stray kitchen word. */
-  onWake?: () => void;
   /** A tool wrote to the server; the caller should refresh live state. */
   onMutated?: () => void;
   onError?: (message: string) => void;
@@ -129,10 +111,6 @@ export interface ChhotuLiveOptions {
   describe?: (name: string, args: Record<string, unknown>) => string;
   /** Prebuilt voice name (Puck, Aoede, Kore…). Chosen per surface. */
   voiceName: string;
-  /** KITCHEN ONLY. When set, the session stays silent until this phrase is
-      heard, and no tool runs for a turn that did not contain it. The mic keeps
-      streaming (a cook has no free hands); the gate is on the transcript. */
-  wakePhrase?: WakePhrase;
   callbacks?: ChhotuLiveCallbacks;
 }
 
@@ -194,18 +172,6 @@ export class ChhotuLiveSession {
   private closed = false;
   private lastLevelAt = 0;
 
-  /* Wake-word gate state, reset at every turn boundary. `unknown` means the
-     model has started answering but the transcript has not yet proved the
-     turn was addressed — its audio is held, never played. */
-  private turnUserText = "";
-  private gate: "unknown" | "pass" | "block" = "unknown";
-  /** Set by an explicit tap on the kitchen's mic: that tap IS the address, so
-   *  the next utterance needs no wake phrase. Consumed by one turn. */
-  private tapped = false;
-  private heldAudio: string[] = [];
-  private heldText = "";
-  private gateTimer: ReturnType<typeof setTimeout> | null = null;
-
   constructor(options: ChhotuLiveOptions) {
     this.options = options;
   }
@@ -265,13 +231,6 @@ export class ChhotuLiveSession {
     const trimmed = text.trim();
     if (!trimmed || !this.session) return;
 
-    // Typing is a deliberate act, so it is never gated by the wake word.
-    this.clearGateTimer();
-    this.turnUserText = "";
-    this.heldAudio = [];
-    this.heldText = "";
-    this.gate = "pass";
-
     this.emitPhase("thinking");
     this.session.sendClientContent({
       turns: [{ role: "user", parts: [{ text: trimmed }] }],
@@ -300,17 +259,6 @@ export class ChhotuLiveSession {
     if (this.outputContext.state !== "running") {
       void this.outputContext.resume().catch(() => undefined);
     }
-  }
-
-  /** The cook tapped the mic instead of saying the phrase.
-
-      Tapping is a deliberate address — an alternative to the wake word, not a
-      way around it — so exactly ONE following turn is allowed through. It is
-      consumed by that turn and never persists, which keeps ambient kitchen
-      talk unable to move a ticket. */
-  addressNextTurn(): void {
-    this.tapped = true;
-    if (this.gate === "unknown") this.gate = "pass";
   }
 
   /** Start streaming the microphone. Call from a user gesture (permission). */
@@ -436,65 +384,31 @@ export class ChhotuLiveSession {
 
   private async handleMessage(message: LiveServerMessage): Promise<void> {
     const { callbacks } = this.options;
-    const wakeEnabled = Boolean(this.options.wakePhrase);
     const content = message.serverContent;
 
     if (content) {
       const heard = content.inputTranscription?.text;
+      if (heard) callbacks?.onUserSpeech?.(heard);
 
-      if (heard) {
-        this.turnUserText += heard;
-
-        if (!wakeEnabled || this.gate === "pass") {
-          callbacks?.onUserSpeech?.(heard);
-        } else if (this.heardWakeWord()) {
-          // Nothing before the phrase was shown, so the whole turn is shown
-          // at once rather than a fragment of it.
-          this.passGate(this.turnUserText);
-        }
-      }
-
-      if (content.interrupted) {
-        this.stopPlayback();
-        this.endGateTurn();
-      }
+      // The cook spoke over the answer: stop the queued audio immediately.
+      if (content.interrupted) this.stopPlayback();
 
       const spoken = content.outputTranscription?.text;
       if (spoken) {
-        if (!wakeEnabled || this.gate === "pass") {
-          this.emitPhase("speaking");
-          callbacks?.onAssistantSpeech?.(spoken);
-        } else if (this.gate === "unknown") {
-          this.heldText += spoken;
-        }
+        this.emitPhase("speaking");
+        callbacks?.onAssistantSpeech?.(spoken);
       }
 
       for (const part of content.modelTurn?.parts ?? []) {
         const audio = part.inlineData?.data;
         if (!audio) continue;
-
-        if (!wakeEnabled || this.gate === "pass") {
-          this.emitPhase("speaking");
-          this.play(audio);
-        } else if (this.gate === "unknown") {
-          // Held, not played: a turn nobody asked for must not be heard.
-          this.heldAudio.push(audio);
-          this.armGateTimeout();
-        }
+        this.emitPhase("speaking");
+        this.play(audio);
       }
 
       if (content.turnComplete) {
-        if (wakeEnabled && this.gate === "unknown") {
-          if (this.heardWakeWord()) this.passGate(this.turnUserText);
-          else this.gate = "block";
-        }
-
-        if (!wakeEnabled || this.gate !== "block") {
-          this.emitPhase("ready");
-          callbacks?.onTurnComplete?.();
-        }
-
-        this.endGateTurn();
+        this.emitPhase("ready");
+        callbacks?.onTurnComplete?.();
       }
     }
 
@@ -508,38 +422,8 @@ export class ChhotuLiveSession {
     const collected: ChhotuAction[] = [];
     let mutated = false;
 
-    /* Wake gate: give the turn's transcript a moment to arrive before judging
-       it. The model calls tools before the transcription model has finished
-       writing down the same sentence, so an instant check refused almost every
-       real command. The wait only decides WHEN to look — a turn that never
-       contains the phrase is still refused below. */
-    if (this.options.wakePhrase) await this.settleGate(WAKE_TOOL_WAIT_MS);
-
     for (const call of calls) {
       const name = call.name ?? "";
-
-      /* THE SAFETY PROPERTY OF THE KITCHEN ASSISTANT: a turn that did not
-         contain the wake phrase may not touch anything, even though the model
-         decided to call a tool. Ambient kitchen talk can move no ticket. */
-      if (this.options.wakePhrase && this.gate !== "pass") {
-        this.session?.sendToolResponse({
-          functionResponses: [
-            {
-              ...(call.id ? { id: call.id } : {}),
-              name,
-              response: {
-                ok: false,
-                error: {
-                  code: "NOT_ADDRESSED",
-                  message:
-                    "They did not say the wake phrase, so nothing was changed. Ask them to start with Aey Chhotu.",
-                },
-              },
-            },
-          ],
-        });
-        continue;
-      }
 
       if (describe) callbacks?.onActivity?.(describe(name, call.args ?? {}));
 
@@ -562,89 +446,6 @@ export class ChhotuLiveSession {
     callbacks?.onActivity?.(null);
     if (collected.length > 0) callbacks?.onActions?.(collected);
     if (mutated) callbacks?.onMutated?.();
-  }
-
-  private get wakeEnabled(): boolean {
-    return Boolean(this.options.wakePhrase?.phrase);
-  }
-
-  /** Wait (briefly) for the turn's transcript, then pass the gate if the
-   *  phrase is in it. A blocked turn stays blocked: nothing is executed. */
-  private async settleGate(maxMs: number): Promise<void> {
-    if (this.gate === "pass") return;
-
-    const deadline = Date.now() + maxMs;
-    while (this.gate === "unknown" && Date.now() < deadline) {
-      if (this.heardWakeWord()) {
-        this.passGate(this.turnUserText);
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-
-    if (this.gate === "unknown" && this.heardWakeWord()) {
-      this.passGate(this.turnUserText);
-    }
-  }
-
-  /** Did this turn contain the kitchen's wake phrase? */
-  private heardWakeWord(): boolean {
-    const wake = this.options.wakePhrase;
-    if (!wake) return false;
-    return containsWakePhrase(this.turnUserText, wake);
-  }
-
-  /** The turn was addressed: release everything held for it. */
-  private passGate(userText?: string): void {
-    if (this.gate === "pass") return;
-    this.gate = "pass";
-    this.clearGateTimer();
-
-    const { callbacks } = this.options;
-    callbacks?.onWake?.();
-    if (userText) callbacks?.onUserSpeech?.(userText);
-
-    if (this.heldText) {
-      const text = this.heldText;
-      this.heldText = "";
-      this.emitPhase("speaking");
-      callbacks?.onAssistantSpeech?.(text);
-    }
-
-    if (this.heldAudio.length > 0) {
-      const chunks = this.heldAudio;
-      this.heldAudio = [];
-      this.emitPhase("speaking");
-      for (const chunk of chunks) this.play(chunk);
-    }
-  }
-
-  /** Bound how long an unproven turn may keep audio buffered. */
-  private armGateTimeout(): void {
-    if (this.gateTimer !== null) return;
-    this.gateTimer = setTimeout(() => {
-      this.gateTimer = null;
-      if (this.gate !== "unknown") return;
-      this.heldAudio = [];
-      this.heldText = "";
-      this.gate = "block";
-    }, WAKE_GATE_GRACE_MS);
-  }
-
-  private clearGateTimer(): void {
-    if (this.gateTimer === null) return;
-    clearTimeout(this.gateTimer);
-    this.gateTimer = null;
-  }
-
-  private endGateTurn(): void {
-    this.clearGateTimer();
-    this.turnUserText = "";
-    this.heldAudio = [];
-    this.heldText = "";
-    // A tap addresses the next turn only; after that the gate re-arms.
-    this.gate = this.tapped ? "pass" : "unknown";
-    this.tapped = false;
   }
 
   /** Queue one PCM16 chunk so consecutive chunks play back-to-back. */

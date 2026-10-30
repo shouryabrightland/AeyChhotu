@@ -1194,16 +1194,17 @@ function KitchenVoiceScene() {
               <i />
               <i />
             </span>
-            Shift armed · always listening
+            Mic open · tap once, then talk
           </span>
           <div className={styles.transcript}>
-            <span className={styles.bubbleUser}>“Aey Chhotu, table four ready.”</span>
-            <span className={styles.bubbleAi}>T04 ready.</span>
-            <span className={styles.bubbleUser}>“table nine is ready”</span>
+            <span className={styles.bubbleUser}>“table four ready, aur T09 serve kar do”</span>
+            <span className={styles.bubbleAi}>T04 ready. T09 served.</span>
+            <span className={styles.bubbleUser}>“paneer tikka 86 karo”</span>
+            <span className={styles.bubbleAi}>Confirm karo — paneer tikka 86?</span>
           </div>
-          <span className={styles.refusedChip}>No wake word · tool call refused</span>
+          <span className={styles.refusedChip}>Spoken yes · nothing changes on “nahi”</span>
           <span className={styles.appNote}>
-            The model heard it. The app refused to act on it. Zero taps, zero accidents.
+            Two jobs in one breath. The destructive one still waits for a yes.
           </span>
         </div>
 
@@ -1504,7 +1505,7 @@ function slides(qrMarkup: string | null): Slide[] {
       kicker: "WOW 02 · THE KITCHEN",
       title: "The chef never touches the screen.",
       subtitle:
-        "“Aey Chhotu” is the only way in. Background kitchen talk cannot move a ticket.",
+        "One tap opens the mic. Two jobs in one breath, and nothing destructive without a spoken yes.",
       accent: "#a31b10",
       scene: <KitchenVoiceScene />,
     },

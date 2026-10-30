@@ -5,9 +5,14 @@ import { cn } from "@/lib/utils";
 
    The brand art lives in logo.png as an opaque square on its own dark ground.
    A profile picture must not be a sticker, so this crops the same portrait
-   into a circle and sets it in a speech bubble — same character on the diner
-   sheet, the manager console and the kitchen dock, so all three assistants
-   read as one waiter rather than three products. */
+   into a circle — same character on the diner sheet, the manager console and
+   the kitchen dock, so all three assistants read as one waiter rather than
+   three products.
+
+   MINIMAL ON PURPOSE: one circle, one portrait, one hairline ring. Earlier
+   versions layered a cream backing, an inset margin and a bubble tail, and at
+   28px those extra shapes stopped reading as a bubble and started reading as
+   a stray pale wedge / rotated element beside the face. */
 
 const sizes = {
   sm: "size-7",
@@ -24,22 +29,20 @@ export function ChhotuAvatar({ size = "md", className }: ChhotuAvatarProps) {
   return (
     <span
       aria-hidden
-      className={cn("relative inline-flex shrink-0 rounded-pill", sizes[size], className)}
+      className={cn(
+        "relative inline-flex shrink-0 overflow-hidden rounded-pill ring-1 ring-ember/35",
+        sizes[size],
+        className,
+      )}
     >
-      {/* One thin ember ring behind the portrait — no tail: a rotated square
-          poking out of a circular avatar reads as a stray element on screen. */}
-      <span className="absolute inset-0 rounded-pill bg-ember-soft ring-1 ring-ember/25" />
-
-      <span className="relative m-[2px] overflow-hidden rounded-pill">
-        <Image
-          src="/logo.png"
-          alt=""
-          width={1254}
-          height={1254}
-          sizes="48px"
-          className="size-full object-cover object-[50%_36%]"
-        />
-      </span>
+      <Image
+        src="/logo.png"
+        alt=""
+        width={1254}
+        height={1254}
+        sizes="48px"
+        className="size-full object-cover object-[50%_38%]"
+      />
     </span>
   );
 }

@@ -11,7 +11,6 @@ import { describe, it } from "node:test";
    until `confirm_action` is called after the chef said yes. */
 
 import { createKitchenToolset } from "../lib/ai/kitchen-tools.ts";
-import { containsWakePhrase, KITCHEN_WAKE } from "../lib/ai/wake-word.ts";
 
 const NOW = Date.parse("2026-10-30T10:00:00.000Z");
 
@@ -67,7 +66,9 @@ function makeRuntime({ tickets = [], menu = [] } = {}) {
     tickets,
     menu,
     now: () => NOW,
-    refresh: async () => {},
+    refresh: async () => {
+      calls.push(["refresh"]);
+    },
     moveTicket: async (order, next) => {
       calls.push(["move", order.table_code, next]);
       return { ok: true };
@@ -281,17 +282,102 @@ describe("shift", () => {
   });
 });
 
-describe("wake word", () => {
-  it("accepts the phrase and its recognition variants", () => {
-    assert.equal(containsWakePhrase("Aey Chhotu, table four ready", KITCHEN_WAKE), true);
-    assert.equal(containsWakePhrase("ay chhotu t04 ready kar do", KITCHEN_WAKE), true);
-    assert.equal(containsWakePhrase("hey, chhotu—serve T04", KITCHEN_WAKE), true);
-    assert.equal(containsWakePhrase("ऐ छोटू, पांच नंबर तैयार", KITCHEN_WAKE), true);
+describe("reading one table", () => {
+  it("filters the list to the table the cook said", async () => {
+    const { toolset } = makeRuntime({
+      tickets: [
+        ticket({ id: "a", table_code: "T04" }),
+        ticket({ id: "b", table_code: "T09", status: "preparing" }),
+      ],
+    });
+
+    const result = await toolset.execute("list_tickets", { table: "table 4" });
+    assert.equal(result.response.ok, true);
+    assert.equal(result.response.data.count, 1);
+    assert.equal(result.response.data.tickets[0].table, "T04");
+    assert.equal(result.response.data.tickets[0].line_count, 1);
+    assert.equal(result.response.data.tickets[0].total_quantity, 2);
   });
 
-  it("ignores ordinary kitchen talk", () => {
-    assert.equal(containsWakePhrase("table four is ready", KITCHEN_WAKE), false);
-    assert.equal(containsWakePhrase("paneer khatam hai", KITCHEN_WAKE), false);
-    assert.equal(containsWakePhrase("", KITCHEN_WAKE), false);
+  it("says which tables are open when the table has no ticket", async () => {
+    const { toolset } = makeRuntime({ tickets: [ticket({ table_code: "T09" })] });
+
+    const result = await toolset.execute("list_tickets", { table: "12" });
+    assert.equal(result.response.ok, false);
+    assert.equal(result.response.error.code, "TICKET_NOT_FOUND");
+    assert.deepEqual(result.response.error.open_tables, ["T09"]);
+  });
+});
+
+describe("menu status", () => {
+  it("answers whether a named dish is available", async () => {
+    const { toolset } = makeRuntime({
+      menu: [dish(), dish({ id: "d2", name: "Paneer Tikka", is_available: false })],
+    });
+
+    const result = await toolset.execute("get_menu_status", { dish: "masala dosa" });
+    assert.equal(result.response.ok, true);
+    assert.equal(result.response.data.count, 1);
+    assert.equal(result.response.data.dishes[0].available, true);
+    assert.deepEqual(result.response.data.off_menu, ["Paneer Tikka"]);
+  });
+
+  it("lists only the 86 dishes when asked what is off", async () => {
+    const { toolset } = makeRuntime({
+      menu: [dish(), dish({ id: "d2", name: "Paneer Tikka", is_available: false })],
+    });
+
+    const result = await toolset.execute("get_menu_status", { only_unavailable: true });
+    assert.equal(result.response.data.count, 1);
+    assert.deepEqual(
+      result.response.data.dishes.map((item) => item.name),
+      ["Paneer Tikka"],
+    );
+  });
+
+  it("says nothing is 86 on a full menu", async () => {
+    const { toolset } = makeRuntime({ menu: [dish()] });
+    const result = await toolset.execute("get_menu_status", { only_unavailable: true });
+    assert.equal(result.response.data.count, 0);
+    assert.match(result.response.data.note, /86/i);
+  });
+
+  it("refuses to invent a dish", async () => {
+    const { toolset } = makeRuntime({ menu: [dish()] });
+    const result = await toolset.execute("get_menu_status", { dish: "sushi" });
+    assert.equal(result.response.ok, false);
+    assert.equal(result.response.error.code, "DISH_NOT_FOUND");
+  });
+});
+
+describe("waiter pings", () => {
+  it("reports who is waiting and for how long", async () => {
+    const { toolset } = makeRuntime({
+      tickets: [
+        ticket({ status: "ready", serve_requested_at: "2026-10-30T09:57:00.000Z" }),
+        ticket({ id: "b", table_code: "T07", status: "ready" }),
+      ],
+    });
+
+    const result = await toolset.execute("get_waiter_requests", {});
+    assert.equal(result.response.data.count, 1);
+    assert.equal(result.response.data.requests[0].table, "T04");
+    assert.equal(result.response.data.requests[0].waiter_requested_minutes, 3);
+  });
+
+  it("says nobody has pinged instead of inventing one", async () => {
+    const { toolset } = makeRuntime({ tickets: [ticket({ status: "ready" })] });
+    const result = await toolset.execute("get_waiter_requests", {});
+    assert.equal(result.response.data.count, 0);
+    assert.match(result.response.data.note, /no waiter/i);
+  });
+});
+
+describe("refreshing", () => {
+  it("re-reads the board through the runtime", async () => {
+    const { calls, toolset } = makeRuntime();
+    const result = await toolset.execute("refresh_board", {});
+    assert.equal(result.response.ok, true);
+    assert.deepEqual(calls, [["refresh"]]);
   });
 });
